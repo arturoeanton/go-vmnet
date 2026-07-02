@@ -1115,6 +1115,99 @@ go test ./ -run TestTryCatch -v
 go test ./internal/il/... -run '^$' -fuzz '^FuzzReadExceptionHandlers$' -fuzztime=30s
 ```
 
+### Fase 3.11 — `foreach`/enumeradores + wins baratos (re-priorizada con datos)
+
+El plan original para esta fase era "DateTime, Span/ReadOnlySpan/Memory". Antes de escribir
+código se corrió el mismo probe de findings-por-target de siempre (7 paquetes + Jint) — y
+`System.IDisposable::Dispose`, `IEnumerator`1::get_Current`, `IEnumerable`1::GetEnumerator` y
+`EqualityComparer`1` resultaron mucho más anchos (7-8/8 paquetes) que DateTime/Span (2-5/8,
+aunque con más volumen absoluto). La causa: **`foreach` sobre `List<T>`/`Dictionary<K,V>` no
+funcionaba en absoluto** — Fase 2 solo daba acceso indexado (`xs[i]`/`xs.Count`), nunca se agregó
+el patrón `GetEnumerator`/`MoveNext`/`get_Current`/`Dispose` que el compilador de C# genera para
+todo `foreach`. Se re-priorizó la fase para cerrar esto primero — mismo principio de "medir antes
+de adivinar" que ya reordenó Fase 3.5 y Fase 3.6. DateTime/Span/Memory quedan documentados como
+Fase 3.12 (ver abajo), no descartados.
+
+**Tareas**
+
+- [x] `List<T>.Enumerator`/`Dictionary<K,V>.Enumerator` como value types sintéticos reales
+      (mismo patrón que `Nullable`1` de Fase 3.7) — confirmado contra IL real antes de escribir
+      el native: `List<T>.GetEnumerator()` devuelve un **struct**, no una referencia, así que el
+      sitio de llamada usa `ldloca`+`call` (no `callvirt`) para `MoveNext`/`get_Current`,
+      exactamente el mecanismo de receptor-por-puntero que ya existía desde Fase 3.7.
+- [x] `System.Collections.Generic.KeyValuePair`2` como value type — lo que produce
+      `Dictionary<K,V>.Enumerator.Current`. El enumerador de diccionario saca una foto de las
+      claves al momento de `GetEnumerator()` (un array propio, Fase 3.5) en vez de iterar el
+      `map[string]Value` de Go en vivo — el orden de iteración de un map de Go es aleatorio por
+      corrida, lo que haría el `MoveNext` no determinístico incluso *dentro* de una sola
+      enumeración, no solo entre corridas.
+- [x] `System.IDisposable::Dispose` — no-op genérico. Cubre tanto el `Dispose()` que `foreach`
+      compila siempre dentro de un `finally` (haya o no algo que liberar) como el uso explícito
+      de `using`.
+- [x] `System.Collections.Generic.EqualityComparer`1::get_Default`/`Equals`/`GetHashCode` —
+      reutiliza literalmente `valuesEqual`/`valueHash` de `system_object.go` (Fase 3.7), la misma
+      igualdad/hash por default que la CLR usa a falta de un `IEquatable<T>` propio.
+- [x] `System.Math::Min`/`Max`, `System.String::Join` (incluida la sobrecarga
+      `IEnumerable<string>` — el sitio de llamada pasa el `List<T>` directo, no un array, cuando
+      el argumento es un `List<T>`) — wins baratos de la lista original.
+- [x] **Bug real encontrado y arreglado — colisión de nombres de tipos anidados**: antes de
+      registrar el enumerador de `List<T>`, se verificó contra IL real qué nombre completo
+      resuelve `ir.Build` para `List`1.Enumerator::MoveNext` — y resultó ser literalmente
+      `"Enumerator"`, sin ningún prefijo, porque `resolveTypeToken`/`resolveMemberRefClassName`
+      nunca habían necesitado caminar `ResolutionScope` para un `TypeRef` anidado (spec
+      §II.22.38: un tipo anidado no tiene su propio namespace, lo hereda del que lo contiene).
+      Registrar un native bajo ese nombre sin calificar habría **secuestrado silenciosamente**
+      cualquier otro tipo llamado `Enumerator` en cualquier ensamblado cargado — Jint, por
+      ejemplo, tiene los suyos propios (confirmado en el probe de esta misma fase). Se agregó
+      `qualifyTypeRefName` (duplicado en `internal/ir` y en el paquete raíz, mismo patrón que
+      otros resolvers ya duplicados) que arma `Tipo1+Tipo2` igual que `Type.FullName` real de
+      .NET, encontrado y arreglado **antes** de que causara daño, no después.
+
+**Fixtures y tests**
+
+- [x] `Foreach.cs` / `TestForeach` — `foreach` sobre `List<int>`, `foreach` sobre
+      `Dictionary<string,int>` (`kv.Value`), `EqualityComparer<int>.Default.Equals`,
+      `Math.Min`/`Max`, `String.Join` sobre un `List<string>`
+
+### Lo que se dejó explícitamente afuera de esta fase
+
+```txt
+- `foreach` sobre una colección tipada como interfaz (`IEnumerable<T> e = ...; foreach (x in
+  e)`), en vez del tipo concreto (`List<T> xs = ...; foreach (x in xs)`): el primero compila
+  contra IEnumerable<T>::GetEnumerator directamente, que necesita despacho virtual real (Fase
+  3.8 solo cubre isinst/castclass, no despacho de método) — el patrón dominante real es el
+  segundo (colección local de tipo concreto), que sí funciona.
+- Colisión de nombres de tipos anidados para TypeDef propios del plugin (una clase anidada
+  DECLARADA en el propio ensamblado, vía la tabla NestedClass): el fix de esta fase solo cubre
+  TypeRef anidado (tipos BCL foráneos, que es lo que necesitaban los enumeradores). Riesgo
+  preexistente, no empeorado, documentado.
+- LINQ (`System.Linq.Enumerable` — Where/Select/Any/Count/...): ahora que hay delegates
+  (Fase 3.9) y enumeradores reales (esta fase), sería viable, pero es una superficie grande por
+  sí sola — candidato natural para una fase futura, no once-off.
+```
+
+### Re-certificación contra los mismos 8 targets (7 paquetes + Jint)
+
+| Paquete | % limpio Fase 3.10 | % limpio Fase 3.11 |
+|---|---|---|
+| `Ardalis.GuardClauses@5.0.0` | 90.5% | 90.9% |
+| `FluentValidation@11.9.2` | 77.3% | 78.9% |
+| `System.Text.Json@8.0.5` | 69.7% | 71.1% |
+| `Newtonsoft.Json@13.0.3` | 64.3% | 65.7% |
+| `Semver@2.3.0` | 76.8% | 78.0% |
+| `SimpleBase@4.0.0` | 48.4% | 49.2% |
+| `Humanizer.Core@2.14.1` | 47.0% | 48.0% |
+| **Promedio (7 paquetes)** | **67.7%** | **68.8%** |
+| `Jint@3.1.3` | 78.1% | 80.6% |
+| **Promedio (7 paquetes + Jint)** | **69.0%** | **70.3%** |
+
+### Cómo verificar Fase 3.11
+
+```bash
+go test ./... -race -count=3
+go test ./ -run TestForeach -v
+```
+
 ---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")

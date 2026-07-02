@@ -313,6 +313,29 @@ func (asm *Assembly) isValueType(typeDef metadata.TypeDefRow) (bool, error) {
 	return name == "System.ValueType" || name == "System.Enum", nil
 }
 
+// qualifyTypeRefName resolves a TypeRef's full name, walking ResolutionScope
+// when it points to another TypeRef (a nested type, e.g. List<T>'s own
+// Enumerator) instead of a Module/ModuleRef/AssemblyRef — spec §II.22.38.
+// A nested type's own Namespace column is always empty, so without this a
+// nested type's name collapses to its bare Name, indistinguishable from
+// any other same-named nested type anywhere. Narrower duplicate of
+// internal/ir/builder.go's qualifyTypeRefName (unexported there, and this
+// package can't import an internal/ package's unexported helpers).
+func qualifyTypeRefName(md *metadata.Metadata, row metadata.TypeRefRow) (string, error) {
+	if row.ResolutionScope.Table() != metadata.TableTypeRef {
+		return qualify(row.Namespace, row.Name), nil
+	}
+	enclosing, err := md.TypeRef(row.ResolutionScope.RID())
+	if err != nil {
+		return "", err
+	}
+	enclosingName, err := qualifyTypeRefName(md, enclosing)
+	if err != nil {
+		return "", err
+	}
+	return enclosingName + "+" + row.Name, nil
+}
+
 // resolveTypeTokenName resolves a TypeDef/TypeRef/TypeSpec token to
 // "Namespace.Name" — a TypeSpec (a generic interface instantiation like
 // IEnumerable<T>/IComparable<T>, extremely common in a class's
@@ -327,7 +350,7 @@ func resolveTypeTokenName(md *metadata.Metadata, tok metadata.Token) (string, er
 		if err != nil {
 			return "", err
 		}
-		return qualify(row.Namespace, row.Name), nil
+		return qualifyTypeRefName(md, row)
 	case metadata.TableTypeDef:
 		row, err := md.TypeDef(tok.RID())
 		if err != nil {

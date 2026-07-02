@@ -608,6 +608,34 @@ func resolveCallTarget(md *metadata.Metadata, token uint32) (fullName string, ha
 	}
 }
 
+// qualifyTypeRefName resolves a TypeRef's full name, walking ResolutionScope
+// when it points to another TypeRef instead of a Module/ModuleRef/
+// AssemblyRef — spec §II.22.38: that's how a *nested* type (List`1's own
+// Enumerator, say) is encoded, and a nested type's own Namespace column is
+// always empty (it inherits context from its enclosing type instead). Left
+// unresolved, every nested type's name collapses to its bare Name with no
+// qualification at all — "Enumerator", indistinguishable from any other
+// type named Enumerator nested anywhere in any loaded assembly. Found
+// while wiring up List<T>/Dictionary<T> foreach support (Fase 3.11):
+// registering a bcl native under that bare, colliding name would have
+// silently hijacked an unrelated type's real (interpreted) method of the
+// same name — the "+" separator matches .NET's own Type.FullName
+// convention for nested types.
+func qualifyTypeRefName(md *metadata.Metadata, row metadata.TypeRefRow) (string, error) {
+	if row.ResolutionScope.Table() != metadata.TableTypeRef {
+		return Qualify(row.Namespace, row.Name), nil
+	}
+	enclosing, err := md.TypeRef(row.ResolutionScope.RID())
+	if err != nil {
+		return "", err
+	}
+	enclosingName, err := qualifyTypeRefName(md, enclosing)
+	if err != nil {
+		return "", err
+	}
+	return enclosingName + "+" + row.Name, nil
+}
+
 func resolveMemberRefClassName(md *metadata.Metadata, class metadata.Token) (string, error) {
 	switch class.Table() {
 	case metadata.TableTypeRef:
@@ -615,7 +643,7 @@ func resolveMemberRefClassName(md *metadata.Metadata, class metadata.Token) (str
 		if err != nil {
 			return "", err
 		}
-		return Qualify(row.Namespace, row.Name), nil
+		return qualifyTypeRefName(md, row)
 	case metadata.TableTypeDef:
 		row, err := md.TypeDef(class.RID())
 		if err != nil {
@@ -683,7 +711,7 @@ func resolveTypeToken(md *metadata.Metadata, tok metadata.Token) (string, error)
 		if err != nil {
 			return "", err
 		}
-		return Qualify(row.Namespace, row.Name), nil
+		return qualifyTypeRefName(md, row)
 	case metadata.TableTypeDef:
 		row, err := md.TypeDef(tok.RID())
 		if err != nil {

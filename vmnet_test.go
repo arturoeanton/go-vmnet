@@ -385,6 +385,76 @@ func TestStructs(t *testing.T) {
 	})
 }
 
+// TestForeach exercises `foreach` over List<T>/Dictionary<K,V> (Fase
+// 3.11): the compiler-generated struct enumerator (GetEnumerator/
+// MoveNext/get_Current/Dispose, confirmed against real IL — List<T>'s
+// Enumerator is a value type, so this also exercises struct receivers
+// through a managed pointer once more), Dictionary iteration yielding
+// KeyValuePair<K,V>, EqualityComparer<T>.Default reusing Fase 3.7's
+// value/reference equality, Math.Min/Max, and String.Join over a List<T>
+// argument (the IEnumerable<string> overload, not the array one).
+func TestForeach(t *testing.T) {
+	asm := loadFixture(t)
+
+	t.Run("List<T>", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.ForeachTest", "SumList")
+		if err != nil {
+			t.Fatalf("SumList() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 6 {
+			t.Errorf("SumList() = %d, want 6", got)
+		}
+	})
+
+	t.Run("Dictionary<K,V>", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.ForeachTest", "SumDictionaryValues")
+		if err != nil {
+			t.Fatalf("SumDictionaryValues() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 60 {
+			t.Errorf("SumDictionaryValues() = %d, want 60", got)
+		}
+	})
+
+	t.Run("EqualityComparer<T>.Default", func(t *testing.T) {
+		eq, err := asm.Call("Vmnet.Fixtures.ForeachTest", "EqualityComparerDefaultEquals", Int32(5), Int32(5))
+		if err != nil {
+			t.Fatalf("EqualityComparerDefaultEquals(5, 5) error = %v", err)
+		}
+		if got := eq.Native().(int32); got == 0 {
+			t.Errorf("EqualityComparerDefaultEquals(5, 5) = %d, want nonzero", got)
+		}
+
+		neq, err := asm.Call("Vmnet.Fixtures.ForeachTest", "EqualityComparerDefaultEquals", Int32(5), Int32(6))
+		if err != nil {
+			t.Fatalf("EqualityComparerDefaultEquals(5, 6) error = %v", err)
+		}
+		if got := neq.Native().(int32); got != 0 {
+			t.Errorf("EqualityComparerDefaultEquals(5, 6) = %d, want 0", got)
+		}
+	})
+
+	t.Run("Math.Min/Max", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.ForeachTest", "MathMinMax", Int32(3), Int32(7))
+		if err != nil {
+			t.Fatalf("MathMinMax(3, 7) error = %v", err)
+		}
+		if got := out.Native().(int32); got != 307 {
+			t.Errorf("MathMinMax(3, 7) = %d, want 307", got)
+		}
+	})
+
+	t.Run("String.Join over List<T>", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.ForeachTest", "JoinStrings")
+		if err != nil {
+			t.Fatalf("JoinStrings() error = %v", err)
+		}
+		if got := out.Native().(string); got != "a,b,c" {
+			t.Errorf("JoinStrings() = %q, want %q", got, "a,b,c")
+		}
+	})
+}
+
 // TestTryCatch exercises real try/catch/finally (Fase 3.10): catching by
 // exact type and by base type (the real class hierarchy from Fase 3.8,
 // not just an exact-match check), finally running on both the caught and

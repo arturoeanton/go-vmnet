@@ -32,3 +32,4 @@ Output: `tests/fixtures/csharp/bin/Release/netstandard2.0/Vmnet.Fixtures.dll`
 | `TypeChecks.cs` | `TypeChecks`, `Animal`/`Dog`/`Cat`/`IShape` | `isinst`/`castclass` (`is`/`as`/cast) against real class/interface hierarchy | Fase 3.8 |
 | `Delegates.cs` | `Delegates`, `IntTransform` | delegates (`ldftn`/`newobj`/`Invoke`), closures capturing/mutating locals | Fase 3.9 |
 | `TryCatch.cs` | `TryCatch` | real `try`/`catch`/`finally` (catch by type/base type, nested finally, rethrow) | Fase 3.10 |
+| `Foreach.cs` | `ForeachTest` | `foreach` over `List<T>`/`Dictionary<K,V>`, `EqualityComparer<T>.Default`, `Math.Min`/`Max`, `String.Join` | Fase 3.11 |

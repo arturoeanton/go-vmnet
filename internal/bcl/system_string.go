@@ -22,6 +22,38 @@ func init() {
 	// one native backs all three.
 	register("System.String::Equals", true, stringEquals)
 	register("System.String::op_Equality", true, stringEquals)
+	register("System.String::Join", true, stringJoin)
+}
+
+// stringJoin backs every String.Join overload: the params-array shape
+// (4+ elements, or an explicit array argument) collapses to the same
+// element-expansion Format already does; non-string elements go through
+// displayString like Concat's boxed-argument case. A List<T> argument
+// (the compiler picks the IEnumerable<string> overload for
+// `Join(sep, someList)`, which vmnet doesn't dispatch through a real
+// enumerator here — reading the native backing directly is equivalent
+// and far simpler) is unwrapped the same way.
+func stringJoin(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 || args[0].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.Join expects a separator string")
+	}
+	sep := args[0].Str
+	values := args[1:]
+	if len(values) == 1 {
+		switch {
+		case values[0].Kind == runtime.KindArray:
+			values = values[0].Arr.Elems
+		case values[0].Kind == runtime.KindObject && values[0].Obj != nil:
+			if l, ok := values[0].Obj.Native.(*nativeList); ok {
+				values = l.items
+			}
+		}
+	}
+	parts := make([]string, len(values))
+	for i, v := range values {
+		parts[i] = displayString(v)
+	}
+	return runtime.String(strings.Join(parts, sep)), nil
 }
 
 // stringConcat backs every String.Concat overload, including the

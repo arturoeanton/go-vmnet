@@ -200,3 +200,24 @@ archivo. Certificación: promedio de los 7 paquetes sube apenas de
 esperado, ya que excepciones solo "limpia" un método si era el único
 obstáculo; el valor de esta fase es arquitectónico, no un salto grande
 en el número.
+
+Fase 3.11 (`foreach`/enumeradores) completa — re-priorizada con datos:
+el plan original apuntaba a DateTime/Span, pero el mismo probe de
+findings-por-target de siempre mostró que `foreach` sobre
+`List<T>`/`Dictionary<K,V>` **no funcionaba en absoluto** (Fase 2 solo
+daba acceso indexado) y que eso era mucho más ancho (7-8/8 paquetes)
+que DateTime/Span (2-5/8). `List<T>.Enumerator`/`Dictionary<K,V>.
+Enumerator`/`KeyValuePair<K,V>` se modelan como value types sintéticos
+(mismo patrón que `Nullable`1` de Fase 3.7), confirmado contra IL real
+antes de escribir el native. Encontró y arregló un riesgo real antes de
+que causara daño: `List`1.Enumerator::MoveNext` resolvía a
+`"Enumerator"` sin calificar (`resolveTypeToken` nunca había necesitado
+caminar `ResolutionScope` para un `TypeRef` anidado), lo que habría
+secuestrado silenciosamente cualquier otro tipo `Enumerator` en
+cualquier ensamblado cargado (Jint tiene los suyos propios) —
+`qualifyTypeRefName` arma `Tipo1+Tipo2` igual que `Type.FullName` real.
+También agregó `IDisposable::Dispose` (no-op), `EqualityComparer`1.
+Default` (reusa `valuesEqual`/`valueHash` de Fase 3.7), `Math.Min`/`Max`
+y `String.Join`. Certificación: promedio de los 7 paquetes sube de
+~67.7% a ~68.8% (~69.0% a ~70.3% con Jint). DateTime/Span/Memory quedan
+documentados como Fase 3.12, no descartados.

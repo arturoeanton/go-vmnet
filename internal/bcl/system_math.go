@@ -9,7 +9,46 @@ import (
 
 func init() {
 	register("System.Math::Abs", true, mathAbs)
+	register("System.Math::Min", true, mathMin)
+	register("System.Math::Max", true, mathMax)
 	register("System.Double::IsNaN", true, doubleIsNaN)
+}
+
+func mathMin(args []runtime.Value) (runtime.Value, error) { return mathMinMax(args, false) }
+func mathMax(args []runtime.Value) (runtime.Value, error) { return mathMinMax(args, true) }
+
+func mathMinMax(args []runtime.Value, wantMax bool) (runtime.Value, error) {
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Math.Min/Max expects 2 arguments, got %d", len(args))
+	}
+	a, b := args[0], args[1]
+	if a.Kind != b.Kind {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Math.Min/Max: mismatched argument kinds")
+	}
+	switch a.Kind {
+	case runtime.KindI4:
+		if (a.I4 > b.I4) == wantMax {
+			return a, nil
+		}
+		return b, nil
+	case runtime.KindI8:
+		if (a.I8 > b.I8) == wantMax {
+			return a, nil
+		}
+		return b, nil
+	case runtime.KindR4:
+		if (a.R4 > b.R4) == wantMax {
+			return a, nil
+		}
+		return b, nil
+	case runtime.KindR8:
+		if (a.R8 > b.R8) == wantMax {
+			return a, nil
+		}
+		return b, nil
+	default:
+		return runtime.Value{}, fmt.Errorf("bcl: System.Math.Min/Max: unsupported argument kind")
+	}
 }
 
 func doubleIsNaN(args []runtime.Value) (runtime.Value, error) {

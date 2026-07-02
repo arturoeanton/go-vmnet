@@ -1,10 +1,6 @@
 package bcl
 
-import (
-	"fmt"
-
-	"github.com/arturoeanton/go-vmnet/internal/runtime"
-)
+import "github.com/arturoeanton/go-vmnet/internal/runtime"
 
 // nullableType is Nullable`1's synthetic Type descriptor: no TypeDef
 // exists for it in a loaded assembly (it's a system-assembly value type),
@@ -36,25 +32,13 @@ func nullableCtor(args []runtime.Value) (*runtime.Struct, error) {
 	return s, nil
 }
 
-// asNullable unwraps a Nullable<T> receiver: instance methods on a value
-// type receive `this` as a managed pointer (see fieldSlot in
+// asNullable unwraps a Nullable<T> receiver via derefStructReceiver
+// (system_collections.go): instance methods on a value type receive
+// `this` as a managed pointer (see fieldSlot in
 // internal/interpreter/eval.go), so args[0] is normally KindRef, not
 // KindStruct directly.
 func asNullable(args []runtime.Value) (*runtime.Struct, error) {
-	if len(args) == 0 {
-		return nil, fmt.Errorf("bcl: Nullable method called without a receiver")
-	}
-	recv := args[0]
-	if recv.Kind == runtime.KindRef {
-		if recv.Ref == nil {
-			return nil, fmt.Errorf("bcl: Nullable method called through a null pointer")
-		}
-		recv = *recv.Ref
-	}
-	if recv.Kind != runtime.KindStruct || recv.Struct == nil {
-		return nil, fmt.Errorf("bcl: receiver is not a Nullable")
-	}
-	return recv.Struct, nil
+	return derefStructReceiver(args, "Nullable", "Nullable method")
 }
 
 func nullableGetHasValue(args []runtime.Value) (runtime.Value, error) {
