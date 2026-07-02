@@ -8,6 +8,16 @@ import (
 )
 
 func evalBinOp(in ir.BinOp, a, b runtime.Value) (runtime.Value, error) {
+	if isReferenceShaped(a) && isReferenceShaped(b) {
+		switch in.Op {
+		case ir.OpCeq:
+			return runtime.Bool(refEqual(a, b)), nil
+		case ir.OpCgt:
+			return runtime.Bool(refGreater(a, b)), nil
+		case ir.OpClt:
+			return runtime.Bool(refGreater(b, a)), nil
+		}
+	}
 	if a.Kind != b.Kind {
 		return runtime.Value{}, fmt.Errorf("interpreter: binary op on mismatched value kinds (%d, %d)", a.Kind, b.Kind)
 	}
@@ -182,6 +192,22 @@ func evalConv(kind ir.ConvKind, v runtime.Value) (runtime.Value, error) {
 }
 
 func evalCompare(in ir.BranchCompare, a, b runtime.Value) (bool, error) {
+	if isReferenceShaped(a) && isReferenceShaped(b) {
+		switch in.Op {
+		case ir.CmpEq:
+			return refEqual(a, b), nil
+		case ir.CmpNe:
+			return !refEqual(a, b), nil
+		case ir.CmpGt:
+			return refGreater(a, b), nil
+		case ir.CmpLt:
+			return refGreater(b, a), nil
+		case ir.CmpGe:
+			return !refGreater(b, a), nil
+		case ir.CmpLe:
+			return !refGreater(a, b), nil
+		}
+	}
 	if a.Kind != b.Kind {
 		return false, fmt.Errorf("interpreter: compare on mismatched value kinds (%d, %d)", a.Kind, b.Kind)
 	}
@@ -252,4 +278,125 @@ func toFloat64(v runtime.Value) (float64, error) {
 	default:
 		return 0, fmt.Errorf("interpreter: cannot convert value kind %d to float", v.Kind)
 	}
+}
+
+// isReferenceShaped reports whether v's Kind is one ceq/cgt.un/clt.un can
+// compare by reference identity or nullness instead of by numeric value
+// (ECMA-335 Table III.4: these ops are also verifiable on O/& operands,
+// not just numeric ones). Handling this here — rather than only inside
+// isinst's own IR case — matters because the single most common compiled
+// form of `x is T`/`x != null`/`x == null` is exactly `<value> ldnull
+// cgt.un`/`ceq`: comparing a reference-shaped Value against the KindNull
+// literal ldnull pushes, which used to hit the "mismatched value kinds"
+// error below (they're never the same Kind unless x is itself null) —
+// found via the first isinst-using fixture (Fase 3.8), not a hole
+// isinst's own tests would have caught in isolation.
+func isReferenceShaped(v runtime.Value) bool {
+	switch v.Kind {
+	case runtime.KindNull, runtime.KindObject, runtime.KindArray, runtime.KindRef, runtime.KindStruct, runtime.KindString:
+		return true
+	default:
+		return false
+	}
+}
+
+// isNullish reports whether v is (or, for a Kind that could in principle
+// carry a nil payload defensively, currently holds) a null reference.
+func isNullish(v runtime.Value) bool {
+	switch v.Kind {
+	case runtime.KindNull:
+		return true
+	case runtime.KindObject:
+		return v.Obj == nil
+	case runtime.KindArray:
+		return v.Arr == nil
+	case runtime.KindRef:
+		return v.Ref == nil
+	default:
+		return false
+	}
+}
+
+// refEqual implements ceq/beq on reference-shaped operands: both null, or
+// the same object/array/pointer identity, or (structs have no identity —
+// spec: value type equality is structural) recursively equal fields, or
+// (vmnet models strings as immutable Go values, not heap references with
+// observable identity) equal content.
+func refEqual(a, b runtime.Value) bool {
+	aNull, bNull := isNullish(a), isNullish(b)
+	if aNull || bNull {
+		return aNull && bNull
+	}
+	if a.Kind != b.Kind {
+		return false
+	}
+	switch a.Kind {
+	case runtime.KindObject:
+		return a.Obj == b.Obj
+	case runtime.KindArray:
+		return a.Arr == b.Arr
+	case runtime.KindRef:
+		return a.Ref == b.Ref
+	case runtime.KindString:
+		return a.Str == b.Str
+	case runtime.KindStruct:
+		return structFieldsEqual(a.Struct, b.Struct)
+	default:
+		return false
+	}
+}
+
+func structFieldsEqual(a, b *runtime.Struct) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if a.Type != b.Type || len(a.Fields) != len(b.Fields) {
+		return false
+	}
+	for i := range a.Fields {
+		if !valuesDeepEqual(a.Fields[i], b.Fields[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// valuesDeepEqual is refEqual's numeric-aware counterpart, used only for
+// comparing a struct's own fields: unlike the top-level ceq/cgt.un
+// dispatch (which only ever sees two reference-shaped operands together —
+// numeric ceq already has its own path via evalBinOpInt/Float), a
+// struct's fields can be any mix of numeric and reference-shaped Kinds.
+func valuesDeepEqual(a, b runtime.Value) bool {
+	if isReferenceShaped(a) && isReferenceShaped(b) {
+		return refEqual(a, b)
+	}
+	if a.Kind != b.Kind {
+		return false
+	}
+	switch a.Kind {
+	case runtime.KindI4:
+		return a.I4 == b.I4
+	case runtime.KindI8:
+		return a.I8 == b.I8
+	case runtime.KindR4:
+		return a.R4 == b.R4
+	case runtime.KindR8:
+		return a.R8 == b.R8
+	case runtime.KindBytes:
+		return string(a.Bytes) == string(b.Bytes)
+	default:
+		return false
+	}
+}
+
+// refGreater backs cgt.un/clt.un's dominant real use — the `x != null`
+// idiom (`<x> ldnull cgt.un`, spec's null-check compiles to comparing a
+// reference's bit pattern against zero unsigned) — as "a is non-null and
+// b is null". Two non-null references have no meaningful order in vmnet's
+// model (there's no raw pointer to compare), so refGreater is false for
+// that case rather than an arbitrary answer — real code never branches on
+// relative ordering of two arbitrary object references anyway, only on
+// nullness.
+func refGreater(a, b runtime.Value) bool {
+	return !isNullish(a) && isNullish(b)
 }

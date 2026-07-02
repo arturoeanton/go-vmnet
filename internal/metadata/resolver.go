@@ -204,6 +204,31 @@ func (md *Metadata) FindTypeDef(namespace, name string) (rid uint32, row TypeDef
 	return 0, TypeDefRow{}, fmt.Errorf("%w: type %s.%s not found", ErrOutOfRange, namespace, name)
 }
 
+// InterfaceImpls returns the token list of interfaces TypeDef rid directly
+// implements (spec §II.22.23) — not interfaces inherited from a base
+// class, nor interfaces a directly-implemented interface itself extends;
+// see the ancestor walk in internal/interpreter/typecheck.go (Fase 3.7's
+// "assembly.go" doc pattern: aggregate at the caller, keep this a plain
+// row scan). Class is a simple (uncoded) index — compared directly.
+func (md *Metadata) InterfaceImpls(typeRID uint32) ([]Token, error) {
+	t := md.tables[TableInterfaceImpl]
+	if t == nil {
+		return nil, nil
+	}
+	var out []Token
+	for i := uint32(0); i < t.rowCount; i++ {
+		if t.col(i, 0) != typeRID {
+			continue
+		}
+		iface, err := decodeCodedIndex(codedTypeDefOrRef, t.col(i, 1))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, iface)
+	}
+	return out, nil
+}
+
 // FieldDefOwner finds which TypeDef owns Field fieldRID, scanning TypeDef
 // field ranges (TypeDefFieldRange).
 func (md *Metadata) FieldDefOwner(fieldRID uint32) (typeRID uint32, err error) {

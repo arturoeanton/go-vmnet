@@ -209,12 +209,42 @@ func (asm *Assembly) buildType(fullName string) (*runtime.Type, error) {
 		return nil, err
 	}
 
+	isValueType, err := asm.isValueType(typeDef)
+	if err != nil {
+		return nil, err
+	}
+
+	// Instance fields are inherited (real CLR field layout: a base type's
+	// fields come first in memory, before its own) — a struct can't have
+	// a user-defined base (isValueType guard), so this only ever recurses
+	// for classes. Resolving the base now, rather than lazily, means
+	// ldfld/stfld against a field declared on a base class finds it on
+	// every subtype's own runtime.Type.Fields, not just the base's own —
+	// found via the first isinst fixture with an inherited field access
+	// (Fase 3.8): without this, `Dog : Animal` simply has no `Name` field
+	// at all, since Fase 1-3.7 never needed to look past a type's own
+	// TypeDef. Safe to recurse: resolveTypeByFullName doesn't hold cacheMu
+	// across a build (Fase 3.7's fix for the same shape of problem).
+	var baseName string
+	var fields []string
+	var fieldDefaults []runtime.Value
+	if !isValueType && !typeDef.Extends.IsNil() {
+		if resolved, err := resolveTypeTokenName(asm.md, typeDef.Extends); err == nil &&
+			resolved != "System.Object" && resolved != "System.ValueType" && resolved != "System.Enum" {
+			baseName = resolved
+			if base, err := asm.resolveTypeByFullName(baseName); err == nil {
+				fields = append(fields, base.Fields...)
+				fieldDefaults = append(fieldDefaults, base.FieldDefaults...)
+			}
+		}
+	}
+
 	start, end, err := asm.md.TypeDefFieldRange(typeRID)
 	if err != nil {
 		return nil, err
 	}
-	var fields, staticFields []string
-	var fieldDefaults, staticFieldDefaults []runtime.Value
+	var staticFields []string
+	var staticFieldDefaults []runtime.Value
 	for rid := start; rid < end; rid++ {
 		f, err := asm.md.Field(rid)
 		if err != nil {
@@ -237,10 +267,22 @@ func (asm *Assembly) buildType(fullName string) (*runtime.Type, error) {
 	}
 
 	t := runtime.NewType(typeDef.Namespace, typeDef.Name, fields, staticFields, fieldDefaults, staticFieldDefaults)
-	t.IsValueType, err = asm.isValueType(typeDef)
+	t.IsValueType = isValueType
+	t.BaseTypeFullName = baseName
+
+	ifaceTokens, err := asm.md.InterfaceImpls(typeRID)
 	if err != nil {
 		return nil, err
 	}
+	for _, tok := range ifaceTokens {
+		if name, err := resolveTypeTokenName(asm.md, tok); err == nil {
+			t.Interfaces = append(t.Interfaces, name)
+		}
+		// A genuinely unresolvable interface reference is skipped rather
+		// than failing the whole type: isinst/castclass just won't match
+		// through that specific interface, not a hard error.
+	}
+
 	return t, nil
 }
 
@@ -262,7 +304,13 @@ func (asm *Assembly) isValueType(typeDef metadata.TypeDefRow) (bool, error) {
 	return name == "System.ValueType" || name == "System.Enum", nil
 }
 
-// resolveTypeTokenName resolves a TypeDef/TypeRef token to "Namespace.Name".
+// resolveTypeTokenName resolves a TypeDef/TypeRef/TypeSpec token to
+// "Namespace.Name" — a TypeSpec (a generic interface instantiation like
+// IEnumerable<T>/IComparable<T>, extremely common in a class's
+// InterfaceImpl rows) resolves to its *open* generic type's name, same
+// simplification internal/ir/builder.go's resolveTypeSpecName already
+// makes for newobj/call targets: vmnet's type-hierarchy walk (Fase 3.8)
+// only needs the name to match against, not the closed type arguments.
 func resolveTypeTokenName(md *metadata.Metadata, tok metadata.Token) (string, error) {
 	switch tok.Table() {
 	case metadata.TableTypeRef:
@@ -277,6 +325,19 @@ func resolveTypeTokenName(md *metadata.Metadata, tok metadata.Token) (string, er
 			return "", err
 		}
 		return qualify(row.Namespace, row.Name), nil
+	case metadata.TableTypeSpec:
+		sig, err := md.TypeSpecSignature(tok.RID())
+		if err != nil {
+			return "", err
+		}
+		t, err := metadata.ParseTypeSpec(sig)
+		if err != nil {
+			return "", err
+		}
+		if t.Kind != metadata.SigGenericInst {
+			return "", fmt.Errorf("vmnet: unsupported TypeSpec kind %d as a base/interface type", t.Kind)
+		}
+		return resolveTypeTokenName(md, t.Token)
 	default:
 		return "", fmt.Errorf("vmnet: unsupported base-type token table %#x", byte(tok.Table()))
 	}

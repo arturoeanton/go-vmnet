@@ -144,3 +144,20 @@ Fase 3.5 (asumía que construir un tipo nunca necesita resolver otro,
 falso en cuanto un campo/local de struct referencia otro tipo — rediseño
 verificado con `TestStructsConcurrentResolve`). Certificación: promedio
 de los 7 paquetes sube de ~59.8% a ~63.2%; con Jint, ~63.6%.
+
+Fase 3.8 (jerarquía de tipos real) completa: `runtime.Type` ahora sabe su
+`BaseTypeFullName` y sus `Interfaces` (spec §II.22.23, tabla
+`InterfaceImpl`, sin usar hasta ahora), y `isinst`/`castclass` despachan
+contra ese árbol real en vez de no existir en absoluto. Dos bugs reales
+expuestos por el primer fixture con herencia: comparar una referencia
+contra `null` (`<valor> ldnull cgt.un`/`ceq`, la forma compilada más común
+de `is`/`!= null`/`== null`) fallaba con "mismatched value kinds" — ningún
+fixture anterior había comparado explícitamente una referencia contra
+`null` vía IL; y los campos declarados en una clase base simplemente no
+existían en las instancias de sus subclases (`runtime.Type` nunca había
+necesitado mirar más allá de su propio `TypeDef`) — ahora el tipo base se
+resuelve recursivamente y sus campos se anteponen, igual que el layout de
+memoria real de la CLR. Certificación (7 paquetes + Jint): promedio de los
+7 sube de ~63.2% a ~64.2%; Jint da el salto grande, ~66.1% a ~74.4%
+(despacho por tipo/casteos constantes en un motor de JS), ~63.6% a ~65.5%
+con Jint incluido en el promedio de 8.

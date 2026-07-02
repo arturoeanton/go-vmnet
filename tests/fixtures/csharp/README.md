@@ -29,3 +29,4 @@ Output: `tests/fixtures/csharp/bin/Release/netstandard2.0/Vmnet.Fixtures.dll`
 | `SwitchTest.cs` | `SwitchTest` | `switch` opcode (jump table) | Fase 3.6 |
 | `StringOps.cs` | `StringOps` | `StringBuilder`, `String.Format`/`Substring`/indexer/`Equals` | Fase 3.6 |
 | `Structs.cs` | `Structs`, `Point` | value types (`initobj`/`constrained.`, copy semantics), `Nullable<T>` | Fase 3.7 |
+| `TypeChecks.cs` | `TypeChecks`, `Animal`/`Dog`/`Cat`/`IShape` | `isinst`/`castclass` (`is`/`as`/cast) against real class/interface hierarchy | Fase 3.8 |

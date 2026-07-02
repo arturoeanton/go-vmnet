@@ -846,6 +846,96 @@ go test ./ -run TestStructs -v
 go test ./ -run TestStructsConcurrentResolve -race -count=3 -v
 ```
 
+### Fase 3.8 — Jerarquía de tipos real + `isinst`/`castclass`
+
+**Tareas**
+
+- [x] `runtime.Type.BaseTypeFullName`/`Interfaces` (solo directamente implementadas — spec
+      §II.22.23; extender una interfaz por otra, o heredar de una clase base, se resuelve
+      recursivamente en el walk, no aplanado de antemano)
+- [x] `metadata.InterfaceImpls` (accessor nuevo para la tabla `InterfaceImpl`, sin usar hasta
+      ahora) y `resolveTypeTokenName` extendido para resolver un `TypeSpec` (instanciación de
+      interfaz genérica — `IEnumerable<T>`/`IComparable<T>`, el caso *dominante* en
+      `InterfaceImpl` real) a su tipo genérico abierto
+- [x] IR + intérprete: `isinst`/`castclass` — mismo token TypeDefOrRefOrSpec que `initobj`
+      (`resolveTypeTokenOrGeneric`, renombrado de `resolveInitObjTarget` ahora que lo comparten
+      tres opcodes), despachando por Kind con el walk de jerarquía real para `KindObject`/
+      `KindStruct`, reglas de sentido común para primitivas/string/array, y `null` siempre pasa
+      sin chequear (comportamiento exigido por spec)
+- [x] `internal/interpreter/typecheck.go`: `isAssignableTo` — camina `BaseTypeFullName` +
+      `Interfaces` (recursivo para interfaz-extiende-interfaz) para clases propias del plugin;
+      tabla chica mantenida a mano de la jerarquía real de excepciones (`ArgumentNullException`
+      → `ArgumentException` → `SystemException` → `Exception`) para que `ex is ArgumentException`
+      dé la respuesta correcta sobre las excepciones que vmnet ya construye nativamente
+- [x] `System.InvalidCastException` registrada como excepción nativa (mismo patrón que las demás)
+- [x] **Bug real encontrado y arreglado — comparación de referencias contra `null`**: la forma
+      compilada más común de `x is T`/`x != null`/`x == null` es exactamente
+      `<valor> ldnull cgt.un`/`ceq` — comparar un `KindObject` contra el `KindNull` literal de
+      `ldnull`. `evalBinOp`/`evalCompare` exigían el mismo `Kind` en ambos lados y fallaban con
+      "mismatched value kinds" apenas el primer fixture con `isinst` los ejercitó — un hueco
+      preexistente que ningún fixture anterior había tocado (nada comparaba explícitamente una
+      referencia contra `null` vía IL hasta ahora). Se agregó comparación por identidad de
+      referencia/nulidad (`refEqual`/`refGreater` en `internal/interpreter/arithmetic.go`) para
+      todo Kind con forma de referencia (`Object`/`Array`/`Ref`/`Struct`/`String`), incluyendo
+      igualdad estructural recursiva para structs.
+- [x] **Bug real encontrado y arreglado — campos heredados no existían**: `runtime.Type` nunca
+      había necesitado mirar más allá de su propio `TypeDef` (comentario original: "no base-type
+      field inheritance yet"). En cuanto el primer fixture con herencia (`Dog : Animal`) accedió
+      a un campo declarado en la clase *base*, falló con "has no field" — la lista de campos de
+      `Dog` nunca incluía los de `Animal`. Se resolvió construyendo el tipo base recursivamente
+      (mismo patrón seguro-para-recursión que Fase 3.7) y anteponiendo sus campos, igual que el
+      layout de memoria real de la CLR (campos de la base primero).
+
+**Fixtures y tests**
+
+- [x] `TypeChecks.cs` (`Animal`/`Dog`/`Cat`/`IShape`) / `TestTypeChecks` — `is`/`as`/cast
+      explícito sobre una referencia de tipo base que en runtime es un subtipo, cast fallido
+      lanzando `InvalidCastException` (no silenciosamente exitoso ni panic), `isinst` contra la
+      jerarquía de excepciones sin necesitar try/catch (construyendo la excepción directo, ya que
+      try/catch es recién Fase 3.10)
+
+### Lo que se dejó explícitamente afuera de esta fase
+
+```txt
+- List<T>/Dictionary<T>/StringBuilder (backing nativo Go, sin runtime.Type): isinst/castclass
+  contra ellos solo reconoce System.Object, no sus interfaces reales (IEnumerable,
+  ICollection<T>, IList<T>, ...) — nativeMatches en typecheck.go solo modela la jerarquía de
+  excepciones. Nunca da un falso positivo (en el peor caso isinst devuelve null quien debería
+  matchear), documentado como gap, no bug silencioso.
+- isinst/castclass contra System.Enum específicamente (vs. System.ValueType genérico, que sí
+  funciona) — vmnet no distingue "es un enum" de "es un struct cualquiera" en el Type todavía.
+- Herencia de campos estáticos: cada tipo tiene su propio storage estático propio, sin heredar
+  ni compartir con la base — coincide con la semántica real de la CLR (los estáticos no se
+  layoutean como los de instancia), no es una simplificación.
+```
+
+### Re-certificación contra los mismos 8 targets (7 paquetes + Jint)
+
+| Paquete | % limpio Fase 3.7 | % limpio Fase 3.8 |
+|---|---|---|
+| `Ardalis.GuardClauses@5.0.0` | 87.4% | 87.4% |
+| `Semver@2.3.0` | 72.6% | 74.9% |
+| `System.Text.Json@8.0.5` | 66.7% | 68.1% |
+| `Newtonsoft.Json@13.0.3` | 60.6% | 62.9% |
+| `FluentValidation@11.9.2` | 63.5% | 63.9% |
+| `Humanizer.Core@2.14.1` | 46.0% | 46.3% |
+| `SimpleBase@4.0.0` | 45.7% | 46.1% |
+| **Promedio (7 paquetes)** | **63.2%** | **64.2%** |
+| `Jint@3.1.3` | 66.1% | **74.4%** |
+| **Promedio (7 paquetes + Jint)** | **63.6%** | **65.5%** |
+
+Jint es el salto grande de esta fase (+8.3 puntos) — un motor de JS hace despacho por tipo y
+casteos constantemente (representar cada tipo de valor de JS como una subclase de `JsValue`,
+chequeada con `is`/`as` en el código de evaluación). Los 7 paquetes de siempre suben más modesto
+(+1 punto): ya tenían menos `isinst`/`castclass` relativo a su tamaño que Jint.
+
+### Cómo verificar Fase 3.8
+
+```bash
+go test ./... -race -count=3
+go test ./ -run TestTypeChecks -v
+```
+
 ---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")

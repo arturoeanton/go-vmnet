@@ -385,6 +385,99 @@ func TestStructs(t *testing.T) {
 	})
 }
 
+// TestTypeChecks exercises isinst/castclass (Fase 3.8) against a real
+// class/interface hierarchy: `is`/`as`/explicit cast on a base-typed
+// reference actually holding a subtype, a failed cast throwing
+// InvalidCastException instead of silently succeeding or panicking, and
+// isinst against the hand-maintained exception hierarchy
+// (internal/interpreter/typecheck.go) without needing try/catch (not
+// implemented until Fase 3.10) to construct the exception.
+func TestTypeChecks(t *testing.T) {
+	asm := loadFixture(t)
+
+	t.Run("is", func(t *testing.T) {
+		tests := []struct {
+			dog      int32
+			wantIs   int32
+			wantIShp int32
+		}{{1, 1, 1}, {0, 0, 0}}
+		for _, tt := range tests {
+			isDog, err := asm.Call("Vmnet.Fixtures.TypeChecks", "IsDog", Int32(tt.dog))
+			if err != nil {
+				t.Fatalf("IsDog(%d) error = %v", tt.dog, err)
+			}
+			if got := isDog.Native().(int32); (got != 0) != (tt.wantIs != 0) {
+				t.Errorf("IsDog(%d) = %d, want nonzero=%v", tt.dog, got, tt.wantIs != 0)
+			}
+
+			isShape, err := asm.Call("Vmnet.Fixtures.TypeChecks", "ImplementsIShape", Int32(tt.dog))
+			if err != nil {
+				t.Fatalf("ImplementsIShape(%d) error = %v", tt.dog, err)
+			}
+			if got := isShape.Native().(int32); (got != 0) != (tt.wantIShp != 0) {
+				t.Errorf("ImplementsIShape(%d) = %d, want nonzero=%v", tt.dog, got, tt.wantIShp != 0)
+			}
+		}
+	})
+
+	t.Run("as", func(t *testing.T) {
+		succeeds, err := asm.Call("Vmnet.Fixtures.TypeChecks", "AsDogSucceeds", Int32(1))
+		if err != nil {
+			t.Fatalf("AsDogSucceeds(dog) error = %v", err)
+		}
+		if got := succeeds.Native().(int32); got == 0 {
+			t.Errorf("AsDogSucceeds(dog) = %d, want nonzero", got)
+		}
+
+		fails, err := asm.Call("Vmnet.Fixtures.TypeChecks", "AsDogSucceeds", Int32(0))
+		if err != nil {
+			t.Fatalf("AsDogSucceeds(cat) error = %v", err)
+		}
+		if got := fails.Native().(int32); got != 0 {
+			t.Errorf("AsDogSucceeds(cat) = %d, want 0", got)
+		}
+	})
+
+	t.Run("castclass success", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.TypeChecks", "CastToDogName", Int32(1))
+		if err != nil {
+			t.Fatalf("CastToDogName(dog) error = %v", err)
+		}
+		if got := out.Native().(string); got != "Rex" {
+			t.Errorf("CastToDogName(dog) = %q, want %q", got, "Rex")
+		}
+	})
+
+	t.Run("castclass failure throws InvalidCastException", func(t *testing.T) {
+		_, err := asm.Call("Vmnet.Fixtures.TypeChecks", "CastToDogName", Int32(0))
+		if err == nil {
+			t.Fatal("CastToDogName(cat) succeeded, want InvalidCastException")
+		}
+		var ex *runtime.ManagedException
+		if !errors.As(err, &ex) || ex.TypeName != "System.InvalidCastException" {
+			t.Errorf("CastToDogName(cat) error = %v, want a System.InvalidCastException", err)
+		}
+	})
+
+	t.Run("isinst against the exception hierarchy", func(t *testing.T) {
+		isArgEx, err := asm.Call("Vmnet.Fixtures.TypeChecks", "ArgNullIsArgException")
+		if err != nil {
+			t.Fatalf("ArgNullIsArgException() error = %v", err)
+		}
+		if got := isArgEx.Native().(int32); got == 0 {
+			t.Errorf("ArgNullIsArgException() = %d, want nonzero (ArgumentNullException derives from ArgumentException)", got)
+		}
+
+		isInvalidOp, err := asm.Call("Vmnet.Fixtures.TypeChecks", "ArgNullIsInvalidOp")
+		if err != nil {
+			t.Fatalf("ArgNullIsInvalidOp() error = %v", err)
+		}
+		if got := isInvalidOp.Native().(int32); got != 0 {
+			t.Errorf("ArgNullIsInvalidOp() = %d, want 0 (unrelated exception branches)", got)
+		}
+	})
+}
+
 // TestStructsConcurrentResolve races many goroutines to resolve a
 // struct-typed type (Point) for the first time on the same Assembly —
 // the scenario resolveTypeByFullName's Fase 3.7 redesign exists for (it

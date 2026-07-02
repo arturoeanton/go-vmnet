@@ -62,6 +62,7 @@ func init() {
 		"System.NotSupportedException",
 		"System.NullReferenceException",
 		"System.IndexOutOfRangeException",
+		"System.InvalidCastException",
 	)
 	// netstandard-lite = rules plus the Fase 3 reflection-lite/Convert surface.
 	bclPrefixes[ProfileNetStandardLite] = append(append([]string{}, bclPrefixes[ProfileRules]...),
@@ -98,15 +99,16 @@ func inProfile(p Profile, fullName string) bool {
 // LoadArgAddr/LoadLocalAddr/LoadIndirect/StoreIndirect are deliberately
 // NOT included: a `ref`/`out` primitive parameter never touches the heap
 // or a type's field layout, so it stays within minimal's promised surface.
-// ir.InitObj (Fase 3.7) IS included: a value type's own field layout is
-// type-system machinery in the same sense classes are, even though its
-// instances aren't heap-allocated.
+// ir.InitObj (Fase 3.7) and ir.IsInst/ir.CastClass (Fase 3.8) ARE
+// included: a value type's own field layout, and the class/interface
+// hierarchy walk isinst/castclass need, are type-system machinery in the
+// same sense classes are, even when nothing gets heap-allocated.
 func instrIsObjectModel(instr ir.Instr) bool {
 	switch v := instr.(type) {
 	case ir.NewObj, ir.LoadField, ir.StoreField, ir.Throw,
 		ir.NewArr, ir.LoadLen, ir.LoadElem, ir.StoreElem, ir.LoadElemAddr,
 		ir.LoadFieldAddr, ir.LoadStaticField, ir.StoreStaticField,
-		ir.InitObj:
+		ir.InitObj, ir.IsInst, ir.CastClass:
 		return true
 	case ir.Call:
 		return v.Virtual

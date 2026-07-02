@@ -369,11 +369,27 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 
 		case "initobj":
 			token := instr.Operand.(uint32)
-			typeFullName, err := resolveInitObjTarget(md, token)
+			typeFullName, err := resolveTypeTokenOrGeneric(md, token)
 			if err != nil {
 				return nil, fmt.Errorf("ir: initobj at IL offset %d: %w", instr.Offset, err)
 			}
 			out = append(out, InitObj{TypeFullName: typeFullName})
+
+		case "isinst":
+			token := instr.Operand.(uint32)
+			typeFullName, err := resolveTypeTokenOrGeneric(md, token)
+			if err != nil {
+				return nil, fmt.Errorf("ir: isinst at IL offset %d: %w", instr.Offset, err)
+			}
+			out = append(out, IsInst{TypeFullName: typeFullName})
+
+		case "castclass":
+			token := instr.Operand.(uint32)
+			typeFullName, err := resolveTypeTokenOrGeneric(md, token)
+			if err != nil {
+				return nil, fmt.Errorf("ir: castclass at IL offset %d: %w", instr.Offset, err)
+			}
+			out = append(out, CastClass{TypeFullName: typeFullName})
 
 		case "constrained.", "volatile.", "readonly.":
 			// Prefixes vmnet doesn't need: constrained. only matters for
@@ -517,11 +533,11 @@ func resolveTypeSpecName(md *metadata.Metadata, rid uint32) (string, error) {
 	return resolveTypeToken(md, t.Token)
 }
 
-// resolveInitObjTarget resolves the inline TypeDefOrRefOrSpec token used
+// resolveTypeTokenOrGeneric resolves the inline TypeDefOrRefOrSpec token used
 // by initobj/ldobj/stobj (spec §III.4.10 et al.) to a type full name, or
 // "" if it names an unresolved generic type parameter (a TypeSpec whose
 // blob is VAR/MVAR — see InitObj's doc comment in ir.go).
-func resolveInitObjTarget(md *metadata.Metadata, token uint32) (string, error) {
+func resolveTypeTokenOrGeneric(md *metadata.Metadata, token uint32) (string, error) {
 	tok := metadata.Token(token)
 	if tok.Table() != metadata.TableTypeSpec {
 		return resolveTypeToken(md, tok)

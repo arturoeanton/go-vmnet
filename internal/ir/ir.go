@@ -219,3 +219,17 @@ type StoreIndirect struct{}
 // narrower gap than getting it right would be worth the complexity of
 // tracking generic instantiations (docs/ROADMAP.md Fase 3.7).
 type InitObj struct{ TypeFullName string }
+
+// IsInst/CastClass implement isinst/castclass (spec §III.4.6/4.6): pop an
+// object reference and check it against TypeFullName using the real
+// class/interface hierarchy (Fase 3.8 — runtime.Type.BaseTypeFullName/
+// Interfaces, walked by internal/interpreter/typecheck.go). IsInst pushes
+// the reference on a match or null otherwise, never throwing; CastClass
+// pushes the reference on a match or throws InvalidCastException. Both
+// pass a null receiver through unchanged without even checking the type
+// (spec-mandated: casting null always "succeeds"). TypeFullName is ""
+// for the same unresolved-generic-parameter reason as InitObj — nothing
+// can match an unknown type, so IsInst always yields null and CastClass
+// always throws in that case.
+type IsInst struct{ TypeFullName string }
+type CastClass struct{ TypeFullName string }

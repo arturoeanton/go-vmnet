@@ -28,6 +28,15 @@ type Type struct {
 	// (a shared heap reference).
 	IsValueType bool
 
+	// BaseTypeFullName ("" if none — interfaces and System.Object itself)
+	// and Interfaces (directly implemented only, not transitively expanded
+	// — spec §II.22.23) back isinst/castclass's real type-hierarchy walk
+	// (Fase 3.8, internal/interpreter/typecheck.go), replacing the flat
+	// "every class is unrelated to every other" model Fase 1-3.7 got away
+	// with because nothing needed to ask "is A a B".
+	BaseTypeFullName string
+	Interfaces       []string
+
 	// FieldDefaults/StaticFieldDefaults hold default(T) for each field
 	// (parallel to Fields/StaticFields) — a typed zero (Int32(0), Int64(0),
 	// ...) for value-typed fields, or Null() for reference-typed ones

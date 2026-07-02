@@ -368,6 +368,25 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 			}
 			*addr.Ref = m.defaultValueFor(in.TypeFullName)
 
+		case ir.IsInst:
+			v := frame.pop()
+			if v.Kind != runtime.KindNull && m.isAssignableTo(v, in.TypeFullName) {
+				frame.push(v)
+			} else {
+				frame.push(runtime.Null())
+			}
+
+		case ir.CastClass:
+			v := frame.pop()
+			if v.Kind == runtime.KindNull || m.isAssignableTo(v, in.TypeFullName) {
+				frame.push(v)
+			} else {
+				return runtime.Value{}, &runtime.ManagedException{
+					TypeName: "System.InvalidCastException",
+					Message:  fmt.Sprintf("Unable to cast object to type '%s'.", in.TypeFullName),
+				}
+			}
+
 		case ir.Return:
 			if in.HasValue {
 				return frame.pop(), nil
