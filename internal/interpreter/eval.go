@@ -66,6 +66,31 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 		Stack:  make([]runtime.Value, 0, method.MaxStack+8),
 	}
 
+	// A managed exception surfacing from runFrame (from `throw`/`rethrow`
+	// directly in this method, or propagated up from any call it made —
+	// runFrame returning means frame.IP is exactly the instruction that
+	// was executing, whatever the actual source) gets one dispatch
+	// attempt against this method's own try/catch/finally (Fase 3.10)
+	// before it's allowed to keep propagating to our own caller.
+	for {
+		result, err := m.runFrame(frame, method, depth, instrCount)
+		if err == nil {
+			return result, nil
+		}
+		ex, ok := err.(*runtime.ManagedException)
+		if !ok {
+			return runtime.Value{}, err
+		}
+		if !m.dispatchException(frame, ex, handlersContaining(method, frame.IP)) {
+			return runtime.Value{}, ex
+		}
+		// Handled: dispatchException already pointed frame.IP at the
+		// matching catch (or an intervening finally/fault it must run
+		// first) — resume execution there.
+	}
+}
+
+func (m *Machine) runFrame(frame *Frame, method *runtime.Method, depth int, instrCount *int64) (runtime.Value, error) {
 	for frame.IP < len(method.IR) {
 		*instrCount++
 		if m.Limits.MaxInstructions > 0 && *instrCount > m.Limits.MaxInstructions {
@@ -405,6 +430,30 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 				frame.pop() // ldvirtftn's receiver — see ir.LoadFtn's doc comment
 			}
 			frame.push(runtime.FuncVal(&runtime.Func{FullName: in.FullName}))
+
+		case ir.Leave:
+			if finallys := handlersLeaving(method, frame.IP, in.Target); len(finallys) > 0 {
+				frame.unwind = &unwind{target: in.Target, pending: finallys[1:]}
+				next = finallys[0].HandlerStart
+			} else {
+				next = in.Target
+			}
+
+		case ir.EndFinally:
+			resumeIP, propagate, err := m.resumeAfterFinally(frame)
+			if err != nil {
+				return runtime.Value{}, err
+			}
+			if propagate != nil {
+				return runtime.Value{}, propagate
+			}
+			next = resumeIP
+
+		case ir.Rethrow:
+			if frame.currentException == nil {
+				return runtime.Value{}, errRethrowOutsideCatch
+			}
+			return runtime.Value{}, frame.currentException
 
 		case ir.Return:
 			if in.HasValue {

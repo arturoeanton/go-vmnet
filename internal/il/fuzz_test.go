@@ -49,3 +49,23 @@ func FuzzDecode(f *testing.F) {
 		_, _ = Decode(data)
 	})
 }
+
+// FuzzReadExceptionHandlers proves the EH-clause-table parser (Fase
+// 3.10 — small and fat section/clause formats, chained MoreSects
+// sections) can't be made to panic or hang on malformed data: a crafted
+// DataSize/MoreSects combination could otherwise loop or read out of
+// bounds.
+func FuzzReadExceptionHandlers(f *testing.F) {
+	f.Add([]byte{}, 0)
+	f.Add([]byte{0, 0, 0, 0}, 4)                                                       // codeEnd==len(data), no section bytes
+	f.Add([]byte{0, 0, 0, 0, 0x01, 0x10, 0, 0, 2, 0, 0, 0, 5, 5, 0, 3, 0, 0, 0, 0}, 4) // small, one Finally clause
+	f.Add([]byte{0, 0, 0, 0, 0x41, 28, 0, 0}, 4)                                       // fat header claiming more data than present
+	f.Add([]byte{0, 0, 0, 0, 0x81, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 4) // MoreSects set, no next section
+
+	f.Fuzz(func(t *testing.T, data []byte, codeEnd int) {
+		if codeEnd < 0 || codeEnd > len(data) {
+			return
+		}
+		_, _ = ReadExceptionHandlers(data, MethodHeader{MoreSections: true}, codeEnd)
+	})
+}

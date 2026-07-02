@@ -89,7 +89,7 @@ func analyzeMethod(f *pe.File, md *metadata.Metadata, fullName string, row metad
 	if err != nil {
 		return append(findings, Finding{Kind: KindUnsupportedOpcode, Method: fullName, Detail: fmt.Sprintf("reading method body: %v", err)})
 	}
-	_, code, err := il.ReadMethodBody(body)
+	header, code, err := il.ReadMethodBody(body)
 	if err != nil {
 		return append(findings, Finding{Kind: KindUnsupportedOpcode, Method: fullName, Detail: fmt.Sprintf("reading method header: %v", err)})
 	}
@@ -97,9 +97,16 @@ func analyzeMethod(f *pe.File, md *metadata.Metadata, fullName string, row metad
 	if err != nil {
 		return append(findings, Finding{Kind: KindUnsupportedOpcode, Method: fullName, Detail: fmt.Sprintf("decoding IL: %v", err)})
 	}
+	var ehClauses []il.ExceptionHandler
+	if header.MoreSections {
+		ehClauses, err = il.ReadExceptionHandlers(body, header, 12+int(header.CodeSize))
+		if err != nil {
+			return append(findings, Finding{Kind: KindUnsupportedOpcode, Method: fullName, Detail: fmt.Sprintf("reading exception handlers: %v", err)})
+		}
+	}
 
 	retVoid := sig.RetType.Kind == metadata.SigVoid
-	irInstrs, err := ir.Build(instrs, md, retVoid)
+	irInstrs, _, err := ir.Build(instrs, md, retVoid, ehClauses)
 	if err != nil {
 		var uo *ir.UnsupportedOpcodeError
 		if errors.As(err, &uo) {
@@ -296,10 +303,10 @@ func suggestionForTarget(fullName string) string {
 
 func suggestionFor(opcode string) string {
 	switch opcode {
-	case "leave", "leave.s", "endfinally":
-		return "try/catch/finally are not supported yet — an unhandled throw is"
 	case "ldtoken":
 		return "array literal initializers (RuntimeHelpers.InitializeArray) are not supported yet — assign elements individually instead"
+	case "filter (catch-when)":
+		return "exception filter clauses (catch (T) when (cond)) are not supported yet — catch (T) without the filter is"
 	default:
 		return "not yet implemented — see docs/ROADMAP.md"
 	}

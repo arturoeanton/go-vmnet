@@ -24,10 +24,11 @@ Output: `tests/fixtures/csharp/bin/Release/netstandard2.0/Vmnet.Fixtures.dll`
 | `ExceptionTest.cs` | `ExceptionTest` | `throw` / managed exceptions | Fase 2 |
 | `Arrays.cs` | `Arrays` | `newarr`/`ldlen`/`ldelem.i4`/`stelem.i4` | Fase 3.5 |
 | `ByRef.cs` | `ByRef` | `out`/`ref` params (`ldarga.s`/`ldloca.s`/`stind.i4`/`ldind.i4`) | Fase 3.5 |
-| `Unsupported.cs` | `Unsupported` | `try`/`finally` (deliberately unsupported, for checker tests) | Fase 3.5 |
+| `Unsupported.cs` | `Unsupported` | exception filter clause, `catch (T) when (cond)` (deliberately unsupported, for checker tests — repurposed as coverage grows: was `System.Array` until Fase 3.5, plain `try`/`finally` until Fase 3.10) | Fase 3.10 |
 | `Statics.cs` | `Statics` | static fields (`ldsfld`/`stsfld`), lazy `.cctor` | Fase 3.5 |
 | `SwitchTest.cs` | `SwitchTest` | `switch` opcode (jump table) | Fase 3.6 |
 | `StringOps.cs` | `StringOps` | `StringBuilder`, `String.Format`/`Substring`/indexer/`Equals` | Fase 3.6 |
 | `Structs.cs` | `Structs`, `Point` | value types (`initobj`/`constrained.`, copy semantics), `Nullable<T>` | Fase 3.7 |
 | `TypeChecks.cs` | `TypeChecks`, `Animal`/`Dog`/`Cat`/`IShape` | `isinst`/`castclass` (`is`/`as`/cast) against real class/interface hierarchy | Fase 3.8 |
 | `Delegates.cs` | `Delegates`, `IntTransform` | delegates (`ldftn`/`newobj`/`Invoke`), closures capturing/mutating locals | Fase 3.9 |
+| `TryCatch.cs` | `TryCatch` | real `try`/`catch`/`finally` (catch by type/base type, nested finally, rethrow) | Fase 3.10 |

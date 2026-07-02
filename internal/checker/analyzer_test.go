@@ -43,7 +43,7 @@ func TestAnalyze_OwnAssemblyIsCompatible(t *testing.T) {
 				t.Fatal("MethodsAnalyzed = 0, want > 0 (did the fixture assembly fail to load?)")
 			}
 			for _, f := range r.Findings {
-				if f.Method != "Vmnet.Fixtures.Unsupported::TryFinally" {
+				if f.Method != "Vmnet.Fixtures.Unsupported::FilterClause" {
 					t.Errorf("unexpected finding outside Unsupported.cs: %+v", f)
 				}
 			}
@@ -88,27 +88,29 @@ func TestAnalyze_MinimalProfileFlagsObjectModel(t *testing.T) {
 	}
 }
 
-// TestAnalyze_UnsupportedOpcodeIsReported proves a method using
-// try/finally (leave/endfinally — not lowered by the IR builder) shows up
-// as a concrete, located finding, not a silent skip or a crash.
+// TestAnalyze_UnsupportedOpcodeIsReported proves a method using an
+// exception filter clause (`catch (Foo) when (cond)` — the one exception-
+// handling shape Fase 3.10 doesn't lower, see ir/builder.go's
+// buildHandlers) shows up as a concrete, located finding, not a silent
+// skip or a crash.
 func TestAnalyze_UnsupportedOpcodeIsReported(t *testing.T) {
 	r := analyzeFixture(t, ProfileNetStandardLite)
 
 	var found *Finding
 	for i := range r.Findings {
-		if r.Findings[i].Method == "Vmnet.Fixtures.Unsupported::TryFinally" {
+		if r.Findings[i].Method == "Vmnet.Fixtures.Unsupported::FilterClause" {
 			found = &r.Findings[i]
 			break
 		}
 	}
 	if found == nil {
-		t.Fatalf("expected a finding for Unsupported::TryFinally, got: %+v", r.Findings)
+		t.Fatalf("expected a finding for Unsupported::FilterClause, got: %+v", r.Findings)
 	}
 	if found.Kind != KindUnsupportedOpcode {
 		t.Errorf("finding.Kind = %s, want %s", found.Kind, KindUnsupportedOpcode)
 	}
 	if r.Status == StatusCompatible {
-		t.Error("Status = compatible, want partial (Unsupported.TryFinally should have blocked it)")
+		t.Error("Status = compatible, want partial (Unsupported.FilterClause should have blocked it)")
 	}
 }
 

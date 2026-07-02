@@ -249,3 +249,49 @@ type LoadFtn struct {
 	FullName string
 	Virtual  bool
 }
+
+// Leave implements leave/leave.s (spec §III.3.44): an unconditional jump
+// out of a try or catch block that, unlike Branch, must first run any
+// finally/fault handlers between the leave site and Target — see
+// internal/interpreter/exceptions.go, which computes that chain from the
+// enclosing Method's Handlers using TryStart/TryEnd exactly like
+// dispatching a thrown exception does.
+type Leave struct{ Target int }
+
+// EndFinally implements endfinally/endfault (spec §III.3.14): resumes
+// whatever control transfer (a Leave chaining through this handler, or an
+// exception propagating through it) brought execution into the
+// finally/fault block that's ending.
+type EndFinally struct{}
+
+// HandlerKind is one exception handler's kind (spec §II.25.4.6). Filter
+// clauses (`catch (Foo) when (cond)`) parse structurally at the il layer
+// but aren't lowered here — see Build's doc comment — so there's no
+// HandlerFilter case to dispatch on.
+type HandlerKind byte
+
+const (
+	HandlerCatch HandlerKind = iota
+	HandlerFinally
+	HandlerFault
+)
+
+// Handler is one exception handler region, converted from an
+// il.ExceptionHandler's IL byte offsets to IR indices (TryStart/TryEnd/
+// HandlerStart/HandlerEnd are a [start, end) range over the enclosing
+// Method's IR slice, same convention as Branch's Target). CatchTypeFullName
+// is set only for HandlerCatch, resolved once here rather than re-resolved
+// per exception at runtime.
+type Handler struct {
+	Kind              HandlerKind
+	TryStart, TryEnd  int
+	HandlerStart      int
+	HandlerEnd        int
+	CatchTypeFullName string
+}
+
+// Rethrow implements `rethrow` (spec §III.4.31 — C#'s `throw;` with no
+// operand, valid only inside a catch block): re-raises the exception
+// currently being handled rather than requiring the handler to have kept
+// its own reference to it.
+type Rethrow struct{}

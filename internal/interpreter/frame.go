@@ -14,6 +14,20 @@ type Frame struct {
 	Locals []runtime.Value
 	Stack  []runtime.Value
 	IP     int
+
+	// unwind tracks an in-flight `leave` or exception propagating through
+	// one or more finally/fault handlers it still needs to run before
+	// resuming — see internal/interpreter/exceptions.go (Fase 3.10).
+	unwind *unwind
+
+	// currentException is the exception the innermost catch handler
+	// execution is currently in is handling, for `rethrow` (C#'s `throw;`
+	// with no operand). Overwritten on entering any catch handler —
+	// narrow known gap: a rethrow appearing *after* a nested try/catch
+	// inside the same catch block would see the nested exception instead
+	// of being restored, an edge case rare enough not to warrant a full
+	// stack for it.
+	currentException *runtime.ManagedException
 }
 
 func (f *Frame) push(v runtime.Value) { f.Stack = append(f.Stack, v) }

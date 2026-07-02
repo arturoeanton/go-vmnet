@@ -117,8 +117,16 @@ func (asm *Assembly) buildMethod(methodRID uint32, row metadata.MethodDefRow) (*
 		return nil, fmt.Errorf("%s: %w", fullName, err)
 	}
 
+	var ehClauses []il.ExceptionHandler
+	if header.MoreSections {
+		ehClauses, err = il.ReadExceptionHandlers(body, header, 12+int(header.CodeSize))
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", fullName, err)
+		}
+	}
+
 	retVoid := sig.RetType.Kind == metadata.SigVoid
-	irInstrs, err := ir.Build(instrs, asm.md, retVoid)
+	irInstrs, handlers, err := ir.Build(instrs, asm.md, retVoid, ehClauses)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", fullName, err)
 	}
@@ -155,6 +163,7 @@ func (asm *Assembly) buildMethod(methodRID uint32, row metadata.MethodDefRow) (*
 		MaxStack:      int(header.MaxStack),
 		IR:            irInstrs,
 		LocalDefaults: localDefaults,
+		Handlers:      handlers,
 	}
 	asm.storeMethod(fullName, m)
 	return m, nil

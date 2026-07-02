@@ -22,4 +22,9 @@ type Method struct {
 	// it. A nil entry (the common case: scalars, references) costs nothing
 	// since Value's own zero value already means Null()/0.
 	LocalDefaults []Value
+
+	// Handlers are this method's exception handler regions (try/catch/
+	// finally/fault — Fase 3.10), IR-index-based. Nil for the overwhelming
+	// majority of methods, which have none.
+	Handlers []ir.Handler
 }

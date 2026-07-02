@@ -179,3 +179,24 @@ declarados localmente vía su `TypeDef` real. Certificación: promedio de
 los 7 paquetes sube de ~64.2% a ~67.6% (~65.5% a ~68.8% con Jint);
 `FluentValidation` (una librería de predicados/callbacks) da el salto más
 grande medido en todo el camino a 85%, +13.4 puntos.
+
+Fase 3.10 (`try`/`catch`/`finally` real) completa — la pieza
+arquitectónicamente más grande del camino a 85%. `internal/il` gana un
+parser para la tabla de cláusulas de manejo de excepciones (spec
+§II.25.4.5-6, formas *small*/*fat*, nunca antes leída) y
+`internal/interpreter` un motor de despacho completo: un
+`*runtime.ManagedException` que sale de la ejecución de un método (por
+`throw`, `rethrow`, o propagado desde cualquier llamada anidada) se busca
+contra los handlers del método del más interno al más externo, un
+`catch` matchea reusando el mismo walk de jerarquía real de Fase 3.8 (no
+solo comparación exacta de tipo), y cualquier `finally`/`fault` en el
+camino corre siempre antes de que la excepción siga su curso. El
+refactor fue deliberadamente de bajo riesgo: el `switch` gigante de ~40
+casos existente se extrajo intacto a su propia función (`runFrame`), sin
+tocar la lógica interna de ningún caso previo — todo el riesgo nuevo
+quedó concentrado en el mecanismo de despacho, no esparcido por el
+archivo. Certificación: promedio de los 7 paquetes sube apenas de
+~67.6% a ~67.7% (~68.8% a ~69.0% con Jint) — movimiento chico y
+esperado, ya que excepciones solo "limpia" un método si era el único
+obstáculo; el valor de esta fase es arquitectónico, no un salto grande
+en el número.

@@ -111,12 +111,16 @@ func inProfile(p Profile, fullName string) bool {
 // ir.LoadFtn (Fase 3.9) is included too: a delegate is a heap-allocated
 // closure once ir.NewObj (already excluded) constructs it, and ldftn only
 // exists to feed that construction.
+// ir.Leave/ir.EndFinally/ir.Rethrow (Fase 3.10) are included: a plain
+// `try { } finally { }` with no throw or catch anywhere still compiles to
+// leave/endfinally, so excluding only ir.Throw would miss it.
 func instrIsObjectModel(instr ir.Instr) bool {
 	switch v := instr.(type) {
 	case ir.NewObj, ir.LoadField, ir.StoreField, ir.Throw,
 		ir.NewArr, ir.LoadLen, ir.LoadElem, ir.StoreElem, ir.LoadElemAddr,
 		ir.LoadFieldAddr, ir.LoadStaticField, ir.StoreStaticField,
-		ir.InitObj, ir.IsInst, ir.CastClass, ir.LoadFtn:
+		ir.InitObj, ir.IsInst, ir.CastClass, ir.LoadFtn,
+		ir.Leave, ir.EndFinally, ir.Rethrow:
 		return true
 	case ir.Call:
 		return v.Virtual

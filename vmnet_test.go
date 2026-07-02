@@ -385,6 +385,115 @@ func TestStructs(t *testing.T) {
 	})
 }
 
+// TestTryCatch exercises real try/catch/finally (Fase 3.10): catching by
+// exact type and by base type (the real class hierarchy from Fase 3.8,
+// not just an exact-match check), finally running on both the caught and
+// uncaught exception paths (including nested try/finally where the inner
+// finally runs before the exception reaches an outer catch), first-match-
+// wins among multiple catch clauses, rethrow preserving the original
+// exception (including its Message), and an exception with no matching
+// catch propagating out of the method as a Go error.
+func TestTryCatch(t *testing.T) {
+	asm := loadFixture(t)
+
+	t.Run("catch by exact type", func(t *testing.T) {
+		noThrow, err := asm.Call("Vmnet.Fixtures.TryCatch", "CatchByType", Int32(0))
+		if err != nil {
+			t.Fatalf("CatchByType(false) error = %v", err)
+		}
+		if got := noThrow.Native().(int32); got != 1 {
+			t.Errorf("CatchByType(false) = %d, want 1", got)
+		}
+
+		caught, err := asm.Call("Vmnet.Fixtures.TryCatch", "CatchByType", Int32(1))
+		if err != nil {
+			t.Fatalf("CatchByType(true) error = %v", err)
+		}
+		if got := caught.Native().(int32); got != 2 {
+			t.Errorf("CatchByType(true) = %d, want 2", got)
+		}
+	})
+
+	t.Run("catch by base type", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.TryCatch", "CatchByBaseType")
+		if err != nil {
+			t.Fatalf("CatchByBaseType() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 42 {
+			t.Errorf("CatchByBaseType() = %d, want 42", got)
+		}
+	})
+
+	t.Run("finally always runs", func(t *testing.T) {
+		noThrow, err := asm.Call("Vmnet.Fixtures.TryCatch", "FinallyAlwaysRuns", Int32(0))
+		if err != nil {
+			t.Fatalf("FinallyAlwaysRuns(false) error = %v", err)
+		}
+		if got := noThrow.Native().(string); got != "try;finally;" {
+			t.Errorf("FinallyAlwaysRuns(false) = %q, want %q", got, "try;finally;")
+		}
+
+		threw, err := asm.Call("Vmnet.Fixtures.TryCatch", "FinallyAlwaysRuns", Int32(1))
+		if err != nil {
+			t.Fatalf("FinallyAlwaysRuns(true) error = %v", err)
+		}
+		if got := threw.Native().(string); got != "try;catch;finally;" {
+			t.Errorf("FinallyAlwaysRuns(true) = %q, want %q", got, "try;catch;finally;")
+		}
+	})
+
+	t.Run("finally runs on uncaught exception before an outer catch", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.TryCatch", "FinallyRunsOnUncaughtException")
+		if err != nil {
+			t.Fatalf("FinallyRunsOnUncaughtException() error = %v", err)
+		}
+		want := "inner-try;inner-finally;outer-catch;"
+		if got := out.Native().(string); got != want {
+			t.Errorf("FinallyRunsOnUncaughtException() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("first matching catch wins", func(t *testing.T) {
+		argNull, err := asm.Call("Vmnet.Fixtures.TryCatch", "FirstMatchingCatchWins", Int32(1))
+		if err != nil {
+			t.Fatalf("FirstMatchingCatchWins(true) error = %v", err)
+		}
+		if got := argNull.Native().(int32); got != 1 {
+			t.Errorf("FirstMatchingCatchWins(true) = %d, want 1", got)
+		}
+
+		invalidOp, err := asm.Call("Vmnet.Fixtures.TryCatch", "FirstMatchingCatchWins", Int32(0))
+		if err != nil {
+			t.Fatalf("FirstMatchingCatchWins(false) error = %v", err)
+		}
+		if got := invalidOp.Native().(int32); got != 2 {
+			t.Errorf("FirstMatchingCatchWins(false) = %d, want 2", got)
+		}
+	})
+
+	t.Run("rethrow preserves the exception", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.TryCatch", "Rethrow")
+		if err != nil {
+			t.Fatalf("Rethrow() error = %v", err)
+		}
+		want := "inner-catch;outer-catch:original"
+		if got := out.Native().(string); got != want {
+			t.Errorf("Rethrow() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("uncaught exception propagates", func(t *testing.T) {
+		_, err := asm.Call("Vmnet.Fixtures.TryCatch", "UncaughtExceptionPropagates")
+		if err == nil {
+			t.Fatal("UncaughtExceptionPropagates() succeeded, want a propagated NotSupportedException")
+		}
+		var ex *runtime.ManagedException
+		if !errors.As(err, &ex) || ex.TypeName != "System.NotSupportedException" {
+			t.Errorf("UncaughtExceptionPropagates() error = %v, want a System.NotSupportedException", err)
+		}
+	})
+}
+
 // TestDelegates exercises delegates/closures (Fase 3.9): a method-group
 // conversion (static target, no receiver, cached by the compiler in a
 // static field), a closure capturing a parameter, a closure capturing

@@ -10,12 +10,17 @@ import (
 
 // Build lowers one method's decoded IL into IR. md resolves ldstr/call
 // tokens; retVoid tells Build how to lower `ret` (with or without a
-// value) since IL's `ret` opcode carries no operand of its own.
+// value) since IL's `ret` opcode carries no operand of its own; ehClauses
+// (from il.ReadExceptionHandlers, nil if the method has none) become the
+// returned []Handler, with IL byte offsets resolved to IR indices the
+// same way branch targets are (Fase 3.10).
 //
-// Anything CIL can express that Fase 1 doesn't model — objects, callvirt,
-// arrays, exceptions, generics — is reported as an explicit unsupported-
-// opcode error instead of silently mis-translated (spec §11.3, §23).
-func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Instr, error) {
+// Anything CIL can express that Fase 1-3.9 don't model — interface/vtable
+// dispatch beyond isinst/castclass, generics beyond native BCL
+// collections, exception filters (`catch (Foo) when (cond)`) — is
+// reported as an explicit unsupported-opcode error instead of silently
+// mis-translated (spec §11.3, §23).
+func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool, ehClauses []il.ExceptionHandler) ([]Instr, []Handler, error) {
 	offsetToIndex := make(map[int]int, len(instrs))
 	for i, instr := range instrs {
 		offsetToIndex[instr.Offset] = i
@@ -114,7 +119,7 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 			token := instr.Operand.(uint32)
 			s, err := md.UserString(token & 0x00FFFFFF)
 			if err != nil {
-				return nil, fmt.Errorf("ir: ldstr at IL offset %d: %w", instr.Offset, err)
+				return nil, nil, fmt.Errorf("ir: ldstr at IL offset %d: %w", instr.Offset, err)
 			}
 			out = append(out, LoadString{s})
 
@@ -183,19 +188,19 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 		case "br.s", "br":
 			target, err := resolveTarget(instr.Operand.(int))
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			out = append(out, Branch{target})
 		case "brtrue.s", "brtrue":
 			target, err := resolveTarget(instr.Operand.(int))
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			out = append(out, BranchIfTrue{target})
 		case "brfalse.s", "brfalse":
 			target, err := resolveTarget(instr.Operand.(int))
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			out = append(out, BranchIfFalse{target})
 		case "switch":
@@ -204,7 +209,7 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 			for i, off := range offsets {
 				target, err := resolveTarget(off)
 				if err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 				targets[i] = target
 			}
@@ -212,61 +217,61 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 		case "beq.s", "beq":
 			target, err := resolveTarget(instr.Operand.(int))
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			out = append(out, BranchCompare{Target: target, Op: CmpEq})
 		case "bge.s", "bge":
 			target, err := resolveTarget(instr.Operand.(int))
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			out = append(out, BranchCompare{Target: target, Op: CmpGe})
 		case "bge.un.s", "bge.un":
 			target, err := resolveTarget(instr.Operand.(int))
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			out = append(out, BranchCompare{Target: target, Op: CmpGe, Unsigned: true})
 		case "bgt.s", "bgt":
 			target, err := resolveTarget(instr.Operand.(int))
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			out = append(out, BranchCompare{Target: target, Op: CmpGt})
 		case "bgt.un.s", "bgt.un":
 			target, err := resolveTarget(instr.Operand.(int))
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			out = append(out, BranchCompare{Target: target, Op: CmpGt, Unsigned: true})
 		case "ble.s", "ble":
 			target, err := resolveTarget(instr.Operand.(int))
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			out = append(out, BranchCompare{Target: target, Op: CmpLe})
 		case "ble.un.s", "ble.un":
 			target, err := resolveTarget(instr.Operand.(int))
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			out = append(out, BranchCompare{Target: target, Op: CmpLe, Unsigned: true})
 		case "blt.s", "blt":
 			target, err := resolveTarget(instr.Operand.(int))
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			out = append(out, BranchCompare{Target: target, Op: CmpLt})
 		case "blt.un.s", "blt.un":
 			target, err := resolveTarget(instr.Operand.(int))
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			out = append(out, BranchCompare{Target: target, Op: CmpLt, Unsigned: true})
 		case "bne.un.s", "bne.un":
 			target, err := resolveTarget(instr.Operand.(int))
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			out = append(out, BranchCompare{Target: target, Op: CmpNe, Unsigned: true})
 
@@ -274,7 +279,7 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 			token := instr.Operand.(uint32)
 			fullName, hasThis, argCount, hasReturn, err := resolveCallTarget(md, token)
 			if err != nil {
-				return nil, fmt.Errorf("ir: call at IL offset %d: %w", instr.Offset, err)
+				return nil, nil, fmt.Errorf("ir: call at IL offset %d: %w", instr.Offset, err)
 			}
 			out = append(out, Call{FullName: fullName, ArgCount: argCount, HasThis: hasThis, HasReturn: hasReturn})
 
@@ -282,7 +287,7 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 			token := instr.Operand.(uint32)
 			fullName, _, argCount, hasReturn, err := resolveCallTarget(md, token)
 			if err != nil {
-				return nil, fmt.Errorf("ir: callvirt at IL offset %d: %w", instr.Offset, err)
+				return nil, nil, fmt.Errorf("ir: callvirt at IL offset %d: %w", instr.Offset, err)
 			}
 			out = append(out, Call{FullName: fullName, ArgCount: argCount, HasThis: true, HasReturn: hasReturn, Virtual: true})
 
@@ -290,7 +295,7 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 			token := instr.Operand.(uint32)
 			typeFullName, ctorFullName, argCount, err := resolveNewObjTarget(md, token)
 			if err != nil {
-				return nil, fmt.Errorf("ir: newobj at IL offset %d: %w", instr.Offset, err)
+				return nil, nil, fmt.Errorf("ir: newobj at IL offset %d: %w", instr.Offset, err)
 			}
 			out = append(out, NewObj{TypeFullName: typeFullName, CtorFullName: ctorFullName, ArgCount: argCount})
 
@@ -298,7 +303,7 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 			token := instr.Operand.(uint32)
 			typeFullName, fieldName, err := resolveFieldTarget(md, token)
 			if err != nil {
-				return nil, fmt.Errorf("ir: ldfld at IL offset %d: %w", instr.Offset, err)
+				return nil, nil, fmt.Errorf("ir: ldfld at IL offset %d: %w", instr.Offset, err)
 			}
 			out = append(out, LoadField{TypeFullName: typeFullName, FieldName: fieldName})
 
@@ -306,7 +311,7 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 			token := instr.Operand.(uint32)
 			typeFullName, fieldName, err := resolveFieldTarget(md, token)
 			if err != nil {
-				return nil, fmt.Errorf("ir: stfld at IL offset %d: %w", instr.Offset, err)
+				return nil, nil, fmt.Errorf("ir: stfld at IL offset %d: %w", instr.Offset, err)
 			}
 			out = append(out, StoreField{TypeFullName: typeFullName, FieldName: fieldName})
 
@@ -314,7 +319,7 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 			token := instr.Operand.(uint32)
 			typeFullName, fieldName, err := resolveFieldTarget(md, token)
 			if err != nil {
-				return nil, fmt.Errorf("ir: ldsfld at IL offset %d: %w", instr.Offset, err)
+				return nil, nil, fmt.Errorf("ir: ldsfld at IL offset %d: %w", instr.Offset, err)
 			}
 			out = append(out, LoadStaticField{TypeFullName: typeFullName, FieldName: fieldName})
 
@@ -322,7 +327,7 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 			token := instr.Operand.(uint32)
 			typeFullName, fieldName, err := resolveFieldTarget(md, token)
 			if err != nil {
-				return nil, fmt.Errorf("ir: stsfld at IL offset %d: %w", instr.Offset, err)
+				return nil, nil, fmt.Errorf("ir: stsfld at IL offset %d: %w", instr.Offset, err)
 			}
 			out = append(out, StoreStaticField{TypeFullName: typeFullName, FieldName: fieldName})
 
@@ -330,7 +335,7 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 			token := instr.Operand.(uint32)
 			typeFullName, fieldName, err := resolveFieldTarget(md, token)
 			if err != nil {
-				return nil, fmt.Errorf("ir: ldflda at IL offset %d: %w", instr.Offset, err)
+				return nil, nil, fmt.Errorf("ir: ldflda at IL offset %d: %w", instr.Offset, err)
 			}
 			out = append(out, LoadFieldAddr{TypeFullName: typeFullName, FieldName: fieldName})
 
@@ -371,7 +376,7 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 			token := instr.Operand.(uint32)
 			typeFullName, err := resolveTypeTokenOrGeneric(md, token)
 			if err != nil {
-				return nil, fmt.Errorf("ir: initobj at IL offset %d: %w", instr.Offset, err)
+				return nil, nil, fmt.Errorf("ir: initobj at IL offset %d: %w", instr.Offset, err)
 			}
 			out = append(out, InitObj{TypeFullName: typeFullName})
 
@@ -379,7 +384,7 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 			token := instr.Operand.(uint32)
 			typeFullName, err := resolveTypeTokenOrGeneric(md, token)
 			if err != nil {
-				return nil, fmt.Errorf("ir: isinst at IL offset %d: %w", instr.Offset, err)
+				return nil, nil, fmt.Errorf("ir: isinst at IL offset %d: %w", instr.Offset, err)
 			}
 			out = append(out, IsInst{TypeFullName: typeFullName})
 
@@ -387,7 +392,7 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 			token := instr.Operand.(uint32)
 			typeFullName, err := resolveTypeTokenOrGeneric(md, token)
 			if err != nil {
-				return nil, fmt.Errorf("ir: castclass at IL offset %d: %w", instr.Offset, err)
+				return nil, nil, fmt.Errorf("ir: castclass at IL offset %d: %w", instr.Offset, err)
 			}
 			out = append(out, CastClass{TypeFullName: typeFullName})
 
@@ -395,7 +400,7 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 			token := instr.Operand.(uint32)
 			fullName, _, _, _, err := resolveCallTarget(md, token)
 			if err != nil {
-				return nil, fmt.Errorf("ir: ldftn at IL offset %d: %w", instr.Offset, err)
+				return nil, nil, fmt.Errorf("ir: ldftn at IL offset %d: %w", instr.Offset, err)
 			}
 			out = append(out, LoadFtn{FullName: fullName})
 
@@ -403,7 +408,7 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 			token := instr.Operand.(uint32)
 			fullName, _, _, _, err := resolveCallTarget(md, token)
 			if err != nil {
-				return nil, fmt.Errorf("ir: ldvirtftn at IL offset %d: %w", instr.Offset, err)
+				return nil, nil, fmt.Errorf("ir: ldvirtftn at IL offset %d: %w", instr.Offset, err)
 			}
 			out = append(out, LoadFtn{FullName: fullName, Virtual: true})
 
@@ -423,11 +428,106 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 		case "ret":
 			out = append(out, Return{HasValue: !retVoid})
 
+		case "leave", "leave.s":
+			target, err := resolveTarget(instr.Operand.(int))
+			if err != nil {
+				return nil, nil, err
+			}
+			out = append(out, Leave{Target: target})
+
+		case "endfinally":
+			out = append(out, EndFinally{})
+
+		case "rethrow":
+			out = append(out, Rethrow{})
+
 		default:
-			return nil, &UnsupportedOpcodeError{OpCode: name, Offset: instr.Offset}
+			return nil, nil, &UnsupportedOpcodeError{OpCode: name, Offset: instr.Offset}
 		}
 	}
-	return out, nil
+
+	handlers, err := buildHandlers(ehClauses, md, offsetToIndex, len(out))
+	if err != nil {
+		return nil, nil, err
+	}
+	return out, handlers, nil
+}
+
+// buildHandlers converts il.ExceptionHandler's IL byte offsets to IR
+// indices. End offsets (TryOffset+TryLength, HandlerOffset+HandlerLength)
+// need a variant of resolveTarget's lookup: a handler region ending
+// exactly at the end of the method body points one byte past the last
+// instruction, which offsetToIndex — built only from actual instruction
+// start offsets — has no entry for; that's resolved to instrCount (one
+// past the last IR index), same convention as a normal slice's end index.
+func buildHandlers(ehClauses []il.ExceptionHandler, md *metadata.Metadata, offsetToIndex map[int]int, instrCount int) ([]Handler, error) {
+	if len(ehClauses) == 0 {
+		return nil, nil
+	}
+	maxOffset := -1
+	for offset := range offsetToIndex {
+		if offset > maxOffset {
+			maxOffset = offset
+		}
+	}
+	resolveEnd := func(offset int) (int, error) {
+		if idx, ok := offsetToIndex[offset]; ok {
+			return idx, nil
+		}
+		if offset > maxOffset {
+			return instrCount, nil
+		}
+		return 0, fmt.Errorf("ir: exception handler region end offset %d is not an instruction boundary", offset)
+	}
+	resolveStart := func(offset int) (int, error) {
+		idx, ok := offsetToIndex[offset]
+		if !ok {
+			return 0, fmt.Errorf("ir: exception handler region start offset %d is not an instruction boundary", offset)
+		}
+		return idx, nil
+	}
+
+	handlers := make([]Handler, 0, len(ehClauses))
+	for _, c := range ehClauses {
+		if c.Kind == il.HandlerFilter {
+			// Filter clauses (`catch (Foo) when (cond)`) parse at the il
+			// layer but aren't executable here — see Build's doc comment.
+			return nil, &UnsupportedOpcodeError{OpCode: "filter (catch-when)", Offset: c.HandlerOffset}
+		}
+		tryStart, err := resolveStart(c.TryOffset)
+		if err != nil {
+			return nil, err
+		}
+		tryEnd, err := resolveEnd(c.TryOffset + c.TryLength)
+		if err != nil {
+			return nil, err
+		}
+		handlerStart, err := resolveStart(c.HandlerOffset)
+		if err != nil {
+			return nil, err
+		}
+		handlerEnd, err := resolveEnd(c.HandlerOffset + c.HandlerLength)
+		if err != nil {
+			return nil, err
+		}
+
+		h := Handler{TryStart: tryStart, TryEnd: tryEnd, HandlerStart: handlerStart, HandlerEnd: handlerEnd}
+		switch c.Kind {
+		case il.HandlerFinally:
+			h.Kind = HandlerFinally
+		case il.HandlerFault:
+			h.Kind = HandlerFault
+		default:
+			h.Kind = HandlerCatch
+			typeName, err := resolveTypeTokenOrGeneric(md, c.ClassToken)
+			if err != nil {
+				return nil, fmt.Errorf("ir: exception handler catch type: %w", err)
+			}
+			h.CatchTypeFullName = typeName
+		}
+		handlers = append(handlers, h)
+	}
+	return handlers, nil
 }
 
 // UnsupportedOpcodeError is returned by Build when IL uses an opcode Fase

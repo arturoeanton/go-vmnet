@@ -1016,6 +1016,105 @@ go test ./... -race -count=3
 go test ./ -run TestDelegates -v
 ```
 
+### Fase 3.10 — `try`/`catch`/`finally` real
+
+La pieza arquitectónicamente más grande del camino a 85%: manejo de excepciones real, no solo
+`throw` no manejado.
+
+**Tareas**
+
+- [x] `internal/il`: parser nuevo de la tabla de cláusulas de manejo de excepciones (spec
+      §II.25.4.5-6, formas *small* y *fat*, secciones encadenadas vía `MoreSects`) — hasta ahora
+      `ReadMethodBody` ni siquiera leía los bytes que siguen al código de un método con
+      `try`/`catch`/`finally`. Fuzz test nuevo (`FuzzReadExceptionHandlers`, ~4.6M ejecuciones
+      corridas manualmente, 0 panics).
+- [x] IR: `Leave` (spec §III.3.44 — a diferencia de un `Branch` común, tiene que correr cualquier
+      `finally`/`fault` entre el punto de salida y el destino antes de saltar), `EndFinally`,
+      `Rethrow` (`throw;` de C#, sin operando). `Build` ahora también devuelve `[]Handler`
+      (offsets de IL ya resueltos a índices de IR, igual que los targets de branch) — cambio de
+      firma que tocó los dos call sites (`assembly.go`, el checker).
+- [x] `internal/interpreter`: motor de despacho de excepciones completo —
+  - Un `*runtime.ManagedException` que sale de `runFrame` (venga de un `throw` directo, un
+    `rethrow`, o propagado desde cualquier llamada anidada — `frame.IP` ya apunta a la
+    instrucción exacta que estaba corriendo, sin necesidad de rastrear nada especial) se busca
+    contra los `Handler`s del método actual, del más interno al más externo.
+  - Un `catch` matchea reusando **el mismo walk de jerarquía real de Fase 3.8**
+    (`isAssignableTo`) — así que `catch (ArgumentException)` atrapa correctamente una
+    `ArgumentNullException` lanzada adentro, no solo un match exacto de tipo.
+  - Un `finally`/`fault` en el camino se corre siempre, tanto si la excepción termina
+    atrapada como si sigue propagándose — `endfinally` retoma exactamente la transferencia de
+    control que entró al handler (un `leave` encadenando el siguiente `finally` pendiente, o la
+    búsqueda de catch retomando desde donde quedó).
+  - `rethrow` preserva la excepción original (`frame.currentException`, seteado al entrar a
+    cualquier catch) en vez de exigir que el handler guarde su propia referencia.
+  - `System.Exception::get_Message` — faltaba por completo; sin él, `catch (T ex) { ...
+    ex.Message ... }` (el patrón más común de todos) no tenía forma de leer el mensaje.
+- [x] **Refactor de bajo riesgo, no una reescritura**: el loop gigante existente (`switch` con
+      ~40 casos) se dejó intacto — se extrajo tal cual a `runFrame`, y `invoke` pasó a ser un
+      loop delgado que llama a `runFrame`, atrapa un `*runtime.ManagedException` si sale, y
+      reintenta despachándolo contra los handlers del método antes de dejarlo propagar. Cero
+      cambios a la lógica interna de los ~40 casos existentes — todo el riesgo quedó concentrado
+      en el mecanismo nuevo, no esparcido por todo el archivo.
+
+**Fixtures y tests**
+
+- [x] `TryCatch.cs` / `TestTryCatch` — catch por tipo exacto y por tipo base, `finally` corriendo
+      en el camino atrapado y en el no atrapado, `finally` anidado corriendo antes de llegar a un
+      `catch` externo, primer `catch` que matchea gana entre varios, `rethrow` preservando el
+      mensaje original, y una excepción sin `catch` que matchea propagándose como error de Go —
+      **todos los casos que no dependían del límite preexistente del CLI con argumentos JSON
+      booleanos pasaron a la primera corrida real**, incluida la excepción anidada.
+- [x] `internal/checker`: `Unsupported.cs` repurpuesta otra vez (tercera vez que crece la
+      cobertura de vmnet) — ahora usa una cláusula de filtro (`catch (T) when (cond)`), la única
+      forma de manejo de excepciones que esta fase deliberadamente no baja a IR.
+
+### Lo que se dejó explícitamente afuera de esta fase
+
+```txt
+- Cláusulas de filtro (`catch (T) when (cond)`): buildHandlers en ir/builder.go las rechaza
+  explícitamente como opcode no soportado en vez de ejecutarlas mal. Poco frecuentes en código
+  real comparado con catch/finally simples.
+- `rethrow` solo rastrea la excepción del catch más reciente que se entró (un solo slot, no una
+  pila) — un `rethrow` después de un try/catch anidado *dentro* del mismo catch handler vería
+  la excepción interna en vez de restaurarse a la externa. Edge case raro, documentado.
+- Tipos de excepción definidos por el usuario (clases que heredan de Exception con campos
+  propios): las excepciones siguen siendo solo los tipos nativos que vmnet ya registra
+  (docs/ROADMAP.md Fase 2) — el mecanismo de catch-por-jerarquía funciona iguales para
+  cualquier tipo que sí resuelva, pero construir una excepción custom con `newobj` todavía
+  necesita que su `.ctor` sea interpretable, que hoy no está especialmente ejercitado.
+```
+
+### Re-certificación contra los mismos 8 targets (7 paquetes + Jint)
+
+| Paquete | % limpio Fase 3.9 | % limpio Fase 3.10 |
+|---|---|---|
+| `Ardalis.GuardClauses@5.0.0` | 90.5% | 90.5% |
+| `System.Text.Json@8.0.5` | 69.3% | 69.7% |
+| `Newtonsoft.Json@13.0.3` | 63.8% | 64.3% |
+| `Humanizer.Core@2.14.1` | 46.8% | 47.0% |
+| `FluentValidation@11.9.2` | 77.3% | 77.3% |
+| `Semver@2.3.0` | 76.8% | 76.8% |
+| `SimpleBase@4.0.0` | 48.4% | 48.4% |
+| **Promedio (7 paquetes)** | **67.6%** | **67.7%** |
+| `Jint@3.1.3` | 77.3% | 78.1% |
+| **Promedio (7 paquetes + Jint)** | **68.8%** | **69.0%** |
+
+Movimiento chico, honesto: a diferencia de la jerarquía de tipos o los delegates (que
+desbloquearon directamente otros targets de llamada que antes fallaban), `try`/`catch`/`finally`
+solo "limpia" un método si **ese era el único** obstáculo — muchos métodos que usan excepciones
+en los paquetes reales también tocan otras cosas que siguen sin soportarse (DateTime, Span,
+reflection). El valor de esta fase es arquitectónico (excepciones reales, no solo throw no
+manejado) más que un salto grande en el número, y era la pieza más riesgosa de implementar bien —
+vale la pena haberla hecho con cuidado aunque el número no lo refleje tanto como Fase 3.8/3.9.
+
+### Cómo verificar Fase 3.10
+
+```bash
+go test ./... -race -count=3
+go test ./ -run TestTryCatch -v
+go test ./internal/il/... -run '^$' -fuzz '^FuzzReadExceptionHandlers$' -fuzztime=30s
+```
+
 ---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")

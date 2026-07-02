@@ -26,4 +26,7 @@ var (
 	ErrCallDepthExceeded        = errors.New("interpreter: call depth exceeded")
 	ErrInstructionLimitExceeded = errors.New("interpreter: instruction limit exceeded")
 	ErrArrayTooLarge            = errors.New("interpreter: array length exceeds MaxArrayLength")
+
+	errEndfinallyOutsideHandler = errors.New("interpreter: endfinally outside a finally/fault handler")
+	errRethrowOutsideCatch      = errors.New("interpreter: rethrow outside a catch handler")
 )
