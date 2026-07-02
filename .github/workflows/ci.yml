@@ -30,6 +30,16 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
+      # The Go tests load real compiled C# assemblies as golden fixtures.
+      # The .NET SDK is a dev/test-only dependency for this step — vmnet
+      # itself never needs it at runtime (see ADR 0001).
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Build C# test fixtures
+        run: dotnet build tests/fixtures/csharp/Fixtures.csproj -c Release
+
       - name: Build
         run: go build ./...
 
@@ -38,16 +48,3 @@ jobs:
 
       - name: Test
         run: go test ./... -race=false -count=1
-
-  fixtures:
-    name: dotnet fixtures build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "8.0.x"
-
-      - name: Build C# test fixtures
-        run: dotnet build tests/fixtures/csharp/Fixtures.csproj -c Release

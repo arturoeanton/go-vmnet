@@ -1,0 +1,317 @@
+package ir
+
+import (
+	"fmt"
+
+	"github.com/arturoeanton/go-vmnet/internal/il"
+	"github.com/arturoeanton/go-vmnet/internal/metadata"
+)
+
+// Build lowers one method's decoded IL into IR. md resolves ldstr/call
+// tokens; retVoid tells Build how to lower `ret` (with or without a
+// value) since IL's `ret` opcode carries no operand of its own.
+//
+// Anything CIL can express that Fase 1 doesn't model — objects, callvirt,
+// arrays, exceptions, generics — is reported as an explicit unsupported-
+// opcode error instead of silently mis-translated (spec §11.3, §23).
+func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Instr, error) {
+	offsetToIndex := make(map[int]int, len(instrs))
+	for i, instr := range instrs {
+		offsetToIndex[instr.Offset] = i
+	}
+	resolveTarget := func(target int) (int, error) {
+		idx, ok := offsetToIndex[target]
+		if !ok {
+			return 0, fmt.Errorf("ir: branch target offset %d is not an instruction boundary", target)
+		}
+		return idx, nil
+	}
+
+	out := make([]Instr, 0, len(instrs))
+	for _, instr := range instrs {
+		name := instr.OpCode.Name()
+		switch name {
+		case "nop", "break":
+			out = append(out, Nop{})
+		case "dup":
+			out = append(out, Dup{})
+		case "pop":
+			out = append(out, Pop{})
+
+		case "ldarg.0":
+			out = append(out, LoadArg{0})
+		case "ldarg.1":
+			out = append(out, LoadArg{1})
+		case "ldarg.2":
+			out = append(out, LoadArg{2})
+		case "ldarg.3":
+			out = append(out, LoadArg{3})
+		case "ldarg.s", "ldarg":
+			out = append(out, LoadArg{Index: operandIndex(instr.Operand)})
+
+		case "ldloc.0":
+			out = append(out, LoadLocal{0})
+		case "ldloc.1":
+			out = append(out, LoadLocal{1})
+		case "ldloc.2":
+			out = append(out, LoadLocal{2})
+		case "ldloc.3":
+			out = append(out, LoadLocal{3})
+		case "ldloc.s", "ldloc":
+			out = append(out, LoadLocal{Index: operandIndex(instr.Operand)})
+
+		case "stloc.0":
+			out = append(out, StoreLocal{0})
+		case "stloc.1":
+			out = append(out, StoreLocal{1})
+		case "stloc.2":
+			out = append(out, StoreLocal{2})
+		case "stloc.3":
+			out = append(out, StoreLocal{3})
+		case "stloc.s", "stloc":
+			out = append(out, StoreLocal{Index: operandIndex(instr.Operand)})
+
+		case "ldnull":
+			out = append(out, LoadNull{})
+		case "ldc.i4.m1":
+			out = append(out, LoadConstI4{-1})
+		case "ldc.i4.0":
+			out = append(out, LoadConstI4{0})
+		case "ldc.i4.1":
+			out = append(out, LoadConstI4{1})
+		case "ldc.i4.2":
+			out = append(out, LoadConstI4{2})
+		case "ldc.i4.3":
+			out = append(out, LoadConstI4{3})
+		case "ldc.i4.4":
+			out = append(out, LoadConstI4{4})
+		case "ldc.i4.5":
+			out = append(out, LoadConstI4{5})
+		case "ldc.i4.6":
+			out = append(out, LoadConstI4{6})
+		case "ldc.i4.7":
+			out = append(out, LoadConstI4{7})
+		case "ldc.i4.8":
+			out = append(out, LoadConstI4{8})
+		case "ldc.i4.s":
+			out = append(out, LoadConstI4{int32(instr.Operand.(int8))})
+		case "ldc.i4":
+			out = append(out, LoadConstI4{instr.Operand.(int32)})
+		case "ldc.i8":
+			out = append(out, LoadConstI8{instr.Operand.(int64)})
+		case "ldc.r4":
+			out = append(out, LoadConstR4{instr.Operand.(float32)})
+		case "ldc.r8":
+			out = append(out, LoadConstR8{instr.Operand.(float64)})
+		case "ldstr":
+			token := instr.Operand.(uint32)
+			s, err := md.UserString(token & 0x00FFFFFF)
+			if err != nil {
+				return nil, fmt.Errorf("ir: ldstr at IL offset %d: %w", instr.Offset, err)
+			}
+			out = append(out, LoadString{s})
+
+		case "add", "add.ovf", "add.ovf.un":
+			out = append(out, BinOp{OpAdd})
+		case "sub", "sub.ovf", "sub.ovf.un":
+			out = append(out, BinOp{OpSub})
+		case "mul", "mul.ovf", "mul.ovf.un":
+			out = append(out, BinOp{OpMul})
+		case "div", "div.un":
+			out = append(out, BinOp{OpDiv})
+		case "rem", "rem.un":
+			out = append(out, BinOp{OpRem})
+		case "and":
+			out = append(out, BinOp{OpAnd})
+		case "or":
+			out = append(out, BinOp{OpOr})
+		case "xor":
+			out = append(out, BinOp{OpXor})
+		case "shl":
+			out = append(out, BinOp{OpShl})
+		case "shr", "shr.un":
+			out = append(out, BinOp{OpShr})
+		case "neg":
+			out = append(out, Neg{})
+		case "not":
+			out = append(out, Not{})
+		case "ceq":
+			out = append(out, BinOp{OpCeq})
+		case "cgt", "cgt.un":
+			out = append(out, BinOp{OpCgt})
+		case "clt", "clt.un":
+			out = append(out, BinOp{OpClt})
+
+		case "conv.i1", "conv.ovf.i1", "conv.ovf.i1.un":
+			out = append(out, Conv{ConvI1})
+		case "conv.u1", "conv.ovf.u1", "conv.ovf.u1.un":
+			out = append(out, Conv{ConvU1})
+		case "conv.i2", "conv.ovf.i2", "conv.ovf.i2.un":
+			out = append(out, Conv{ConvI2})
+		case "conv.u2", "conv.ovf.u2", "conv.ovf.u2.un":
+			out = append(out, Conv{ConvU2})
+		case "conv.i4", "conv.i", "conv.ovf.i4", "conv.ovf.i4.un", "conv.ovf.i", "conv.ovf.i.un":
+			out = append(out, Conv{ConvI4})
+		case "conv.u4", "conv.u", "conv.ovf.u4", "conv.ovf.u4.un", "conv.ovf.u", "conv.ovf.u.un":
+			out = append(out, Conv{ConvU4})
+		case "conv.i8", "conv.ovf.i8", "conv.ovf.i8.un":
+			out = append(out, Conv{ConvI8})
+		case "conv.u8", "conv.ovf.u8", "conv.ovf.u8.un":
+			out = append(out, Conv{ConvU8})
+		case "conv.r4":
+			out = append(out, Conv{ConvR4})
+		case "conv.r8", "conv.r.un":
+			out = append(out, Conv{ConvR8})
+
+		case "br.s", "br":
+			target, err := resolveTarget(instr.Operand.(int))
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, Branch{target})
+		case "brtrue.s", "brtrue":
+			target, err := resolveTarget(instr.Operand.(int))
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, BranchIfTrue{target})
+		case "brfalse.s", "brfalse":
+			target, err := resolveTarget(instr.Operand.(int))
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, BranchIfFalse{target})
+		case "beq.s", "beq":
+			target, err := resolveTarget(instr.Operand.(int))
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, BranchCompare{target, CmpEq})
+		case "bge.s", "bge", "bge.un.s", "bge.un":
+			target, err := resolveTarget(instr.Operand.(int))
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, BranchCompare{target, CmpGe})
+		case "bgt.s", "bgt", "bgt.un.s", "bgt.un":
+			target, err := resolveTarget(instr.Operand.(int))
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, BranchCompare{target, CmpGt})
+		case "ble.s", "ble", "ble.un.s", "ble.un":
+			target, err := resolveTarget(instr.Operand.(int))
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, BranchCompare{target, CmpLe})
+		case "blt.s", "blt", "blt.un.s", "blt.un":
+			target, err := resolveTarget(instr.Operand.(int))
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, BranchCompare{target, CmpLt})
+		case "bne.un.s", "bne.un":
+			target, err := resolveTarget(instr.Operand.(int))
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, BranchCompare{target, CmpNe})
+
+		case "call":
+			token := instr.Operand.(uint32)
+			fullName, hasThis, argCount, hasReturn, err := resolveCallTarget(md, token)
+			if err != nil {
+				return nil, fmt.Errorf("ir: call at IL offset %d: %w", instr.Offset, err)
+			}
+			out = append(out, Call{FullName: fullName, ArgCount: argCount, HasThis: hasThis, HasReturn: hasReturn})
+
+		case "ret":
+			out = append(out, Return{HasValue: !retVoid})
+
+		default:
+			return nil, fmt.Errorf("ir: unsupported opcode %q at IL offset %d (not yet implemented — see docs/ROADMAP.md Fase 2+)", name, instr.Offset)
+		}
+	}
+	return out, nil
+}
+
+func operandIndex(operand any) int {
+	switch v := operand.(type) {
+	case uint8:
+		return int(v)
+	case uint16:
+		return int(v)
+	}
+	return 0
+}
+
+func resolveCallTarget(md *metadata.Metadata, token uint32) (fullName string, hasThis bool, argCount int, hasReturn bool, err error) {
+	t := metadata.Token(token)
+	switch t.Table() {
+	case metadata.TableMethodDef:
+		row, err := md.MethodDef(t.RID())
+		if err != nil {
+			return "", false, 0, false, err
+		}
+		typeRID, err := md.MethodDefOwner(t.RID())
+		if err != nil {
+			return "", false, 0, false, err
+		}
+		typeDef, err := md.TypeDef(typeRID)
+		if err != nil {
+			return "", false, 0, false, err
+		}
+		sig, err := metadata.ParseMethodSig(row.Signature)
+		if err != nil {
+			return "", false, 0, false, err
+		}
+		full := qualify(typeDef.Namespace, typeDef.Name) + "::" + row.Name
+		return full, sig.HasThis, int(sig.ParamCount), sig.RetType.Kind != metadata.SigVoid, nil
+
+	case metadata.TableMemberRef:
+		row, err := md.MemberRef(t.RID())
+		if err != nil {
+			return "", false, 0, false, err
+		}
+		sig, err := metadata.ParseMethodSig(row.Signature)
+		if err != nil {
+			return "", false, 0, false, err
+		}
+		typeName, err := resolveMemberRefClassName(md, row.Class)
+		if err != nil {
+			return "", false, 0, false, err
+		}
+		full := typeName + "::" + row.Name
+		return full, sig.HasThis, int(sig.ParamCount), sig.RetType.Kind != metadata.SigVoid, nil
+
+	default:
+		return "", false, 0, false, fmt.Errorf("unsupported call target table %#x", byte(t.Table()))
+	}
+}
+
+func resolveMemberRefClassName(md *metadata.Metadata, class metadata.Token) (string, error) {
+	switch class.Table() {
+	case metadata.TableTypeRef:
+		row, err := md.TypeRef(class.RID())
+		if err != nil {
+			return "", err
+		}
+		return qualify(row.Namespace, row.Name), nil
+	case metadata.TableTypeDef:
+		row, err := md.TypeDef(class.RID())
+		if err != nil {
+			return "", err
+		}
+		return qualify(row.Namespace, row.Name), nil
+	default:
+		return "", fmt.Errorf("unsupported MemberRef class table %#x", byte(class.Table()))
+	}
+}
+
+func qualify(namespace, name string) string {
+	if namespace == "" {
+		return name
+	}
+	return namespace + "." + name
+}

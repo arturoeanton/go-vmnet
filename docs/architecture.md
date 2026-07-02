@@ -51,6 +51,14 @@ Ver `docs/adr/0001-pure-go-core.md`.
 
 ## Estado actual
 
-Fase 0 (bootstrap) completa: scaffolding de módulos, CI, fixtures C#
-compilables. Ningún paquete tiene todavía lógica real — eso arranca en
-Fase 1 (`docs/ROADMAP.md`).
+Fase 0 (bootstrap) y Fase 1 (núcleo IL funcional) completas: el pipeline
+`.dll → internal/pe → internal/metadata → internal/il → internal/ir →
+internal/interpreter → internal/bcl` corre de punta a punta contra un
+assembly real compilado con el SDK de .NET (`tests/fixtures/csharp`),
+expuesto tanto por la API pública (`vmnet.New()` / `Assembly.Call`) como por
+el CLI (`vmnet inspect` / `vmnet il` / `vmnet run`). Alcance: métodos
+static, aritmética, branches/loops, y llamadas a un subconjunto mínimo de
+BCL (`System.Math.Abs`, `System.String.Concat`, `System.Console.WriteLine`).
+Objetos, `callvirt`, fields de instancia, excepciones y generics quedan
+para Fase 2 (`docs/ROADMAP.md`) — el IR builder los reporta como opcode no
+soportado en vez de ejecutarlos incorrectamente.

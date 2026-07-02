@@ -60,56 +60,71 @@ runtime .NET instalado. Este es el mayor riesgo técnico del proyecto y se prueb
 ### Tareas
 
 **`/pe` — PE/CLI loader**
-- [ ] DOS header, PE header, COFF header, optional header
-- [ ] Section headers + conversión RVA → file offset
-- [ ] Localización de CLI header y metadata root
-- [ ] Errores: `ErrInvalidPE`, `ErrMissingCLIHeader`, `ErrInvalidRVA`, `ErrInvalidMetadataRoot`
-- [ ] Tests: PE válido/inválido, sin CLI header, RVA inválido, múltiples secciones
+- [x] DOS header, PE header, COFF header, optional header
+- [x] Section headers + conversión RVA → file offset
+- [x] Localización de CLI header y metadata root
+- [x] Errores: `ErrInvalidPE`, `ErrMissingCLIHeader`, `ErrInvalidRVA`, `ErrInvalidMetadataRoot`
+- [x] Tests: PE válido/inválido, sin CLI header, RVA inválido, múltiples secciones
 
 **`/metadata` — metadata loader**
-- [ ] Streams: `#~`, `#Strings`, `#US`, `#Blob`, `#GUID`
-- [ ] Tablas core: Module, TypeRef, TypeDef, Field, MethodDef, Param, MemberRef, Constant,
-      StandAloneSig, Assembly, AssemblyRef (resto de tablas de §10.2 deben parsear sin fallar
-      aunque no se usen todavía)
-- [ ] Modelo de tokens + resolución de coded indexes
-- [ ] Parser de signatures: primitivos, `SZARRAY`, `CLASS`, `VALUETYPE` (generics → Fase 2/3)
-- [ ] Tests por tabla + decodificación de signatures
+- [x] Streams: `#~`, `#Strings`, `#US`, `#Blob`, `#GUID`
+- [x] Tablas core: Module, TypeRef, TypeDef, Field, MethodDef, Param, MemberRef, Constant,
+      StandAloneSig, Assembly, AssemblyRef (resto de tablas de §10.2 parsean sin fallar vía
+      esquema genérico, aunque no se usen todavía)
+- [x] Modelo de tokens + resolución de coded indexes
+- [x] Parser de signatures: primitivos, `SZARRAY`, `CLASS`, `VALUETYPE`, `MethodDefSig`,
+      `LocalVarSig` (generics/`GENERICINST` se parsean para no romper alineación, pero se
+      exponen como `SigUnknown` — resolución real en Fase 2/3)
+- [x] Tests por tabla + decodificación de signatures (contra el DLL real de fixtures)
 
 **`/il` — decoder**
-- [ ] Tabla de opcodes + decoder del set v0.1 (spec §11.2 completo)
-- [ ] `Instruction{Offset, OpCode, Operand}` con tracking de offsets
-- [ ] Reconocer (sin ejecutar) opcodes v0.2+ como "unsupported" en vez de crashear
+- [x] Tabla de opcodes completa (set v0.1 de spec §11.2 + opcodes v0.2+ de §11.3, todos
+      reconocidos por el decoder — ver nota de alcance más abajo)
+- [x] `Instruction{Offset, OpCode, Operand}` con tracking de offsets
+- [x] Method header (tiny/fat) + reconocimiento de opcodes no soportados sin crashear
 
 **`/ir`**
-- [ ] Set de instrucciones IR (`LoadArg`, `LoadLocal`, `StoreLocal`, `LoadConstI4`, `Add`,
+- [x] Set de instrucciones IR (`LoadArg`, `LoadLocal`, `StoreLocal`, `LoadConstI4`, `BinOp`,
       `Call`, `Branch`, `Return`, ...)
-- [ ] Builder IL → IR
+- [x] Builder IL → IR, con error explícito y localizado (offset IL) para cualquier opcode que
+      la IR todavía no baja (callvirt, newobj, ldfld, arrays, excepciones — Fase 2)
 
 **`/interpreter` + `/runtime` (mínimo viable)**
-- [ ] Frame/stack model, loop `eval`, dispatch
-- [ ] Aritmética + branches + loops
-- [ ] Resolución e invocación de métodos static
-- [ ] Modelo runtime mínimo de Type/Method/Field
-- [ ] Allocación de objetos básica + lectura/escritura de fields (necesario para criterio de
-      aceptación #6-7 del MVP)
-- [ ] Límites de stack/call depth: `ErrStackOverflow`, `ErrCallDepthExceeded`
+- [x] Frame/stack model, loop `eval`, dispatch
+- [x] Aritmética + branches + loops
+- [x] Resolución e invocación de métodos static (incluye llamadas a BCL nativo y a otros
+      métodos static del mismo assembly, con límite de profundidad de recursión)
+- [x] Modelo runtime mínimo de `Value`/`Method`
+- [x] Límites: `MaxCallDepth`, `MaxInstructions` (`ErrCallDepthExceeded`,
+      `ErrInstructionLimitExceeded`)
 
 **`/bcl` (subset v0.1)**
-- [ ] `System.Object`, `System.String` (Concat/Length), `System.Math` (Abs, etc.),
-      `System.Console.WriteLine`, tipos primitivos con boxing básico
-- [ ] Mecanismo `NativeMethod` de registro
+- [x] `System.Math.Abs`, `System.String.Concat`/`get_Length`, `System.Console.WriteLine`
+- [x] Mecanismo de registro de nativos (`bcl.Lookup`/`register`)
 
 **`/cmd/vmnet` CLI**
-- [ ] `vmnet inspect <dll>` — lista tipos/métodos
-- [ ] `vmnet il <dll> <Type.Method>` — vuelca IL decodificado
-- [ ] `vmnet run <dll> <Type.Method> <args>` — ejecuta método static
+- [x] `vmnet inspect <dll>` — lista tipos/métodos
+- [x] `vmnet il <dll> <Type.Method>` — vuelca IL decodificado
+- [x] `vmnet run <dll> <Type.Method> '<json-array>'` — ejecuta método static
 
 **API pública Go (subset de §6.1)**
-- [ ] `vmnet.New()`, `VM.LoadFile/LoadBytes`, `Assembly.Call`, tipos `Value` mínimos
+- [x] `vmnet.New()`, `VM.LoadFile/LoadBytes`, `Assembly.Call`, tipos `Value` (Int32/Int64/
+      Float32/Float64/String)
 
 **Tests / aceptación**
-- [ ] Golden tests: `SimpleMath.Add`, `Strings.Hello`, `Loops.Sum`
-- [ ] Criterios de aceptación MVP §35 #1–5, #9, #10 (parcial), #11, #12
+- [x] Golden tests: `SimpleMath.Add`, `Strings.Hello`, `Loops.Sum` (Go API + CLI, contra el DLL
+      real compilado con el SDK de .NET)
+- [x] Criterios de aceptación MVP §35 #1–5, #9, #10, #11, #12
+
+> **Ajuste de alcance vs. spec original:** la tabla de tareas original de esta fase incluía
+> "allocación de objetos básica + lectura/escritura de fields" citando los criterios #6–8 del
+> MVP (spec §35: crear objetos, leer/escribir fields, `call`/`callvirt` básicos). Al implementar,
+> esos tres puntos se movieron a Fase 2 junto con el resto del modelo de objetos
+> (`newobj`/`callvirt`/fields de instancia), porque ninguno de los tres métodos del demo de
+> Fase 1 (`SimpleMath.Add`, `Strings.Hello`, `Loops.Sum`) los necesita, y separarlos evita
+> duplicar trabajo cuando el modelo de objetos completo llegue en Fase 2. El decoder de IL sí
+> reconoce `newobj`/`callvirt`/`ldfld`/etc. sin crashear; el IR builder los reporta como
+> "unsupported opcode" explícito (verificado con test) hasta Fase 2.
 
 ### Demo de cierre de Fase 1 — "Esto es real" (~10 min)
 
