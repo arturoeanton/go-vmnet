@@ -32,6 +32,12 @@ go.work.sum
 tests/fixtures/csharp/bin/
 tests/fixtures/csharp/obj/
 
+# vmnet's own NuGet package cache (`vmnet add`/`restore`, see
+# docs/ROADMAP.md Fase 3) — downloaded .nupkg files, never committed.
+# vmnet.json/vmnet.lock.json are NOT ignored here: a real project commits
+# them for reproducible restores, same as go.sum/package-lock.json.
+.vmnet/
+
 # Editor/IDE
 # .idea/
 # .vscode/

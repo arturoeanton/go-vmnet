@@ -74,3 +74,18 @@ múltiples goroutines (`sync.RWMutex` sobre los caches de métodos/tipos,
 verificado con `-race`), y `internal/pe`, `internal/metadata` e
 `internal/il` tienen fuzz tests nativos de Go (corridos manualmente por
 ~16.8M ejecuciones combinadas sin panics).
+
+Fase 3 (checker + NuGet) completa. `internal/checker` reutiliza el pipeline
+real (no una reimplementación heurística aparte) para decidir si un
+assembly es `compatible`/`partial`/`unsupported` por perfil
+(`minimal`/`rules`/`netstandard-lite`). `internal/nuget` lee `.nupkg`/
+`.nuspec` reales (forma corta y larga de TFM), resuelve dependencias
+transitivas contra `api.nuget.org` (highest-version-wins, documentado como
+simplificación), cachea en `.vmnet/packages/` y expone
+`vm.NuGet().Add/Restore/Packages()` + `vm.LoadPackage(id)`. Certificado
+contra 7 paquetes NuGet reales y populares (ver `docs/ROADMAP.md` para la
+tabla completa); 3 de ellos tienen una función real ejecutando
+correctamente a través de vmnet. El proceso de certificación encontró y
+corrigió dos gaps reales: resolución de `MethodSpec` (llamadas a métodos
+genéricos) y un bug de comparaciones sin signo (`.un` opcodes) que daba
+resultados silenciosamente incorrectos, no solo "no soportado".

@@ -7,6 +7,11 @@ func init() {
 	// when the source has no explicit base-class call.
 	register("System.Object::.ctor", false, objectCtorNoop)
 	register("System.Object::ToString", true, objectToString)
+	// Attribute::.ctor: modern C# compilers emit attribute classes of
+	// their own (e.g. EmbeddedAttribute, RefSafetyRulesAttribute) into
+	// every assembly for certain language features, regardless of
+	// whether the source uses them — their .ctor chains here.
+	register("System.Attribute::.ctor", false, objectCtorNoop)
 }
 
 func objectCtorNoop(args []runtime.Value) (runtime.Value, error) {

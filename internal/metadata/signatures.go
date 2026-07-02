@@ -40,10 +40,10 @@ const (
 )
 
 // SigTypeKind is a simplified classification of a signature's element
-// type. Kinds vmnet's Fase 1-2 profile doesn't model precisely (ARRAY,
-// FNPTR, generics, pointers) collapse to SigUnknown — the blob is still
-// parsed structurally (so trailing params stay correctly aligned) but
-// higher layers must treat SigUnknown as "unsupported" rather than guess.
+// type. Every element type parses structurally (so trailing params stay
+// correctly aligned even when vmnet can't execute the shape), but only
+// the kinds through SigGenericParam are distinguished — anything else
+// (multi-dim ARRAY, FNPTR, ...) is a hard parse error, not SigUnknown.
 type SigTypeKind byte
 
 const (
@@ -68,6 +68,9 @@ const (
 	SigValueType
 	SigSZArray
 	SigGenericInst
+	SigPointer      // T* — unmanaged pointer (genuinely "unsafe" code)
+	SigByRef        // ref/out/in T — safe, but vmnet doesn't model by-ref call semantics yet
+	SigGenericParam // a method/type's own generic parameter (T, not a closed instantiation)
 	SigUnknown
 )
 
@@ -184,18 +187,24 @@ func parseType(b []byte) (SigType, int, error) {
 			return SigType{}, 0, err
 		}
 		return SigType{Kind: SigSZArray, Elem: &elem}, pos + sz, nil
-	case elementPtr, elementByRef:
+	case elementPtr:
 		_, sz, err := parseType(b[pos:])
 		if err != nil {
 			return SigType{}, 0, err
 		}
-		return SigType{Kind: SigUnknown}, pos + sz, nil
+		return SigType{Kind: SigPointer}, pos + sz, nil
+	case elementByRef:
+		_, sz, err := parseType(b[pos:])
+		if err != nil {
+			return SigType{}, 0, err
+		}
+		return SigType{Kind: SigByRef}, pos + sz, nil
 	case elementVar, elementMVar:
 		_, sz, err := decodeCompressed(b[pos:])
 		if err != nil {
 			return SigType{}, 0, err
 		}
-		return SigType{Kind: SigUnknown}, pos + sz, nil
+		return SigType{Kind: SigGenericParam}, pos + sz, nil
 	case elementGenericInst:
 		if pos >= len(b) {
 			return SigType{}, 0, fmt.Errorf("metadata: truncated generic instantiation")

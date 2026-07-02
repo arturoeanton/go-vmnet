@@ -359,6 +359,33 @@ func (md *Metadata) TypeSpecSignature(rid uint32) ([]byte, error) {
 	return md.blob.Blob(t.col(row, 0))
 }
 
+// MethodSpecRow is a generic method instantiation, e.g. the
+// `Guard.Against.Null<T>` in a call to `Guard.Against.Null<string>(...)`.
+// Method is the underlying (non-generic-instantiated) MethodDef/MemberRef
+// token; Instantiation is the raw GenericMethodInstantiation signature
+// blob (type arguments) — unused by vmnet's resolver, since a native
+// runtime.Value is already type-erased (see internal/ir/builder.go).
+type MethodSpecRow struct {
+	Method        Token
+	Instantiation []byte
+}
+
+func (md *Metadata) MethodSpec(rid uint32) (MethodSpecRow, error) {
+	t, row, err := md.tableOrErr(TableMethodSpec, rid)
+	if err != nil {
+		return MethodSpecRow{}, err
+	}
+	method, err := decodeCodedIndex(codedMethodDefOrRef, t.col(row, 0))
+	if err != nil {
+		return MethodSpecRow{}, err
+	}
+	inst, err := md.blob.Blob(t.col(row, 1))
+	if err != nil {
+		return MethodSpecRow{}, err
+	}
+	return MethodSpecRow{Method: method, Instantiation: inst}, nil
+}
+
 func (md *Metadata) StandAloneSig(rid uint32) (StandAloneSigRow, error) {
 	t, row, err := md.tableOrErr(TableStandAloneSig, rid)
 	if err != nil {

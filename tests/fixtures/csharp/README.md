@@ -22,3 +22,4 @@ Output: `tests/fixtures/csharp/bin/Release/netstandard2.0/Vmnet.Fixtures.dll`
 | `Objects.cs` | `Customer` | `newobj`, instance fields, auto-properties | Fase 2 |
 | `CollectionsTest.cs` | `CollectionsTest` | `List<T>` | Fase 2 |
 | `ExceptionTest.cs` | `ExceptionTest` | `throw` / managed exceptions | Fase 2 |
+| `Unsupported.cs` | `Unsupported` | `System.Array` (deliberately unsupported, for checker tests) | Fase 3 |

@@ -105,7 +105,7 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 		case ir.BinOp:
 			b := frame.pop()
 			a := frame.pop()
-			v, err := evalBinOp(in.Op, a, b)
+			v, err := evalBinOp(in, a, b)
 			if err != nil {
 				return runtime.Value{}, err
 			}
@@ -148,7 +148,7 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 		case ir.BranchCompare:
 			b := frame.pop()
 			a := frame.pop()
-			take, err := evalCompare(in.Op, a, b)
+			take, err := evalCompare(in, a, b)
 			if err != nil {
 				return runtime.Value{}, err
 			}

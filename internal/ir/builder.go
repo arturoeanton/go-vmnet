@@ -2,6 +2,7 @@ package ir
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/arturoeanton/go-vmnet/internal/il"
 	"github.com/arturoeanton/go-vmnet/internal/metadata"
@@ -112,35 +113,45 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 			out = append(out, LoadString{s})
 
 		case "add", "add.ovf", "add.ovf.un":
-			out = append(out, BinOp{OpAdd})
+			out = append(out, BinOp{Op: OpAdd})
 		case "sub", "sub.ovf", "sub.ovf.un":
-			out = append(out, BinOp{OpSub})
+			out = append(out, BinOp{Op: OpSub})
 		case "mul", "mul.ovf", "mul.ovf.un":
-			out = append(out, BinOp{OpMul})
-		case "div", "div.un":
-			out = append(out, BinOp{OpDiv})
-		case "rem", "rem.un":
-			out = append(out, BinOp{OpRem})
+			out = append(out, BinOp{Op: OpMul})
+		case "div":
+			out = append(out, BinOp{Op: OpDiv})
+		case "div.un":
+			out = append(out, BinOp{Op: OpDiv, Unsigned: true})
+		case "rem":
+			out = append(out, BinOp{Op: OpRem})
+		case "rem.un":
+			out = append(out, BinOp{Op: OpRem, Unsigned: true})
 		case "and":
-			out = append(out, BinOp{OpAnd})
+			out = append(out, BinOp{Op: OpAnd})
 		case "or":
-			out = append(out, BinOp{OpOr})
+			out = append(out, BinOp{Op: OpOr})
 		case "xor":
-			out = append(out, BinOp{OpXor})
+			out = append(out, BinOp{Op: OpXor})
 		case "shl":
-			out = append(out, BinOp{OpShl})
-		case "shr", "shr.un":
-			out = append(out, BinOp{OpShr})
+			out = append(out, BinOp{Op: OpShl})
+		case "shr":
+			out = append(out, BinOp{Op: OpShr})
+		case "shr.un":
+			out = append(out, BinOp{Op: OpShr, Unsigned: true})
 		case "neg":
 			out = append(out, Neg{})
 		case "not":
 			out = append(out, Not{})
 		case "ceq":
-			out = append(out, BinOp{OpCeq})
-		case "cgt", "cgt.un":
-			out = append(out, BinOp{OpCgt})
-		case "clt", "clt.un":
-			out = append(out, BinOp{OpClt})
+			out = append(out, BinOp{Op: OpCeq})
+		case "cgt":
+			out = append(out, BinOp{Op: OpCgt})
+		case "cgt.un":
+			out = append(out, BinOp{Op: OpCgt, Unsigned: true})
+		case "clt":
+			out = append(out, BinOp{Op: OpClt})
+		case "clt.un":
+			out = append(out, BinOp{Op: OpClt, Unsigned: true})
 
 		case "conv.i1", "conv.ovf.i1", "conv.ovf.i1.un":
 			out = append(out, Conv{ConvI1})
@@ -186,37 +197,61 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, BranchCompare{target, CmpEq})
-		case "bge.s", "bge", "bge.un.s", "bge.un":
+			out = append(out, BranchCompare{Target: target, Op: CmpEq})
+		case "bge.s", "bge":
 			target, err := resolveTarget(instr.Operand.(int))
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, BranchCompare{target, CmpGe})
-		case "bgt.s", "bgt", "bgt.un.s", "bgt.un":
+			out = append(out, BranchCompare{Target: target, Op: CmpGe})
+		case "bge.un.s", "bge.un":
 			target, err := resolveTarget(instr.Operand.(int))
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, BranchCompare{target, CmpGt})
-		case "ble.s", "ble", "ble.un.s", "ble.un":
+			out = append(out, BranchCompare{Target: target, Op: CmpGe, Unsigned: true})
+		case "bgt.s", "bgt":
 			target, err := resolveTarget(instr.Operand.(int))
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, BranchCompare{target, CmpLe})
-		case "blt.s", "blt", "blt.un.s", "blt.un":
+			out = append(out, BranchCompare{Target: target, Op: CmpGt})
+		case "bgt.un.s", "bgt.un":
 			target, err := resolveTarget(instr.Operand.(int))
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, BranchCompare{target, CmpLt})
+			out = append(out, BranchCompare{Target: target, Op: CmpGt, Unsigned: true})
+		case "ble.s", "ble":
+			target, err := resolveTarget(instr.Operand.(int))
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, BranchCompare{Target: target, Op: CmpLe})
+		case "ble.un.s", "ble.un":
+			target, err := resolveTarget(instr.Operand.(int))
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, BranchCompare{Target: target, Op: CmpLe, Unsigned: true})
+		case "blt.s", "blt":
+			target, err := resolveTarget(instr.Operand.(int))
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, BranchCompare{Target: target, Op: CmpLt})
+		case "blt.un.s", "blt.un":
+			target, err := resolveTarget(instr.Operand.(int))
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, BranchCompare{Target: target, Op: CmpLt, Unsigned: true})
 		case "bne.un.s", "bne.un":
 			target, err := resolveTarget(instr.Operand.(int))
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, BranchCompare{target, CmpNe})
+			out = append(out, BranchCompare{Target: target, Op: CmpNe, Unsigned: true})
 
 		case "call":
 			token := instr.Operand.(uint32)
@@ -271,10 +306,23 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 			out = append(out, Return{HasValue: !retVoid})
 
 		default:
-			return nil, fmt.Errorf("ir: unsupported opcode %q at IL offset %d (not yet implemented — see docs/ROADMAP.md Fase 2+)", name, instr.Offset)
+			return nil, &UnsupportedOpcodeError{OpCode: name, Offset: instr.Offset}
 		}
 	}
 	return out, nil
+}
+
+// UnsupportedOpcodeError is returned by Build when IL uses an opcode Fase
+// 1-2 don't lower to IR yet. It's a distinct type (rather than a bare
+// fmt.Errorf) so internal/checker can extract the opcode/offset
+// programmatically instead of parsing an error string.
+type UnsupportedOpcodeError struct {
+	OpCode string
+	Offset int
+}
+
+func (e *UnsupportedOpcodeError) Error() string {
+	return fmt.Sprintf("ir: unsupported opcode %q at IL offset %d (not yet implemented — see docs/ROADMAP.md)", e.OpCode, e.Offset)
 }
 
 func operandIndex(operand any) int {
@@ -307,7 +355,7 @@ func resolveCallTarget(md *metadata.Metadata, token uint32) (fullName string, ha
 		if err != nil {
 			return "", false, 0, false, err
 		}
-		full := qualify(typeDef.Namespace, typeDef.Name) + "::" + row.Name
+		full := Qualify(typeDef.Namespace, typeDef.Name) + "::" + row.Name
 		return full, sig.HasThis, int(sig.ParamCount), sig.RetType.Kind != metadata.SigVoid, nil
 
 	case metadata.TableMemberRef:
@@ -326,6 +374,17 @@ func resolveCallTarget(md *metadata.Metadata, token uint32) (fullName string, ha
 		full := typeName + "::" + row.Name
 		return full, sig.HasThis, int(sig.ParamCount), sig.RetType.Kind != metadata.SigVoid, nil
 
+	case metadata.TableMethodSpec:
+		// A generic method instantiation (e.g. Guard.Against.Null<string>)
+		// unwraps to a regular MethodDef/MemberRef call — vmnet's
+		// runtime.Value is already type-erased, so the type arguments in
+		// row.Instantiation aren't needed to execute it.
+		row, err := md.MethodSpec(t.RID())
+		if err != nil {
+			return "", false, 0, false, err
+		}
+		return resolveCallTarget(md, uint32(row.Method))
+
 	default:
 		return "", false, 0, false, fmt.Errorf("unsupported call target table %#x", byte(t.Table()))
 	}
@@ -338,13 +397,13 @@ func resolveMemberRefClassName(md *metadata.Metadata, class metadata.Token) (str
 		if err != nil {
 			return "", err
 		}
-		return qualify(row.Namespace, row.Name), nil
+		return Qualify(row.Namespace, row.Name), nil
 	case metadata.TableTypeDef:
 		row, err := md.TypeDef(class.RID())
 		if err != nil {
 			return "", err
 		}
-		return qualify(row.Namespace, row.Name), nil
+		return Qualify(row.Namespace, row.Name), nil
 	case metadata.TableTypeSpec:
 		return resolveTypeSpecName(md, class.RID())
 	default:
@@ -379,13 +438,13 @@ func resolveTypeToken(md *metadata.Metadata, tok metadata.Token) (string, error)
 		if err != nil {
 			return "", err
 		}
-		return qualify(row.Namespace, row.Name), nil
+		return Qualify(row.Namespace, row.Name), nil
 	case metadata.TableTypeDef:
 		row, err := md.TypeDef(tok.RID())
 		if err != nil {
 			return "", err
 		}
-		return qualify(row.Namespace, row.Name), nil
+		return Qualify(row.Namespace, row.Name), nil
 	default:
 		return "", fmt.Errorf("unsupported type token table %#x", byte(tok.Table()))
 	}
@@ -411,7 +470,7 @@ func resolveNewObjTarget(md *metadata.Metadata, token uint32) (typeFullName, cto
 		if err != nil {
 			return "", "", 0, err
 		}
-		typeFullName = qualify(typeDef.Namespace, typeDef.Name)
+		typeFullName = Qualify(typeDef.Namespace, typeDef.Name)
 		return typeFullName, typeFullName + "::" + row.Name, int(sig.ParamCount), nil
 
 	case metadata.TableMemberRef:
@@ -450,15 +509,40 @@ func resolveFieldTarget(md *metadata.Metadata, token uint32) (typeFullName, fiel
 		if err != nil {
 			return "", "", err
 		}
-		return qualify(typeDef.Namespace, typeDef.Name), row.Name, nil
+		return Qualify(typeDef.Namespace, typeDef.Name), row.Name, nil
 	default:
 		return "", "", fmt.Errorf("unsupported field target table %#x (external fields aren't supported yet)", byte(t.Table()))
 	}
 }
 
-func qualify(namespace, name string) string {
+// Qualify joins a namespace and a type/member name the way vmnet full
+// names use ("Namespace.Type"), omitting the dot when namespace is empty.
+func Qualify(namespace, name string) string {
 	if namespace == "" {
 		return name
 	}
 	return namespace + "." + name
+}
+
+// SplitTypeName reverses Qualify: it splits "Namespace.Type" at the last
+// dot (a type's own name never contains one, even nested/generic types —
+// nested classes use NestedClass rows, and generic arity like `List`1`
+// has no dot either).
+func SplitTypeName(typeName string) (namespace, name string) {
+	dot := strings.LastIndex(typeName, ".")
+	if dot < 0 {
+		return "", typeName
+	}
+	return typeName[:dot], typeName[dot+1:]
+}
+
+// SplitFullName splits a "Namespace.Type::Method" full name (as produced
+// by resolveCallTarget/resolveNewObjTarget) into its three parts.
+func SplitFullName(fullName string) (namespace, typeName, methodName string, err error) {
+	idx := strings.LastIndex(fullName, "::")
+	if idx < 0 {
+		return "", "", "", fmt.Errorf("ir: invalid method full name %q", fullName)
+	}
+	ns, tn := SplitTypeName(fullName[:idx])
+	return ns, tn, fullName[idx+2:], nil
 }

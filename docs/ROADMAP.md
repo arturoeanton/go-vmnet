@@ -23,7 +23,7 @@ NuGet arbitrario, backend CoreCLR. Estos quedan como roadmap post-v1.0 (v1.5 "hy
 | 1 | Núcleo IL funcional | 5–7 sem | Viabilidad técnica: Go puede parsear y ejecutar IL real | `vmnet run SimpleMath.dll Add 3 4` → `7`, sin .NET instalado |
 | 2 | Motor de reglas de negocio | 6–8 sem | Es un producto usable, no solo un parser | Rule engine C# real llamado desde Go vía JSON, con sandbox |
 | 2.5 | Endurecimiento *(gate interno, sin demo de venta)* | 2–3 días | El intérprete no crashea el host bajo input adversarial ni concurrencia | `go test ./... -race` + fuzzing (~16.8M ejecuciones, 0 panics) |
-| 3 | Checker + ecosistema NuGet | 6–9 sem | Adopción de bajo riesgo + reuso de librerías existentes | `vmnet check` sobre DLL real + `vmnet add/restore` de un NuGet real |
+| 3 | Checker + ecosistema NuGet | 6–9 sem | Adopción de bajo riesgo + reuso de librerías existentes | 7 paquetes NuGet reales chequeados, 3 con funciones ejecutando de verdad |
 | 4 | v1.0 producción | 5–7 sem | Listo para pilotos reales | Benchmarks, seguridad, docs, CI multiplataforma, 5 min a "hello world" |
 
 **Riesgo mayor del proyecto**: no es el parser IL, es la BCL (`System.*`). Por eso las 4 fases
@@ -325,55 +325,150 @@ puerta a reusar paquetes NuGet ya publicados en vez de depender solo de DLLs pro
 ### Tareas
 
 **`/checker`**
-- [ ] Analyzer: uso de opcodes, grafo de llamadas, assemblies referenciados, uso de generics,
-      exception handlers, custom attributes, detección de P/Invoke, punteros unsafe, uso de
-      reflection, detección de async state machines
-- [ ] Modelo de reporte (compatible / partial / unsupported) con razones y sugerencias (spec
-      §23.2–23.4)
-- [ ] Perfiles `minimal`, `rules`, `netstandard-lite` (spec §24) — validación contra la IR
-- [ ] `vmnet check <dll>` CLI
+- [x] Analyzer que reutiliza el pipeline real (`il.Decode` → `ir.Build` → resolución de cada
+      `Call`/`NewObj`/`CallVirt` contra `bcl.Lookup`/`bcl.LookupCtor`/métodos locales) en vez de
+      reimplementar heurísticas aparte — si el checker dice "compatible", `Assembly.Call`
+      efectivamente va a correrlo, porque es literalmente el mismo código de resolución
+- [x] Detección de P/Invoke (tabla `ImplMap`), punteros unsafe (`SigPointer`, tipado real
+      agregado en Fase 3 — antes colapsaba junto con `byref`/generics en `SigUnknown`), y
+      parámetros `ref`/`out` (`SigByRef`, no ejecutables aún — hallazgo propio, no solo "no
+      soportado")
+- [x] Modelo de reporte con `FindingKind` categorizado (`unsupported-opcode`,
+      `unsupported-bcl-method`, `reflection`, `async`, `p-invoke`, `unsafe-pointer`,
+      `byref-parameter`, `out-of-profile`) y sugerencia por finding (spec §23.2–23.4)
+- [x] Perfiles `minimal` (rechaza *todo* el modelo de objetos, no solo opcodes puntuales — spec
+      §24.1), `rules`, `netstandard-lite` — implementados como allowlist real de prefijos BCL +
+      instrucciones IR permitidas, no como metadata decorativa
+- [x] `vmnet check <dll> [--profile=...]` y `vmnet check package <id>@<version> [--profile=...]`
 
 **`/nuget`**
-- [ ] Lector de `.nupkg` (zip)
-- [ ] Parser de `.nuspec` (metadata + dependency groups)
-- [ ] Parser de TFM + selección (prioridad `netstandard2.0`, spec §22.5)
-- [ ] Resolver de dependencias transitivo (versión simple)
-- [ ] Cache local de paquetes
-- [ ] Formato de lockfile + generación (spec §22.6)
-- [ ] CLI: `vmnet add`, `vmnet restore`, `vmnet packages`
-- [ ] Detección de native assets (`runtimes/*`) → marcados unsupported en modo pure-go
+- [x] Lector de `.nupkg` (zip, `archive/zip` de la stdlib, límite de 256MB por entrada contra
+      zip bombs)
+- [x] Parser de `.nuspec`: forma agrupada por TFM y forma plana legacy, **forma larga real**
+      (`.NETStandard2.0`, `.NETFramework4.7.2`, ...) además de la corta — verificado contra
+      `.nuspec` reales, no solo la spec
+- [x] Parser de TFM con regex general para ambas notaciones + prioridad exacta de spec §22.5
+      (`netstandard2.0` > `netstandard2.1` > `net5.0+` solo con opt-in `AllowModernNet` > `ref/`
+      solo análisis > `runtimes/*/native` unsupported)
+- [x] Resolver de dependencias transitivo real (cierre completo, ciclos detectados,
+      highest-version-wins documentado como simplificación vs. NuGet real)
+- [x] Cache local de paquetes (`.vmnet/packages/`, escritura atómica vía archivo temporal +
+      rename)
+- [x] Lockfile JSON (spec §22.6) + manifest propio (`vmnet.json`, equivalente a
+      `<PackageReference>` ya que vmnet no tiene project file)
+- [x] CLI: `vmnet add <id>[@version]`, `vmnet restore`, `vmnet packages`
+- [x] Cliente NuGet v3 real (`api.nuget.org/v3-flatcontainer`, endpoint hardcodeado — ver nota
+      de alcance)
+- [x] API Go pública: `vm.NuGet().Add/Restore/Packages()`, `vm.LoadPackage(id)`
 
-**`/bcl` (subset v0.3, solo lo necesario para certificar paquetes elegidos)**
-- [ ] `System.Linq.Enumerable` subset (Where/Select/ToList/Count/Any)
-- [ ] `System.Nullable<T>`
-- [ ] `System.Convert`, `System.Globalization.CultureInfo` básico
+**Generics — hallazgo no planeado, más valioso que lo que reemplazó**
+- [x] Resolución de `MethodSpec` (tabla `0x2B`, instanciación de métodos genéricos: p. ej.
+      `Guard.Against.Null<T>`) — se descubrió DURANTE la certificación de paquetes reales que
+      esta era la causa de la mayoría de los "unsupported call target" en librerías reales, no
+      falta de métodos BCL puntuales. Se resuelve desenrollando al `MethodDef`/`MemberRef` de
+      base, ignorando los argumentos de tipo (igual que ya se hacía para `TypeSpec`)
 
-**Certificación de paquetes**
-- [ ] Elegir y certificar 2–3 paquetes NuGet reales de lógica pura contra el perfil
-      `netstandard-lite` (candidatos: librería de validación liviana, utilidades, evaluar
-      subset de NodaTime) → esto produce el activo de marketing "lista de paquetes certificados"
+**Corrección de comparaciones con/sin signo — bug real encontrado por testing, no solo deuda**
+- [x] `div.un`/`rem.un`/`shr.un`/`cgt.un`/`clt.un` y las ramas `bge.un`/`bgt.un`/`ble.un`/
+      `blt.un`/`bne.un` ahora tienen semántica **sin signo** real, distinta de sus contrapartes
+      con signo. Antes ambas colapsaban a la misma operación con signo — funcionaba para los
+      fixtures propios (enteros no negativos) pero daba **resultados silenciosamente
+      incorrectos** en el patrón idiomático de C# `(uint)(c - low) <= high` (chequeo de rango
+      muy común en código real). Se encontró ejecutando `System.HexConverter.IsHexUpperChar`
+      de `System.Text.Json` contra el caracter `' '` y viendo `true` en vez de `false`.
 
-**Reflection-lite (mínimo spec §19.2, solo lo que pida el checker/BCL)**
-- [ ] `typeof(T)`, `object.GetType()`, `Type.FullName/Name/Namespace`
+**BCL v0.3 — reemplazado por lo anterior**
+- [ ] ~~`System.Linq.Enumerable` subset~~ — diferido: requiere delegates/lambdas (spec §20,
+      nunca implementado en ninguna fase), que es una feature nueva grande, no un método BCL
+      suelto. Sin esto, LINQ no es viable aunque se agreguen `Where`/`Select` como nombres.
+- [ ] ~~`System.Nullable<T>`, `System.Convert`, reflection-lite (`typeof`/`GetType`)~~ —
+      evaluado contra los 7 paquetes reales probados (ver certificación abajo): el impacto
+      medido era bajo comparado con `MethodSpec` y las comparaciones sin signo, que
+      **sí** se implementaron. Ajuste de prioridad, no trabajo pendiente sin mirar.
 
 **Tests**
-- [ ] Checker: unsupported opcode, unsupported BCL call, P/Invoke, async, reflection, native
-      asset (spec §28.6)
-- [ ] NuGet: parseo `.nupkg`/`.nuspec`, selección de TFM, dependencias transitivas, lockfile
-      (spec §28.7)
+- [x] Checker: assembly propio se autocertifica compatible bajo `rules`/`netstandard-lite`
+      (`TestAnalyze_OwnAssemblyIsCompatible`), perfil `minimal` rechaza el modelo de objetos,
+      fixture nueva `Unsupported.cs` (usa `System.Array`, deliberadamente no soportado) prueba
+      el finding exacto, límites compatible/partial/unsupported probados con datos sintéticos
+- [x] NuGet: TFM (formas corta y larga, prioridad, `net6.0-windows` excluido, opt-in
+      `AllowModernNet`), `.nuspec` (agrupado + legacy + XML malformado), resolver (cadena
+      transitiva, diamante con conflicto de versión resuelto a la mayor, detección de ciclos,
+      dependencia sin asset seleccionable no aborta la resolución), lockfile y manifest
+      round-trip — todo con paquetes `.nupkg` sintéticos en memoria, sin red
+- [x] Fuzz tests nativos de Go: `FuzzParseNuSpec`, `FuzzOpenPackage` (además de los de Fase 2.5
+      en pe/metadata/il) — corridas manuales combinadas ~5.3M ejecuciones, 0 panics
+
+### Certificación de paquetes NuGet reales
+
+Se probaron **7 paquetes reales y populares** descargados en vivo de `api.nuget.org` contra
+`vmnet check package --profile=netstandard-lite` (métricas con el estado del código al cierre
+de Fase 3, incluye las correcciones de `MethodSpec` y sin-signo):
+
+| Paquete | Métodos analizados | Métodos limpios | Motivo principal de lo que falta |
+|---|---|---|---|
+| `Ardalis.GuardClauses@5.0.0` | 285 | 85.6% | `ldsfld`/`ldarga.s` en overloads con mensaje custom |
+| `Newtonsoft.Json@13.0.3` | 4064 | ~46% | `System.Array`, static fields, algo de reflection |
+| `System.Text.Json@8.0.5` | 3577 | ~41% | `System.Array`, `byref`, intrínsecos de bajo nivel |
+| `FluentValidation@11.9.2` | 1289 | ~41% | reflection pesada — coincide con el ejemplo de la spec §23.4 |
+| `Semver@2.3.0` | 423 | ~38% | `byref`, `System.Array` |
+| `Humanizer.Core@2.14.1` | 1597 | ~34% | `System.Array`, BCL de formateo de texto |
+| `SimpleBase@4.0.0` | 258 | ~33% | `byref`, `System.Array` (algoritmos de codificación) |
+
+Ninguno certifica "compatible" al 100% — esperado y honesto: son librerías reales que usan
+arrays, campos estáticos y reflection extensivamente, nada de lo cual está en el alcance actual
+(`docs/ROADMAP.md` ya lo documenta como diferido). El valor del checker es exactamente mostrar
+esto con precisión método por método, no inflar el resultado.
+
+**Pero además, `vmnet` ejecuta funciones reales de 3 de esos paquetes**, sin modificar el
+`.dll` ni el código fuente — spec §36 pide certificar paquetes NuGet "puros" con ejecución real:
+
+- `Newtonsoft.Json.Utilities.MathUtils.ApproxEquals(double, double)` — comparación de punto
+  flotante con épsilon, incluye casos borde reales
+- `System.HexConverter.IsHexUpperChar(int)` — el mismo método que expuso el bug de
+  comparaciones sin signo; ahora pasa, incluyendo el caso `' '` que antes fallaba
+- `SimpleBase.Base32.getAllocationByteCountForDecoding(int)` — aritmética entera
+
+Verificable con `VMNET_NETWORK_TESTS=1 go test ./ -run TestCertifiedNuGetPackages -v` (baja los
+tres paquetes en vivo) o corriendo `examples/nuget-basic` (agrega + restaura + ejecuta
+`SimpleBase` real vía la API pública, incluida la resolución de sus 4 dependencias
+transitivas).
+
+### Notas de alcance
+
+```txt
+- Cliente NuGet: endpoint de flat-container hardcodeado (api.nuget.org), no hay descubrimiento
+  vía v3/index.json — no soporta feeds privados/mirrors todavía. Documentado, no accidental.
+- Resolución de versiones: highest-version-wins, no el algoritmo real de rangos de NuGet.
+- DependenciesFor no re-valida el TFM contra las reglas de selección de vmnet — asume que el
+  caller (el resolver) ya eligió un TFM válido. Se encontró y corrigió durante el testing: la
+  primera versión mezclaba "qué grupo de dependencias corresponde a este TFM" con "es este TFM
+  válido para vmnet", que son preguntas distintas.
+- System.Array, try/catch/finally, delegates/lambdas (y por lo tanto LINQ), reflection más allá
+  de lo que ya resuelve el checker genéricamente: siguen sin soportarse. Con los datos de la
+  tabla de arriba, System.Array es el bloqueador #1 real en paquetes NuGet reales — candidato
+  natural para la próxima fase de expansión de BCL, más que reflection-lite.
+```
 
 ### Demo de cierre de Fase 3 — "Sabemos qué funciona, y reusamos el ecosistema" (~10 min)
 
-1. `vmnet check` sobre una DLL real compleja (algo con reflection pesada o async) → reporte
-   claro de "unsupported" con razones concretas, no un stack trace crudo.
-2. `vmnet check` sobre uno de los paquetes certificados → reporte "compatible" o "partial".
-3. `vmnet add SomePackage@x.y.z` + `vmnet restore` en vivo, mostrando resolución de
-   dependencias + lockfile generado.
-4. Llamar una función de ese paquete NuGet real desde Go vía `vmnet.LoadPackage(...)`.
+1. `vmnet check package FluentValidation@11.9.2 --profile=netstandard-lite` → reporte
+   "partial" con razones concretas agrupadas (reflection, opcodes), coincide con el ejemplo de
+   la spec §23.4 casi al pie de la letra.
+2. `vmnet check package SimpleBase@4.0.0` → también "partial", pero mostrar que es honesto:
+   258 métodos analizados, no un "no funciona" genérico.
+3. `examples/nuget-basic`: `vmnet add SimpleBase@4.0.0` + restore en vivo (resuelve 4
+   dependencias transitivas reales) + `vm.LoadPackage("SimpleBase")` + llamar
+   `Base32.getAllocationByteCountForDecoding` de verdad, con resultados correctos.
+4. Bonus técnico (para audiencia de ingeniería): contar cómo se encontró el bug de
+   comparaciones sin signo probando `System.Text.Json` real — el checker y la certificación no
+   son solo demos, encontraron y motivaron una corrección de correctitud real.
 
 **Mensaje de venta:** "No prometemos el mundo — probamos, de forma transparente, exactamente
-qué código C# corre, y ya estamos reusando paquetes NuGet reales publicados, no solo DLLs de
-juguete propias."
+qué código C# corre, con números reales sobre 7 librerías populares. Y ya ejecutamos funciones
+reales de paquetes NuGet publicados, no solo DLLs de juguete propias — el proceso de probarlo
+contra código real nos hizo encontrar y arreglar un bug de correctitud que ningún test propio
+hubiera detectado."
 
 ---
 

@@ -46,7 +46,18 @@ const (
 	OpClt
 )
 
-type BinOp struct{ Op BinOpKind }
+// BinOp pops two values and pushes one. Unsigned distinguishes div.un/
+// rem.un/shr.un/cgt.un/clt.un from their signed counterparts: for Div/Rem
+// it changes the division algorithm, for Shr it changes sign-extension
+// vs. zero-fill, and for Cgt/Clt it changes how a negative bit pattern
+// compares (spec-relevant: this is the standard idiomatic C# range check
+// `(uint)(c - low) <= high` — get it wrong and the answer is silently
+// incorrect, not just "unsupported"). Add/Sub/Mul/And/Or/Xor/Shl produce
+// the same bits either way, so Unsigned is meaningless for them.
+type BinOp struct {
+	Op       BinOpKind
+	Unsigned bool
+}
 type Neg struct{}
 type Not struct{}
 
@@ -88,12 +99,12 @@ const (
 )
 
 // BranchCompare implements beq/bge/bgt/ble/blt/bne.un and their unsigned
-// variants: pop two values, compare, branch if true. Fase 1 does not
-// distinguish signed/unsigned comparison (spec-documented limitation,
-// harmless for the non-negative int32 fixtures Fase 1 targets).
+// variants: pop two values, compare, branch if true. Unsigned matters for
+// exactly the reason it matters on BinOp's Cgt/Clt — see its doc comment.
 type BranchCompare struct {
-	Target int
-	Op     CompareOp
+	Target   int
+	Op       CompareOp
+	Unsigned bool
 }
 
 // Call invokes either a BCL native (internal/bcl) or another method in the
