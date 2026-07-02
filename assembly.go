@@ -3,6 +3,7 @@ package vmnet
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/arturoeanton/go-vmnet/internal/il"
 	"github.com/arturoeanton/go-vmnet/internal/ir"
@@ -12,13 +13,43 @@ import (
 )
 
 // Assembly is a loaded .NET assembly, ready to have its methods called.
+// Safe for concurrent use: Call/CallBytes/CallJSON may be called from
+// multiple goroutines on the same *Assembly (e.g. concurrent requests in a
+// Go server embedding vmnet).
 type Assembly struct {
 	name string
 	file *pe.File
 	md   *metadata.Metadata
 
+	cacheMu sync.RWMutex
 	methods map[string]*runtime.Method // keyed by "Namespace.Type::Method"
 	types   map[string]*runtime.Type   // keyed by "Namespace.Type"
+}
+
+func (asm *Assembly) cachedMethod(fullName string) (*runtime.Method, bool) {
+	asm.cacheMu.RLock()
+	defer asm.cacheMu.RUnlock()
+	m, ok := asm.methods[fullName]
+	return m, ok
+}
+
+func (asm *Assembly) storeMethod(fullName string, m *runtime.Method) {
+	asm.cacheMu.Lock()
+	defer asm.cacheMu.Unlock()
+	asm.methods[fullName] = m
+}
+
+func (asm *Assembly) cachedType(fullName string) (*runtime.Type, bool) {
+	asm.cacheMu.RLock()
+	defer asm.cacheMu.RUnlock()
+	t, ok := asm.types[fullName]
+	return t, ok
+}
+
+func (asm *Assembly) storeType(fullName string, t *runtime.Type) {
+	asm.cacheMu.Lock()
+	defer asm.cacheMu.Unlock()
+	asm.types[fullName] = t
 }
 
 // Name returns the name Assembly was loaded with (the file's base name for
@@ -41,7 +72,7 @@ func (asm *Assembly) resolveMethod(typeName, methodName string) (*runtime.Method
 // resolveByFullName implements interpreter.Resolver for local (non-BCL)
 // calls discovered while executing another method's IR.
 func (asm *Assembly) resolveByFullName(fullName string) (*runtime.Method, error) {
-	if m, ok := asm.methods[fullName]; ok {
+	if m, ok := asm.cachedMethod(fullName); ok {
 		return m, nil
 	}
 	namespace, typeName, methodName, err := splitFullName(fullName)
@@ -73,7 +104,7 @@ func (asm *Assembly) buildMethod(methodRID uint32, row metadata.MethodDefRow) (*
 	}
 	fullName := qualify(typeDef.Namespace, typeDef.Name) + "::" + row.Name
 
-	if m, ok := asm.methods[fullName]; ok {
+	if m, ok := asm.cachedMethod(fullName); ok {
 		return m, nil
 	}
 
@@ -127,7 +158,7 @@ func (asm *Assembly) buildMethod(methodRID uint32, row metadata.MethodDefRow) (*
 		MaxStack:   int(header.MaxStack),
 		IR:         irInstrs,
 	}
-	asm.methods[fullName] = m
+	asm.storeMethod(fullName, m)
 	return m, nil
 }
 
@@ -135,7 +166,7 @@ func (asm *Assembly) buildMethod(methodRID uint32, row metadata.MethodDefRow) (*
 // runtime.Type (field layout) for a plain class discovered while executing
 // newobj/ldfld/stfld.
 func (asm *Assembly) resolveTypeByFullName(fullName string) (*runtime.Type, error) {
-	if t, ok := asm.types[fullName]; ok {
+	if t, ok := asm.cachedType(fullName); ok {
 		return t, nil
 	}
 	namespace, name := splitTypeName(fullName)
@@ -158,7 +189,7 @@ func (asm *Assembly) resolveTypeByFullName(fullName string) (*runtime.Type, erro
 	}
 
 	t := &runtime.Type{Namespace: typeDef.Namespace, Name: typeDef.Name, Fields: fields}
-	asm.types[fullName] = t
+	asm.storeType(fullName, t)
 	return t, nil
 }
 

@@ -19,10 +19,6 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    env:
-      # vmnet's core must never depend on cgo: no .NET runtime, no native
-      # libraries. This is a hard product guarantee, not just a build knob.
-      CGO_ENABLED: "0"
     steps:
       - uses: actions/checkout@v4
 
@@ -41,10 +37,22 @@ jobs:
         run: dotnet build tests/fixtures/csharp/Fixtures.csproj -c Release
 
       - name: Build
+        # vmnet's core must never depend on cgo: no .NET runtime, no native
+        # libraries. This is a hard product guarantee, checked on every OS
+        # — the race detector below needs cgo, so it's scoped to Test only.
         run: go build ./...
+        env:
+          CGO_ENABLED: "0"
 
       - name: Vet
         run: go vet ./...
 
+      # Windows GitHub-hosted runners don't reliably have a C toolchain for
+      # the race detector (cgo); Linux/macOS runners do.
       - name: Test
-        run: go test ./... -race=false -count=1
+        if: matrix.os == 'windows-latest'
+        run: go test ./... -count=1
+
+      - name: Test (race detector)
+        if: matrix.os != 'windows-latest'
+        run: go test ./... -race -count=1

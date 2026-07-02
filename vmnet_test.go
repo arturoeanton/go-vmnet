@@ -2,6 +2,7 @@ package vmnet
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -157,5 +158,46 @@ func TestCall_InstanceMethodRejected(t *testing.T) {
 	_, err := asm.Call("Vmnet.Fixtures.Customer", "get_Name")
 	if err == nil {
 		t.Fatal("Call(Customer.get_Name): error = nil, want an instance-method error")
+	}
+}
+
+// TestConcurrentCalls proves a single *Assembly is safe to share across
+// goroutines — e.g. concurrent requests in a Go server. Run with -race:
+// before the cacheMu fix this triggered a concurrent map read/write panic
+// almost immediately (asm.methods/asm.types are populated lazily on first
+// use, from whichever goroutine gets there first).
+func TestConcurrentCalls(t *testing.T) {
+	asm := loadFixture(t)
+
+	const goroutines = 32
+	const perGoroutine = 50
+
+	errCh := make(chan error, goroutines)
+	for g := 0; g < goroutines; g++ {
+		go func() {
+			for i := 0; i < perGoroutine; i++ {
+				sum, err := asm.Call("Vmnet.Fixtures.SimpleMath", "Add", Int32(3), Int32(4))
+				if err != nil {
+					errCh <- err
+					return
+				}
+				if got := sum.Native().(int32); got != 7 {
+					errCh <- fmt.Errorf("Add(3,4) = %d, want 7", got)
+					return
+				}
+
+				if _, err := asm.CallBytes("Vmnet.Fixtures.Rules", "Eval", []byte("concurrent")); err != nil {
+					errCh <- err
+					return
+				}
+			}
+			errCh <- nil
+		}()
+	}
+
+	for g := 0; g < goroutines; g++ {
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
 	}
 }

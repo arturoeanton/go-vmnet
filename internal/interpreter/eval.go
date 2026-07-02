@@ -22,7 +22,17 @@ func New(resolve Resolver, resolveType TypeResolver, limits Limits) *Machine {
 
 // Invoke runs method with args and returns its result (the zero Value if
 // method is void).
-func (m *Machine) Invoke(method *runtime.Method, args []runtime.Value) (runtime.Value, error) {
+//
+// A vmnet plugin must never be able to crash its host: Invoke recovers any
+// panic from anywhere in the call tree below it (a bounds check we missed,
+// a bad type assertion, malformed IR) and turns it into a plain error
+// instead of unwinding into the caller's goroutine.
+func (m *Machine) Invoke(method *runtime.Method, args []runtime.Value) (result runtime.Value, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("interpreter: internal error (recovered panic): %v", r)
+		}
+	}()
 	instrCount := new(int64)
 	return m.invoke(method, args, 0, instrCount)
 }
@@ -42,6 +52,9 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 		*instrCount++
 		if m.Limits.MaxInstructions > 0 && *instrCount > m.Limits.MaxInstructions {
 			return runtime.Value{}, ErrInstructionLimitExceeded
+		}
+		if m.Limits.MaxStackDepth > 0 && len(frame.Stack) > m.Limits.MaxStackDepth {
+			return runtime.Value{}, ErrStackOverflow
 		}
 
 		next := frame.IP + 1

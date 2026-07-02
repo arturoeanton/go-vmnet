@@ -22,6 +22,7 @@ NuGet arbitrario, backend CoreCLR. Estos quedan como roadmap post-v1.0 (v1.5 "hy
 |---|---|---|---|---|
 | 1 | Núcleo IL funcional | 5–7 sem | Viabilidad técnica: Go puede parsear y ejecutar IL real | `vmnet run SimpleMath.dll Add 3 4` → `7`, sin .NET instalado |
 | 2 | Motor de reglas de negocio | 6–8 sem | Es un producto usable, no solo un parser | Rule engine C# real llamado desde Go vía JSON, con sandbox |
+| 2.5 | Endurecimiento *(gate interno, sin demo de venta)* | 2–3 días | El intérprete no crashea el host bajo input adversarial ni concurrencia | `go test ./... -race` + fuzzing (~16.8M ejecuciones, 0 panics) |
 | 3 | Checker + ecosistema NuGet | 6–9 sem | Adopción de bajo riesgo + reuso de librerías existentes | `vmnet check` sobre DLL real + `vmnet add/restore` de un NuGet real |
 | 4 | v1.0 producción | 5–7 sem | Listo para pilotos reales | Benchmarks, seguridad, docs, CI multiplataforma, 5 min a "hello world" |
 
@@ -241,6 +242,78 @@ Corrible hoy con `examples/rules` (`go run .` después de compilar las fixtures)
 
 **Mensaje de venta:** "Esto es lo que un cliente compra: reglas de negocio en C# embebidas de
 forma segura en un servicio Go, con aislamiento de fallas y un one-liner de JSON in/out."
+
+---
+
+## Fase 2.5 — Endurecimiento (previa a Fase 3, ~2–3 días)
+
+**Objetivo:** Fase 3 (checker + NuGet) agrega superficie nueva sobre un intérprete que hasta
+ahora solo corrió assemblies propios y confiables. Antes de eso, cerrar los huecos de robustez
+que quedaron documentados como deuda durante Fase 1/2 — sobre todo los que rompen la promesa
+central de "un plugin no puede tirar abajo el host". No es una fase con demo de venta; es un
+gate de calidad interno, pero deja evidencia concreta (fuzzing, `-race`) para respaldar el
+argumento de seguridad más adelante en Fase 4.
+
+### Tareas
+
+**`internal/interpreter` — el intérprete no puede crashear el proceso host**
+- [x] `recover()` en el borde público (`Machine.Invoke`): cualquier panic en todo el árbol de
+      invocación (bounds check faltante, type assertion, IR malformada) se convierte en un
+      `error` normal en vez de propagarse al goroutine del caller
+- [x] `Limits.MaxStackDepth` real — existía en el `Limits` struct desde Fase 1 pero nunca se
+      aplicaba; un plugin que hace `push` sin `pop` (bug o adversarial) podía crecer el stack
+      sin límite hasta chocar con `MaxInstructions` (potencialmente cientos de MB antes de
+      fallar). Ahora se corta con `ErrStackOverflow` mucho antes.
+- [x] Tests directos con IR armada a mano (`internal/interpreter/eval_test.go`): panic
+      recuperado, `MaxStackDepth` disparado, `MaxCallDepth` disparado por recursión infinita
+
+**`vmnet` (paquete raíz) — seguridad de concurrencia**
+- [x] `*Assembly` ahora es seguro para llamar desde múltiples goroutines: los caches
+      `methods`/`types` se pueblan de forma lazy en el primer uso, y sin lock dos goroutines
+      escribiendo el mismo map al mismo tiempo panickean (`fatal error: concurrent map writes`,
+      no recuperable con `recover()`). Se agregó `sync.RWMutex`.
+- [x] `TestConcurrentCalls`: 32 goroutines llamando al mismo `*Assembly` en paralelo, corrido
+      con `-race`
+
+**Fuzzing nativo de Go (`internal/pe`, `internal/metadata`, `internal/il`)**
+- [x] `FuzzParse` en `/pe` y `/metadata`, `FuzzDecode` y `FuzzReadMethodBody` en `/il` — bytes
+      arbitrarios nunca deben panickear, solo devolver error. El corpus semilla (incluye el DLL
+      real de fixtures) corre como tests normales en `go test`, sin costo de CI
+- [x] Corridas de fuzzing real localmente: ~16.8M ejecuciones combinadas (pe + metadata + il),
+      0 panics encontrados
+
+**CI**
+- [x] `go test ./... -race` en Linux/macOS (Windows-hosted runners de GitHub Actions no tienen
+      confiablemente un toolchain de C para el race detector, que necesita cgo — se corre sin
+      `-race` ahí, igual cubierto por el resto de la matriz)
+- [x] El paso de `Build` sigue forzando `CGO_ENABLED=0` explícitamente para no perder la
+      garantía de "pure Go" solo por habilitar `-race` en Test
+
+### Lo que se dejó explícitamente afuera de este gate
+
+No es un endurecimiento completo — sigue habiendo deuda documentada que no bloquea Fase 3:
+
+```txt
+- MaxHeapBytes / conteo de memoria lógica: sigue diferido a Fase 4 (Permissions/sandbox
+  completo), igual que en el plan original.
+- Frame.pop() sigue sin bounds-check explícito (confía en recover() como red de seguridad
+  en vez de devolver un error más específico ahí mismo). Suficiente para "no crashea el
+  host"; un mensaje de error más preciso es una mejora futura, no un requisito de seguridad.
+- No se auditó exhaustivamente cada slice `data[a:b]` de /pe y /metadata — el fuzzing corrido
+  hasta ahora (segundos, no horas) es evidencia de robustez, no una garantía formal. Vale la
+  pena correr fuzzing más largo (`-fuzztime=1h`+) periódicamente, no solo una vez en Fase 2.5.
+```
+
+### Cómo verificar esta fase
+
+```bash
+go test ./... -race                                              # todo verde, sin warnings de race
+go test ./internal/interpreter/... -run TestInvoke -v             # recover / MaxStackDepth / MaxCallDepth
+go test ./ -run TestConcurrentCalls -race -v                      # concurrencia en Assembly
+go test ./internal/pe/... -run '^$' -fuzz '^FuzzParse$' -fuzztime=30s
+go test ./internal/metadata/... -run '^$' -fuzz '^FuzzParse$' -fuzztime=30s
+go test ./internal/il/... -run '^$' -fuzz '^FuzzDecode$' -fuzztime=30s
+```
 
 ---
 
