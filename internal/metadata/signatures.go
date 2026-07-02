@@ -67,12 +67,13 @@ const (
 	SigClass
 	SigValueType
 	SigSZArray
+	SigGenericInst
 	SigUnknown
 )
 
 type SigType struct {
 	Kind  SigTypeKind
-	Token Token    // set for SigClass / SigValueType
+	Token Token    // set for SigClass / SigValueType / SigGenericInst (the open generic type)
 	Elem  *SigType // set for SigSZArray
 }
 
@@ -200,7 +201,7 @@ func parseType(b []byte) (SigType, int, error) {
 			return SigType{}, 0, fmt.Errorf("metadata: truncated generic instantiation")
 		}
 		pos++ // CLASS or VALUETYPE marker byte
-		_, sz, err := decodeTypeDefOrRefEncoded(b[pos:])
+		openType, sz, err := decodeTypeDefOrRefEncoded(b[pos:])
 		if err != nil {
 			return SigType{}, 0, err
 		}
@@ -217,10 +218,19 @@ func parseType(b []byte) (SigType, int, error) {
 			}
 			pos += sz3
 		}
-		return SigType{Kind: SigUnknown}, pos, nil
+		// Type arguments aren't retained: vmnet's native collection backing
+		// (internal/bcl) doesn't need to know T to store a runtime.Value.
+		return SigType{Kind: SigGenericInst, Token: openType}, pos, nil
 	default:
 		return SigType{}, 0, fmt.Errorf("metadata: unsupported signature element type %#x", et)
 	}
+}
+
+// ParseTypeSpec parses a TypeSpec signature blob (ECMA-335 §II.23.2.14) —
+// structurally just one Type production.
+func ParseTypeSpec(blob []byte) (SigType, error) {
+	t, _, err := parseType(blob)
+	return t, err
 }
 
 // ParseMethodSig parses a MethodDef or MemberRef method signature blob.

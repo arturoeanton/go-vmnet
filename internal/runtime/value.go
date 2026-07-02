@@ -21,16 +21,20 @@ const (
 	KindR4
 	KindR8
 	KindString
+	KindBytes  // a CLI byte[], used at the JSON/bytes bridge boundary (Fase 2)
+	KindObject // a heap object reference: an instance of a Type, or a BCL-native-backed object
 )
 
 // Value is one CIL evaluation-stack slot.
 type Value struct {
-	Kind Kind
-	I4   int32
-	I8   int64
-	R4   float32
-	R8   float64
-	Str  string
+	Kind  Kind
+	I4    int32
+	I8    int64
+	R4    float32
+	R8    float64
+	Str   string
+	Bytes []byte
+	Obj   *Object
 }
 
 func Null() Value             { return Value{Kind: KindNull} }
@@ -39,6 +43,8 @@ func Int64(v int64) Value     { return Value{Kind: KindI8, I8: v} }
 func Float32(v float32) Value { return Value{Kind: KindR4, R4: v} }
 func Float64(v float64) Value { return Value{Kind: KindR8, R8: v} }
 func String(v string) Value   { return Value{Kind: KindString, Str: v} }
+func Bytes(v []byte) Value    { return Value{Kind: KindBytes, Bytes: v} }
+func ObjRef(o *Object) Value  { return Value{Kind: KindObject, Obj: o} }
 
 // Bool encodes a CIL boolean as the int32 0/1 it actually is on the stack.
 func Bool(v bool) Value {
@@ -62,6 +68,10 @@ func (v Value) Truthy() bool {
 		return v.R8 != 0
 	case KindString:
 		return true
+	case KindBytes:
+		return v.Bytes != nil
+	case KindObject:
+		return v.Obj != nil
 	case KindNull:
 		return false
 	}
@@ -82,6 +92,16 @@ func (v Value) String() string {
 		return fmt.Sprintf("%g", v.R8)
 	case KindString:
 		return v.Str
+	case KindBytes:
+		return fmt.Sprintf("<%d bytes>", len(v.Bytes))
+	case KindObject:
+		if v.Obj == nil {
+			return "null"
+		}
+		if v.Obj.Type != nil {
+			return fmt.Sprintf("<%s>", v.Obj.Type.Name)
+		}
+		return "<object>"
 	}
 	return "<invalid value>"
 }

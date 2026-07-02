@@ -28,3 +28,21 @@ func Lookup(fullName string) (fn Native, hasReturn bool, ok bool) {
 	e, ok := registry[fullName]
 	return e.fn, e.hasReturn, ok
 }
+
+// NativeCtor is a BCL constructor implemented directly in Go: it allocates
+// and returns the new object rather than mutating one handed to it, since
+// (unlike a normal call) there's no `this` yet when newobj runs.
+type NativeCtor func(args []runtime.Value) (*runtime.Object, error)
+
+var ctorRegistry = map[string]NativeCtor{}
+
+func registerCtor(typeFullName string, fn NativeCtor) {
+	ctorRegistry[typeFullName] = fn
+}
+
+// LookupCtor returns the native constructor registered for a type's full
+// name ("Namespace.Type"), if any.
+func LookupCtor(typeFullName string) (fn NativeCtor, ok bool) {
+	fn, ok = ctorRegistry[typeFullName]
+	return fn, ok
+}

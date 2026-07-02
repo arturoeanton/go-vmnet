@@ -5,11 +5,12 @@
 // CIL. See docs/ROADMAP.md, Fase 1, module "/ir".
 package ir
 
-// Instr is one IR instruction. Concrete types below are the full Fase 1
-// instruction set — anything CIL can express that isn't lowered to one of
-// these (objects, callvirt, exceptions, arrays, ...) is a Fase 2+ feature
-// and builder.Build reports it as an explicit unsupported-opcode error
-// instead of guessing.
+// Instr is one IR instruction. Concrete types below are the Fase 1+2
+// instruction set: primitives, objects, fields, callvirt and unhandled
+// throw. Anything CIL can express beyond this (arrays, try/catch/finally,
+// interface/vtable dispatch, generics beyond native BCL collections, ...)
+// is a later-fase feature, and builder.Build reports it as an explicit
+// unsupported-opcode error instead of guessing.
 type Instr any
 
 type Nop struct{}
@@ -96,12 +97,42 @@ type BranchCompare struct {
 }
 
 // Call invokes either a BCL native (internal/bcl) or another method in the
-// same assembly, resolved to FullName at IR-build time.
+// same assembly, resolved to FullName at IR-build time. Virtual marks a
+// callvirt: the interpreter null-checks the receiver before dispatching.
+// Fase 2 resolves callvirt directly (no vtable) — see docs/ROADMAP.md.
 type Call struct {
 	FullName  string
 	ArgCount  int // explicit IL args, not counting an implicit `this`
 	HasThis   bool
 	HasReturn bool
+	Virtual   bool
 }
 
 type Return struct{ HasValue bool }
+
+// NewObj allocates an instance of TypeFullName and runs CtorFullName
+// (either a BCL native constructor or a local .ctor) with the popped
+// constructor arguments, then pushes the new object reference.
+type NewObj struct {
+	TypeFullName string
+	CtorFullName string
+	ArgCount     int
+}
+
+// LoadField/StoreField implement ldfld/stfld: pop an object reference
+// (LoadField) or a value then an object reference (StoreField, matching
+// CIL's stack order) and read/write FieldName on it.
+type LoadField struct {
+	TypeFullName string
+	FieldName    string
+}
+
+type StoreField struct {
+	TypeFullName string
+	FieldName    string
+}
+
+// Throw pops the top of stack (an exception object) and aborts execution
+// with it. Fase 2 only supports unhandled throw — try/catch/finally are
+// deferred (docs/ROADMAP.md).
+type Throw struct{}

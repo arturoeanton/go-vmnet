@@ -152,55 +152,92 @@ usable de verdad, con el primer nivel de sandboxing.
 ### Tareas
 
 **`/runtime`**
-- [ ] Jerarquía de clases (BaseType, Interfaces), `callvirt` con vtable + null check
-- [ ] `newobj` + ejecución de constructores
-- [ ] Lectura/escritura de fields de instancia y estáticos
-- [ ] Boxing/unboxing de value types
-- [ ] Interface dispatch básico
+- [x] `newobj` + ejecución de constructores (incluye `System.Object::.ctor` como no-op nativo)
+- [x] Lectura/escritura de fields de instancia (`ldfld`/`stfld`, resueltos por nombre)
+- [x] `callvirt` resuelto directamente (sin vtable) + null check → `NullReferenceException`
+      managed si el receptor es `null`
+- [x] Boxing/unboxing (`box`/`unbox.any`) como no-op, dado que `runtime.Value` ya es un tagged
+      union uniforme
+- [ ] ~~Jerarquía de clases (BaseType, Interfaces) + vtable real~~ — diferido: ningún fixture
+      necesita polimorfismo (override de un método virtual por una subclase). `callvirt` hoy
+      resuelve el método exacto del token, no el override en tiempo de ejecución.
+- [ ] ~~Interface dispatch~~ — diferido, mismo motivo
 
 **`/bcl` (subset v0.2)**
-- [ ] `System.String` ampliado (Substring, Equals, ToUpper/Lower, Split, Format básico)
-- [ ] `System.Array` + soporte runtime de `SZARRAY`
-- [ ] `System.Collections.Generic.List<T>` (backing nativo Go)
-- [ ] `System.Collections.Generic.Dictionary<K,V>` (backing nativo Go)
-- [ ] `System.DateTime`, `System.TimeSpan`, `System.Guid` básicos
-- [ ] `System.Text.Encoding` (UTF8 GetBytes/GetString) — necesario para el bridge `CallBytes`
-- [ ] Jerarquía `System.Exception` + throw/catch/finally
+- [x] `System.Collections.Generic.List`1` (backing nativo Go): `Add`, `get_Count`, `get_Item`
+- [x] `System.Collections.Generic.Dictionary`2` (backing nativo Go, **solo claves string** —
+      cubre `Dictionary<string,string>`/`Dictionary<string,object>` de spec §17.1): `Add`,
+      `get_Item`, `set_Item`, `ContainsKey`, `get_Count`
+- [x] `System.Text.Encoding.UTF8.GetString`/`GetBytes` — necesario para el bridge `CallBytes`
+- [x] `System.String.Concat` ampliado para aceptar argumentos boxeados (no solo string), como
+      hace el compilador de C# en concatenaciones mixtas
+- [x] `System.Object.ToString()` (despacha por `Kind` del valor boxeado)
+- [ ] `System.String` ampliado (Substring, Equals, ToUpper/Lower, Split, Format) — diferido, no
+      lo pide ningún fixture de Fase 2
+- [ ] `System.Array` + soporte runtime de `SZARRAY` (`newarr`/`ldelem`/`stelem`/`ldlen`) —
+      diferido; ver nota de alcance del bridge `CallBytes` más abajo
+- [ ] `System.DateTime`, `System.TimeSpan`, `System.Guid` — diferido
 
 **Generics (mínimo, spec §17.1)**
-- [ ] `GenericInstance` + resolución de `MethodSpec`/`TypeSpec` limitada a `List<T>`/`Dictionary<K,V>`
+- [x] Resolución de `TypeSpec`/`GENERICINST` al nombre del tipo genérico abierto (p. ej.
+      `List`1`), ignorando los argumentos de tipo — suficiente porque el backing nativo de
+      List/Dictionary no necesita saber `T`
 
 **Excepciones**
-- [ ] `ManagedException` + captura de stack trace (formato spec §18.3)
-- [ ] Separación `VMError` vs `ManagedExceptionError`
-- [ ] Soporte IL de try/catch/finally (`leave`, `leave.s`, `endfinally`)
+- [x] `throw` (`runtime.ManagedException`, reexportado como `vmnet.ManagedException`),
+      propagación como error Go normal via `%w` (`errors.As` funciona)
+- [x] Constructores nativos para `System.Exception`/`InvalidOperationException`/
+      `ArgumentException`/`ArgumentNullException`/`NotSupportedException`
+- [ ] ~~`try`/`catch`/`finally` (`leave`, `leave.s`, `endfinally`)~~ — diferido explícitamente:
+      el demo de Fase 2 solo necesita que una excepción **no manejada** llegue a Go como error
+      claro, no que C# la capture. El decoder de IL ya reconoce `leave`/`endfinally`; el IR
+      builder los reporta como opcode no soportado si aparecen.
+- [ ] Formato de stack trace multi-frame (spec §18.3) — hoy el error es de un solo frame
+      (`Tipo.Método: Excepción: mensaje`), sin la cadena `at ...` completa
 
 **JSON bridge + API pública**
-- [ ] `Assembly.CallBytes`, `Assembly.CallJSON`
-- [ ] Set completo de `Value` + marshaling Go ↔ managed para objetos/maps
+- [x] `Assembly.CallBytes`, `Assembly.CallJSON`
 
-**Sandbox v1**
-- [ ] `Limits{MaxInstructions, MaxHeapBytes, MaxCallDepth, MaxStackDepth}` conectado al eval loop
-- [ ] `ErrInstructionLimitExceeded`, `ErrOutOfMemory`
-- [ ] `Permissions` stub (solo `AllowConsole`, resto deny-by-default) — modelo completo en Fase 4
+**Sandbox**
+- [x] `MaxInstructions`/`MaxCallDepth` conectados al eval loop desde Fase 1, verificados ahora
+      con un fixture de loop infinito real
+- [ ] `MaxHeapBytes`, `MaxStackDepth`, `Permissions` (`AllowConsole` stub) — diferido a Fase 4
+      (spec ya los agrupa ahí como parte del modelo de seguridad completo)
 
 **Tests**
-- [ ] Fixtures `Objects`, `CollectionsTest`, `ExceptionTest` (spec §29.4–29.6)
-- [ ] Test de plugin con loop infinito muerto por `MaxInstructions`
+- [x] Fixtures `Objects` (Customer), `CollectionsTest`, `ExceptionTest` — ya existían desde
+      Fase 0, ahora ejecutables de verdad
+- [x] Fixture nueva `Rules.cs`: objetos + `List<int>` + `Dictionary<string,int>` + `Encoding` +
+      throw, todo en un solo método `Eval(byte[]) -> byte[]`
+- [x] Fixture `Loops.Runaway()`: loop infinito real, matado por `MaxInstructions`
+- [x] Tests golden: `TestFase2Demo` (CallBytes, CallJSON, excepción managed tipada via
+      `errors.As`, sandbox), `TestObjectsAndCollections`
+
+> **Ajuste de alcance vs. spec original:** igual que en Fase 1, se recortó lo que el demo
+> concreto no necesita. Sin vtable/interface dispatch (nada usa polimorfismo real), sin
+> `try/catch/finally` (el demo es "excepción no manejada llega a Go", no "C# la atrapa"), sin
+> `System.Array`/`SZARRAY` (el bridge `CallBytes` pasa `byte[]` de un lado a otro sin que el C#
+> lo indexe — ver comentario en `tests/fixtures/csharp/Rules.cs`), sin `DateTime`/`Guid`. Todo
+> lo diferido queda documentado acá en vez de fallar en silencio: el `IR builder` reporta un
+> error explícito con el nombre del opcode si un assembly de terceros necesita algo de esta
+> lista.
 
 ### Demo de cierre de Fase 2 — "Esto es el producto" (~10–15 min)
 
-1. `Rules.dll` realista: `Rules.Engine.Eval(byte[]) -> byte[]` con una clase `Customer`, una
-   `List<LineItem>`, un `Dictionary<string,decimal>` de impuestos, y una excepción lanzada ante
-   input inválido.
-2. Desde un host Go (un mini checkout service), `asm.CallJSON("Rules.Engine", "Eval", cartJSON)`
-   devuelve totales calculados — JSON in/out sin código de serialización manual.
-3. Input inválido a propósito → excepción managed capturada como error Go legible, con stack
-   trace.
-4. Cargar un segundo DLL "buggy" con loop infinito → `MaxInstructions` lo mata en milisegundos
-   en vez de colgar el proceso host.
+Corrible hoy con `examples/rules` (`go run .` después de compilar las fixtures):
+
+1. `Rules.Eval` real: una clase `Customer` con propiedades (`callvirt` sobre los accessors
+   generados por el compilador), un `List<int>`, un `Dictionary<string,int>` de impuestos.
+2. Desde un host Go, `asm.CallJSON("Vmnet.Fixtures.Rules", "Eval", "checkout request")` →
+   `map[customer:acme corp ok:true]` — JSON in/out sin código de serialización manual.
+3. Input inválido (`CallBytes` con `[]byte("")`) → excepción managed capturada como error Go
+   tipado (`errors.As(err, &vmnet.ManagedException{})`): `System.InvalidOperationException:
+   empty input`.
+4. `Loops.Runaway()` (loop infinito real) → `MaxInstructions` lo mata en ~100ms en vez de
+   colgar el proceso host.
 5. Reemplazar `Rules.dll` por `Rules_v2.dll` en caliente, sin recompilar ni reiniciar el
-   binario Go — remarcar "lógica de negocio hot-swappable".
+   binario Go — remarcar "lógica de negocio hot-swappable" (coreografía de demo, no requiere
+   código nuevo: `vm.LoadFile` ya soporta cargar múltiples assemblies).
 
 **Mensaje de venta:** "Esto es lo que un cliente compra: reglas de negocio en C# embebidas de
 forma segura en un servicio Go, con aislamiento de fallas y un one-liner de JSON in/out."

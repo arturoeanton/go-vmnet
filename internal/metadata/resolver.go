@@ -204,6 +204,25 @@ func (md *Metadata) FindTypeDef(namespace, name string) (rid uint32, row TypeDef
 	return 0, TypeDefRow{}, fmt.Errorf("%w: type %s.%s not found", ErrOutOfRange, namespace, name)
 }
 
+// FieldDefOwner finds which TypeDef owns Field fieldRID, scanning TypeDef
+// field ranges (TypeDefFieldRange).
+func (md *Metadata) FieldDefOwner(fieldRID uint32) (typeRID uint32, err error) {
+	t := md.tables[TableTypeDef]
+	if t == nil {
+		return 0, fmt.Errorf("%w: no TypeDef table", ErrOutOfRange)
+	}
+	for rid := uint32(1); rid <= t.rowCount; rid++ {
+		start, end, err := md.TypeDefFieldRange(rid)
+		if err != nil {
+			return 0, err
+		}
+		if fieldRID >= start && fieldRID < end {
+			return rid, nil
+		}
+	}
+	return 0, fmt.Errorf("%w: Field RID %d has no owning TypeDef", ErrOutOfRange, fieldRID)
+}
+
 // MethodDefOwner finds which TypeDef owns MethodDef methodRID, scanning
 // TypeDef method ranges (TypeDefMethodRange).
 func (md *Metadata) MethodDefOwner(methodRID uint32) (typeRID uint32, err error) {
@@ -327,6 +346,17 @@ func (md *Metadata) Constant(rid uint32) (ConstantRow, error) {
 		return ConstantRow{}, err
 	}
 	return ConstantRow{Type: byte(t.col(row, 0)), Parent: parent, Value: val}, nil
+}
+
+// TypeSpecSignature returns the raw signature blob for a TypeSpec row
+// (e.g. a generic instantiation like List<int>) — parse it with
+// ParseTypeSpec.
+func (md *Metadata) TypeSpecSignature(rid uint32) ([]byte, error) {
+	t, row, err := md.tableOrErr(TableTypeSpec, rid)
+	if err != nil {
+		return nil, err
+	}
+	return md.blob.Blob(t.col(row, 0))
 }
 
 func (md *Metadata) StandAloneSig(rid uint32) (StandAloneSigRow, error) {

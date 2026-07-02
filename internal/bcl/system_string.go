@@ -14,13 +14,18 @@ func init() {
 	register("System.String::get_Length", true, stringLength)
 }
 
+// stringConcat backs every String.Concat overload, including the
+// object-typed ones the compiler picks for `"literal" + nonStringExpr`
+// (values arrive boxed — a no-op in vmnet, see internal/ir/builder.go —
+// so non-string args are formatted the same way Object.ToString() would).
 func stringConcat(args []runtime.Value) (runtime.Value, error) {
 	var sb strings.Builder
-	for i, a := range args {
-		if a.Kind != runtime.KindString {
-			return runtime.Value{}, fmt.Errorf("bcl: System.String.Concat: argument %d is not a string", i)
+	for _, a := range args {
+		if a.Kind == runtime.KindString {
+			sb.WriteString(a.Str)
+		} else {
+			sb.WriteString(displayString(a))
 		}
-		sb.WriteString(a.Str)
 	}
 	return runtime.String(sb.String()), nil
 }

@@ -51,14 +51,17 @@ Ver `docs/adr/0001-pure-go-core.md`.
 
 ## Estado actual
 
-Fase 0 (bootstrap) y Fase 1 (núcleo IL funcional) completas: el pipeline
-`.dll → internal/pe → internal/metadata → internal/il → internal/ir →
-internal/interpreter → internal/bcl` corre de punta a punta contra un
-assembly real compilado con el SDK de .NET (`tests/fixtures/csharp`),
-expuesto tanto por la API pública (`vmnet.New()` / `Assembly.Call`) como por
-el CLI (`vmnet inspect` / `vmnet il` / `vmnet run`). Alcance: métodos
-static, aritmética, branches/loops, y llamadas a un subconjunto mínimo de
-BCL (`System.Math.Abs`, `System.String.Concat`, `System.Console.WriteLine`).
-Objetos, `callvirt`, fields de instancia, excepciones y generics quedan
-para Fase 2 (`docs/ROADMAP.md`) — el IR builder los reporta como opcode no
-soportado en vez de ejecutarlos incorrectamente.
+Fase 0 (bootstrap), Fase 1 (núcleo IL) y Fase 2 (motor de reglas) completas.
+El pipeline `.dll → internal/pe → internal/metadata → internal/il →
+internal/ir → internal/interpreter → internal/bcl` corre de punta a punta
+contra un assembly real compilado con el SDK de .NET
+(`tests/fixtures/csharp`), expuesto por la API pública (`vmnet.New()`,
+`Assembly.Call`/`CallBytes`/`CallJSON`) y por el CLI (`vmnet inspect` /
+`vmnet il` / `vmnet run`). Alcance actual: métodos static e instancia,
+`newobj`/`callvirt`/fields (sin vtable — resolución directa), `List<T>` /
+`Dictionary<string,V>` con backing nativo Go, `throw` no manejado
+(propagado como error Go tipado, `vmnet.ManagedException`), y el bridge
+`byte[]`/JSON. Interface/vtable dispatch, `try/catch/finally`,
+`System.Array`, generics más allá de List/Dictionary, y `DateTime`/`Guid`
+quedan para fases siguientes (`docs/ROADMAP.md`) — el IR builder reporta
+cualquier opcode no soportado explícitamente en vez de ejecutarlo mal.

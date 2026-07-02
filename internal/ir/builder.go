@@ -226,6 +226,47 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 			}
 			out = append(out, Call{FullName: fullName, ArgCount: argCount, HasThis: hasThis, HasReturn: hasReturn})
 
+		case "callvirt":
+			token := instr.Operand.(uint32)
+			fullName, _, argCount, hasReturn, err := resolveCallTarget(md, token)
+			if err != nil {
+				return nil, fmt.Errorf("ir: callvirt at IL offset %d: %w", instr.Offset, err)
+			}
+			out = append(out, Call{FullName: fullName, ArgCount: argCount, HasThis: true, HasReturn: hasReturn, Virtual: true})
+
+		case "newobj":
+			token := instr.Operand.(uint32)
+			typeFullName, ctorFullName, argCount, err := resolveNewObjTarget(md, token)
+			if err != nil {
+				return nil, fmt.Errorf("ir: newobj at IL offset %d: %w", instr.Offset, err)
+			}
+			out = append(out, NewObj{TypeFullName: typeFullName, CtorFullName: ctorFullName, ArgCount: argCount})
+
+		case "ldfld":
+			token := instr.Operand.(uint32)
+			typeFullName, fieldName, err := resolveFieldTarget(md, token)
+			if err != nil {
+				return nil, fmt.Errorf("ir: ldfld at IL offset %d: %w", instr.Offset, err)
+			}
+			out = append(out, LoadField{TypeFullName: typeFullName, FieldName: fieldName})
+
+		case "stfld":
+			token := instr.Operand.(uint32)
+			typeFullName, fieldName, err := resolveFieldTarget(md, token)
+			if err != nil {
+				return nil, fmt.Errorf("ir: stfld at IL offset %d: %w", instr.Offset, err)
+			}
+			out = append(out, StoreField{TypeFullName: typeFullName, FieldName: fieldName})
+
+		case "box", "unbox.any":
+			// vmnet's runtime.Value is already a uniform tagged union —
+			// boxing a value type doesn't need a representation change.
+			// Correctness gap: unbox.any doesn't verify the target type.
+			out = append(out, Nop{})
+
+		case "throw":
+			out = append(out, Throw{})
+
 		case "ret":
 			out = append(out, Return{HasValue: !retVoid})
 
@@ -304,8 +345,114 @@ func resolveMemberRefClassName(md *metadata.Metadata, class metadata.Token) (str
 			return "", err
 		}
 		return qualify(row.Namespace, row.Name), nil
+	case metadata.TableTypeSpec:
+		return resolveTypeSpecName(md, class.RID())
 	default:
 		return "", fmt.Errorf("unsupported MemberRef class table %#x", byte(class.Table()))
+	}
+}
+
+// resolveTypeSpecName resolves a TypeSpec (used for generic instantiations
+// like List<int>) to its *open* generic type's name — e.g.
+// "System.Collections.Generic.List`1". Type arguments aren't retained:
+// vmnet's native collection backing doesn't need them (see
+// internal/bcl/system_collections.go).
+func resolveTypeSpecName(md *metadata.Metadata, rid uint32) (string, error) {
+	sig, err := md.TypeSpecSignature(rid)
+	if err != nil {
+		return "", err
+	}
+	t, err := metadata.ParseTypeSpec(sig)
+	if err != nil {
+		return "", err
+	}
+	if t.Kind != metadata.SigGenericInst {
+		return "", fmt.Errorf("unsupported TypeSpec kind %d", t.Kind)
+	}
+	return resolveTypeToken(md, t.Token)
+}
+
+func resolveTypeToken(md *metadata.Metadata, tok metadata.Token) (string, error) {
+	switch tok.Table() {
+	case metadata.TableTypeRef:
+		row, err := md.TypeRef(tok.RID())
+		if err != nil {
+			return "", err
+		}
+		return qualify(row.Namespace, row.Name), nil
+	case metadata.TableTypeDef:
+		row, err := md.TypeDef(tok.RID())
+		if err != nil {
+			return "", err
+		}
+		return qualify(row.Namespace, row.Name), nil
+	default:
+		return "", fmt.Errorf("unsupported type token table %#x", byte(tok.Table()))
+	}
+}
+
+func resolveNewObjTarget(md *metadata.Metadata, token uint32) (typeFullName, ctorFullName string, argCount int, err error) {
+	t := metadata.Token(token)
+	switch t.Table() {
+	case metadata.TableMethodDef:
+		row, err := md.MethodDef(t.RID())
+		if err != nil {
+			return "", "", 0, err
+		}
+		typeRID, err := md.MethodDefOwner(t.RID())
+		if err != nil {
+			return "", "", 0, err
+		}
+		typeDef, err := md.TypeDef(typeRID)
+		if err != nil {
+			return "", "", 0, err
+		}
+		sig, err := metadata.ParseMethodSig(row.Signature)
+		if err != nil {
+			return "", "", 0, err
+		}
+		typeFullName = qualify(typeDef.Namespace, typeDef.Name)
+		return typeFullName, typeFullName + "::" + row.Name, int(sig.ParamCount), nil
+
+	case metadata.TableMemberRef:
+		row, err := md.MemberRef(t.RID())
+		if err != nil {
+			return "", "", 0, err
+		}
+		sig, err := metadata.ParseMethodSig(row.Signature)
+		if err != nil {
+			return "", "", 0, err
+		}
+		typeFullName, err = resolveMemberRefClassName(md, row.Class)
+		if err != nil {
+			return "", "", 0, err
+		}
+		return typeFullName, typeFullName + "::" + row.Name, int(sig.ParamCount), nil
+
+	default:
+		return "", "", 0, fmt.Errorf("unsupported newobj target table %#x", byte(t.Table()))
+	}
+}
+
+func resolveFieldTarget(md *metadata.Metadata, token uint32) (typeFullName, fieldName string, err error) {
+	t := metadata.Token(token)
+	switch t.Table() {
+	case metadata.TableField:
+		row, err := md.Field(t.RID())
+		if err != nil {
+			return "", "", err
+		}
+		typeRID, err := md.FieldDefOwner(t.RID())
+		if err != nil {
+			return "", "", err
+		}
+		typeDef, err := md.TypeDef(typeRID)
+		if err != nil {
+			return "", "", err
+		}
+		return qualify(typeDef.Namespace, typeDef.Name), row.Name, nil
+	default:
+		return "", "", fmt.Errorf("unsupported field target table %#x (external fields aren't supported yet)", byte(t.Table()))
 	}
 }
 

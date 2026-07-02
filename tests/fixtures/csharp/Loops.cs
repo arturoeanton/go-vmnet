@@ -10,5 +10,16 @@ namespace Vmnet.Fixtures
                 total += i;
             return total;
         }
+
+        // Fase 2 sandbox fixture: a genuine infinite loop, used to prove
+        // MaxInstructions actually stops a runaway plugin (docs/ROADMAP.md).
+        public static int Runaway()
+        {
+            var i = 0;
+            while (true)
+            {
+                i = i + 1;
+            }
+        }
     }
 }

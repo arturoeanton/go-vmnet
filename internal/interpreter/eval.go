@@ -7,16 +7,17 @@ import (
 	"github.com/arturoeanton/go-vmnet/internal/runtime"
 )
 
-// Machine executes runtime.Method IR. Resolve supplies methods for calls
-// that aren't BCL natives (bcl.Lookup) — Fase 1 only exercises static
-// calls, but the recursion/resolver plumbing is already general.
+// Machine executes runtime.Method IR. Resolve supplies methods and
+// ResolveType supplies field layouts for anything that isn't a BCL native
+// (bcl.Lookup / bcl.LookupCtor).
 type Machine struct {
-	Resolve Resolver
-	Limits  Limits
+	Resolve     Resolver
+	ResolveType TypeResolver
+	Limits      Limits
 }
 
-func New(resolve Resolver, limits Limits) *Machine {
-	return &Machine{Resolve: resolve, Limits: limits}
+func New(resolve Resolver, resolveType TypeResolver, limits Limits) *Machine {
+	return &Machine{Resolve: resolve, ResolveType: resolveType, Limits: limits}
 }
 
 // Invoke runs method with args and returns its result (the zero Value if
@@ -153,6 +154,13 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 			callArgs := append([]runtime.Value(nil), frame.Stack[len(frame.Stack)-total:]...)
 			frame.Stack = frame.Stack[:len(frame.Stack)-total]
 
+			if in.Virtual && callArgs[0].Kind == runtime.KindNull {
+				return runtime.Value{}, &runtime.ManagedException{
+					TypeName: "System.NullReferenceException",
+					Message:  fmt.Sprintf("Object reference not set to an instance of an object (calling %s)", in.FullName),
+				}
+			}
+
 			result, hasReturn, err := m.call(in.FullName, callArgs, depth, instrCount)
 			if err != nil {
 				return runtime.Value{}, err
@@ -160,6 +168,57 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 			if hasReturn {
 				frame.push(result)
 			}
+
+		case ir.NewObj:
+			if len(frame.Stack) < in.ArgCount {
+				return runtime.Value{}, fmt.Errorf("interpreter: newobj %s: stack underflow", in.TypeFullName)
+			}
+			ctorArgs := append([]runtime.Value(nil), frame.Stack[len(frame.Stack)-in.ArgCount:]...)
+			frame.Stack = frame.Stack[:len(frame.Stack)-in.ArgCount]
+
+			v, err := m.newObj(newObjArgs{TypeFullName: in.TypeFullName, CtorFullName: in.CtorFullName, Args: ctorArgs}, depth, instrCount)
+			if err != nil {
+				return runtime.Value{}, err
+			}
+			frame.push(v)
+
+		case ir.LoadField:
+			obj := frame.pop()
+			if obj.Kind != runtime.KindObject || obj.Obj == nil {
+				return runtime.Value{}, &runtime.ManagedException{
+					TypeName: "System.NullReferenceException",
+					Message:  fmt.Sprintf("Object reference not set to an instance of an object (reading %s.%s)", in.TypeFullName, in.FieldName),
+				}
+			}
+			idx := fieldIndex(obj.Obj, in.FieldName)
+			if idx < 0 {
+				return runtime.Value{}, fmt.Errorf("interpreter: %s has no field %q", in.TypeFullName, in.FieldName)
+			}
+			frame.push(obj.Obj.Fields[idx])
+
+		case ir.StoreField:
+			val := frame.pop()
+			obj := frame.pop()
+			if obj.Kind != runtime.KindObject || obj.Obj == nil {
+				return runtime.Value{}, &runtime.ManagedException{
+					TypeName: "System.NullReferenceException",
+					Message:  fmt.Sprintf("Object reference not set to an instance of an object (writing %s.%s)", in.TypeFullName, in.FieldName),
+				}
+			}
+			idx := fieldIndex(obj.Obj, in.FieldName)
+			if idx < 0 {
+				return runtime.Value{}, fmt.Errorf("interpreter: %s has no field %q", in.TypeFullName, in.FieldName)
+			}
+			obj.Obj.Fields[idx] = val
+
+		case ir.Throw:
+			v := frame.pop()
+			if v.Kind == runtime.KindObject && v.Obj != nil {
+				if ex, ok := v.Obj.Native.(*runtime.ManagedException); ok {
+					return runtime.Value{}, ex
+				}
+			}
+			return runtime.Value{}, fmt.Errorf("interpreter: thrown object is not a recognized exception type")
 
 		case ir.Return:
 			if in.HasValue {
@@ -175,4 +234,11 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 	}
 
 	return runtime.Value{}, fmt.Errorf("interpreter: method fell off the end without a ret")
+}
+
+func fieldIndex(obj *runtime.Object, name string) int {
+	if obj.Type == nil {
+		return -1
+	}
+	return obj.Type.FieldIndex(name)
 }

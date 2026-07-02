@@ -18,6 +18,7 @@ type Assembly struct {
 	md   *metadata.Metadata
 
 	methods map[string]*runtime.Method // keyed by "Namespace.Type::Method"
+	types   map[string]*runtime.Type   // keyed by "Namespace.Type"
 }
 
 // Name returns the name Assembly was loaded with (the file's base name for
@@ -128,6 +129,37 @@ func (asm *Assembly) buildMethod(methodRID uint32, row metadata.MethodDefRow) (*
 	}
 	asm.methods[fullName] = m
 	return m, nil
+}
+
+// resolveTypeByFullName implements interpreter.TypeResolver: it builds a
+// runtime.Type (field layout) for a plain class discovered while executing
+// newobj/ldfld/stfld.
+func (asm *Assembly) resolveTypeByFullName(fullName string) (*runtime.Type, error) {
+	if t, ok := asm.types[fullName]; ok {
+		return t, nil
+	}
+	namespace, name := splitTypeName(fullName)
+	typeRID, typeDef, err := asm.md.FindTypeDef(namespace, name)
+	if err != nil {
+		return nil, err
+	}
+
+	start, end, err := asm.md.TypeDefFieldRange(typeRID)
+	if err != nil {
+		return nil, err
+	}
+	fields := make([]string, 0, end-start)
+	for rid := start; rid < end; rid++ {
+		f, err := asm.md.Field(rid)
+		if err != nil {
+			return nil, err
+		}
+		fields = append(fields, f.Name)
+	}
+
+	t := &runtime.Type{Namespace: typeDef.Namespace, Name: typeDef.Name, Fields: fields}
+	asm.types[fullName] = t
+	return t, nil
 }
 
 func splitTypeName(typeName string) (namespace, name string) {
