@@ -28,8 +28,14 @@ const (
 var bclPrefixes = map[Profile][]string{
 	ProfileMinimal: {
 		"System.Math::",
+		"System.Double::IsNaN",
 		"System.String::Concat",
 		"System.String::get_Length",
+		"System.String::Format",
+		"System.String::Substring",
+		"System.String::get_Chars",
+		"System.String::Equals",
+		"System.String::op_Equality",
 		"System.Console::",
 		"System.Object::.ctor",
 	},
@@ -43,12 +49,18 @@ func init() {
 		"System.Collections.Generic.List`1::",
 		"System.Collections.Generic.Dictionary`2::",
 		"System.Text.Encoding::",
+		"System.Text.StringBuilder::",
+		"System.Array::Empty",
+		"System.Globalization.CultureInfo::",
+		"System.Environment::get_CurrentManagedThreadId",
 		"System.Exception",
 		"System.InvalidOperationException",
 		"System.ArgumentException",
 		"System.ArgumentNullException",
+		"System.ArgumentOutOfRangeException",
 		"System.NotSupportedException",
 		"System.NullReferenceException",
+		"System.IndexOutOfRangeException",
 	)
 	// netstandard-lite = rules plus the Fase 3 reflection-lite/Convert surface.
 	bclPrefixes[ProfileNetStandardLite] = append(append([]string{}, bclPrefixes[ProfileRules]...),

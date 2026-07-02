@@ -111,3 +111,19 @@ casos de "drift" en `internal/checker` (el perfil `minimal` no excluía
 arrays/static fields como debía, y `sigShapeFindings` seguía marcando
 `ref`/`out` como no soportado después de que sí se implementó) — ambos
 atrapados por el propio test de dogfood del checker.
+
+Fase 3.6 (primera sub-fase del camino a 85% de compatibilidad, ver
+`docs/ROADMAP.md`) completa: opcode `switch` (ya decodificado desde Fase 1
+pero nunca bajado a IR) y una tanda de nativos BCL de alto alcance
+(`StringBuilder`, `String.Format`/`Substring`/indexador/`Equals`,
+`Array.Empty`, `Double.IsNaN`, stubs de `CultureInfo`/`Environment`).
+Expuso el primer caso concreto del límite ya documentado de "callvirt sin
+vtable real": el compilador de C# emite `StringBuilder.ToString()` como
+`callvirt Object::ToString`, confiando en el despacho virtual real del
+CLR — vmnet lo resuelve estáticamente por el `MemberRef` declarado, así
+que sin un parche dirigido en `objectToString` siempre corría el
+`ToString` genérico. El despacho virtual real (jerarquía de tipos +
+`isinst`/`castclass`) es Fase 3.8. Certificación (7 paquetes de Fase 3 +
+Jint, el motor de JavaScript completo para .NET usado como target del
+demo de "lenguaje dinámico" planeado): promedio de los 7 paquetes sube de
+~56.8% a ~59.8%; con Jint incluido, ~60.3%.

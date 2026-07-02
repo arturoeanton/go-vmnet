@@ -25,6 +25,7 @@ NuGet arbitrario, backend CoreCLR. Estos quedan como roadmap post-v1.0 (v1.5 "hy
 | 2.5 | Endurecimiento *(gate interno, sin demo de venta)* | 2–3 días | El intérprete no crashea el host bajo input adversarial ni concurrencia | `go test ./... -race` + fuzzing (~16.8M ejecuciones, 0 panics) |
 | 3 | Checker + ecosistema NuGet | 6–9 sem | Adopción de bajo riesgo + reuso de librerías existentes | 7 paquetes NuGet reales chequeados, 3 con funciones ejecutando de verdad |
 | 3.5 | Endurecimiento + compatibilidad real *(gate interno, sin demo de venta)* | 3–4 días | El motor cubre el patrón de código C# real más común (arrays, `ref`/`out`, static fields), no solo lo que estaba fácil | Re-certificación de los mismos 7 paquetes: promedio de métodos limpios sube de ~45% a ~57% |
+| 3.6+ | Camino a 85% + demo Jint *(multi-fase, criterio de cierre firme: 85%)* | varias semanas | El motor corre una porción realmente grande de código C# real, no solo casos curados — validado contra un motor JS completo (Jint), no solo librerías chicas | 85%+ de métodos limpios promedio en 7 paquetes + Jint; `Engine().SetValue(...).Execute(...)` corriendo de verdad |
 | 4 | v1.0 producción | 5–7 sem | Listo para pilotos reales | Benchmarks, seguridad, docs, CI multiplataforma, 5 min a "hello world" |
 
 **Riesgo mayor del proyecto**: no es el parser IL, es la BCL (`System.*`). Por eso las 4 fases
@@ -640,6 +641,101 @@ go test ./ -run TestArrays -v
 go test ./ -run TestByRef -v
 go test ./internal/checker/... -run TestAnalyze_MinimalProfileFlagsObjectModel -v
 go test ./internal/metadata/... -run '^$' -fuzz '^FuzzParseSignatures$' -fuzztime=30s
+```
+
+---
+
+## Fase 3.6+ — Camino a 85% de compatibilidad real + demo Jint
+
+**Objetivo:** antes de Fase 4, subir la compatibilidad real medida a **por lo menos 85%** promedio
+(criterio de cierre firme, no aspiracional) sobre los 7 paquetes ya certificados **más Jint**
+(motor de JavaScript completo para .NET, ~5400 métodos), y validar un demo real de "lenguaje
+dinámico corriendo dentro de vmnet" ejecutando el patrón `new Engine().SetValue(...).Execute(...)`
+de punta a punta — no solo el número agregado. Se descartó explícitamente un demo de ASP.NET
+Core/MVC (fuera de alcance documentado, spec §3).
+
+Dado el tamaño real de la brecha, esto **no es una sola fase**: es una secuencia de sub-fases,
+cada una con su propia medición, tests, docs y commit/tag/push — igual que Fase 2.5/3.5, pero
+encadenadas. El orden se decidió con el mismo método de Fase 3.5 (medir antes de adivinar): se
+corrió el mismo probe de findings-por-opcode/BCL, ahora incluyendo Jint, contra los 8 targets.
+
+| Sub-fase | Qué ataca | Por qué ese orden |
+|---|---|---|
+| **3.6** | `switch` (jump table) + BCL barata de alto alcance (`StringBuilder`, `String.Format`/`Substring`/indexador/`Equals`, `Array.Empty`, `Double.IsNaN`, `CultureInfo.InvariantCulture`, `ArgumentOutOfRangeException`, `Environment.CurrentManagedThreadId`) | Alto alcance (varios llegan a 6-8/8 paquetes), bajo costo — nada de esto necesita máquina de tipos nueva |
+| **3.7** | Value types: `initobj`/`ldobj`/`stobj`/`constrained.` + `Nullable<T>` | 8/8 paquetes usan `initobj`; vmnet no modela structs todavía, solo clases |
+| **3.8** | Jerarquía de tipos real + `isinst`/`castclass` | 8/8 y 6/8 paquetes; `runtime.Type` es plano hoy (sin herencia/interfaces); desbloquea `EqualityComparer<T>` |
+| **3.9** | Delegates/closures (`ldftn`, `Action<T>`/`Func<T>`, `Invoke`) | Necesario para el demo de Jint literal (`SetValue(new Action<string>(...))` es la primera línea) |
+| **3.10** | `try`/`catch`/`finally` (`leave`/`leave.s`/`endfinally`) | 8/8 paquetes; hoy solo existe throw no manejado |
+| **3.11** | `DateTime`, `Span<T>`/`ReadOnlySpan<T>`/`Memory<T>` | Impacto grande pero concentrado (principalmente System.Text.Json/Semver) |
+| **3.x** | Re-medición final, cierre de brecha restante hacia 85%, validación literal del demo Jint | Confirma el número Y que el escenario concreto corre, no solo el promedio |
+
+### Fase 3.6 — `switch` + BCL barata de alto alcance
+
+**Tareas**
+
+- [x] IR + intérprete: `switch` (spec §III.3.68) — ya se decodificaba desde Fase 1
+      (`internal/il/decoder.go` resuelve la tabla de offsets), pero `ir.Build` nunca lo bajaba;
+      caía como opcode no soportado. Fuera de rango cae al siguiente instrucción (no es error,
+      por spec), verificado con el fixture.
+- [x] `System.Text.StringBuilder`: ctor (parameterless + seed-string), `Append`/`AppendLine`
+      (devuelven el receiver — encadenado fluido `sb.Append(a).Append(b)` funciona), `ToString`,
+      `get_Length`, `Clear`.
+- [x] `System.String`: `Format` (gramática compuesta `{index[,alignment][:formatString]}`,
+      escapes `{{`/`}}`, especificadores `D`/`F`/`N`/`X`/`P`/`G` — uno no reconocido es error
+      explícito, no un resultado adivinado), `Substring` (1 y 2 args), `get_Chars` (indexador),
+      `Equals`/`op_Equality` (una sola native cubre instancia + estático + `==`, ver comentario
+      en el código).
+- [x] `System.Array::Empty`, `System.Double::IsNaN`, `System.Globalization.CultureInfo::
+      get_InvariantCulture` (stub), `System.Environment::get_CurrentManagedThreadId` (stub),
+      constructor de `System.ArgumentOutOfRangeException`/`System.IndexOutOfRangeException`
+      (mismo patrón que las excepciones ya registradas en Fase 2).
+- [x] **Bug real encontrado y arreglado — `StringBuilder.ToString()` no hacía nada útil**: el
+      compilador de C# emite `sb.ToString()` como `callvirt System.Object::ToString` (confía en
+      el despacho virtual real del CLR para llegar al override), no como
+      `callvirt System.Text.StringBuilder::ToString`. vmnet resuelve `callvirt` de forma
+      estática por el `MemberRef` declarado (spec: "sin vtable" — el despacho virtual real es
+      Fase 3.8), así que sin arreglo esto siempre ejecutaba el `ToString` genérico de `Object` y
+      devolvía `<object>`. Se resolvió extendiendo `displayString`/`objectToString` (ya pensado
+      para dispatchear "como si tuviera vtable" sobre valores boxed) para reconocer tipos
+      native-backed conocidos — StringBuilder por ahora, el mismo mecanismo cubre casos futuros.
+      Es un parche dirigido, no una solución general — el despacho virtual real llega en Fase 3.8.
+- [x] **Endurecimiento**: `String.Format` limita el ancho de alineación (`{0,N}`) a un máximo
+      fijo — sin el límite, un `{0,999999999}` (desde una plugin adversarial o desde el bridge
+      `CallBytes`/`CallJSON`, donde la format string puede venir de fuera del proceso) haría que
+      `strings.Repeat` intentara asignar cientos de MB de padding. Mismo tipo de riesgo que
+      `MaxArrayLength` (Fase 3.5) para `newarr`.
+
+**Fixtures y tests**
+
+- [x] `SwitchTest.cs` (switch denso 0-4 + default) / `TestSwitch`, incluye el caso fuera de rango
+- [x] `StringOps.cs` (StringBuilder encadenado, Format, Substring, indexador, Equals) /
+      `TestStringOps`
+
+**Medición (7 paquetes de Fase 3 + Jint, perfil `netstandard-lite`)**
+
+| Paquete | % limpio Fase 3.5 | % limpio Fase 3.6 |
+|---|---|---|
+| `Ardalis.GuardClauses@5.0.0` | 86.7% | 86.7% |
+| `System.Text.Json@8.0.5` | 60.5% | 61.4% |
+| `FluentValidation@11.9.2` | 58.0% | 62.8% |
+| `Semver@2.3.0` | 56.0% | 63.8% |
+| `Newtonsoft.Json@13.0.3` | 52.5% | 55.6% |
+| `Humanizer.Core@2.14.1` | 43.0% | 45.2% |
+| `SimpleBase@4.0.0` | 40.7% | 43.4% |
+| **Promedio (7 paquetes)** | **56.8%** | **59.8%** |
+| `Jint@3.1.3` (nuevo, no en Fase 3.5) | — | 63.7% |
+| **Promedio (7 paquetes + Jint)** | — | **60.3%** |
+
+Movimiento modesto (+3 puntos en los 7 de siempre), esperado para una sub-fase de "wins baratos"
+— el salto grande está en 3.7-3.10 (value types, jerarquía de tipos, delegates, try/catch), que
+son los bloqueadores dominantes en los 8 targets por volumen real medido.
+
+### Cómo verificar Fase 3.6
+
+```bash
+go test ./... -race -count=1
+go test ./ -run TestSwitch -v
+go test ./ -run TestStringOps -v
 ```
 
 ---

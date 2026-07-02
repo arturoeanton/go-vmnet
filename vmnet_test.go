@@ -275,6 +275,97 @@ func TestStatics(t *testing.T) {
 	}
 }
 
+// TestSwitch exercises the `switch` opcode added in Fase 3.6 (a jump
+// table, decoded since Fase 1 but never lowered by the IR builder until
+// now) — including the out-of-range case, which per ECMA-335 §III.3.68
+// falls through to the next instruction rather than erroring.
+func TestSwitch(t *testing.T) {
+	asm := loadFixture(t)
+	tests := []struct {
+		day  int32
+		want string
+	}{
+		{0, "Sunday"}, {1, "Monday"}, {2, "Tuesday"}, {3, "Wednesday"},
+		{4, "Thursday"}, {5, "Unknown"}, {-1, "Unknown"},
+	}
+	for _, tt := range tests {
+		out, err := asm.Call("Vmnet.Fixtures.SwitchTest", "DayName", Int32(tt.day))
+		if err != nil {
+			t.Fatalf("DayName(%d) error = %v", tt.day, err)
+		}
+		if got := out.Native().(string); got != tt.want {
+			t.Errorf("DayName(%d) = %q, want %q", tt.day, got, tt.want)
+		}
+	}
+}
+
+// TestStringOps exercises the BCL natives added in Fase 3.6 alongside
+// `switch`: StringBuilder (including ToString(), which needs the
+// objectToString-dispatch workaround in internal/bcl/system_object.go
+// since vmnet has no real virtual dispatch yet — see its doc comment),
+// String.Format's composite grammar, Substring, the string indexer, and
+// Equals.
+func TestStringOps(t *testing.T) {
+	asm := loadFixture(t)
+
+	t.Run("StringBuilder", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.StringOps", "BuildGreeting", String("World"))
+		if err != nil {
+			t.Fatalf("BuildGreeting error = %v", err)
+		}
+		if got := out.Native().(string); got != "Hello, World!" {
+			t.Errorf("BuildGreeting(\"World\") = %q, want %q", got, "Hello, World!")
+		}
+	})
+
+	t.Run("String.Format", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.StringOps", "FormatReport", String("cpu"), Int32(42), Float64(0.756))
+		if err != nil {
+			t.Fatalf("FormatReport error = %v", err)
+		}
+		want := "cpu: 42 items (75.6%)"
+		if got := out.Native().(string); got != want {
+			t.Errorf("FormatReport(...) = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("Substring", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.StringOps", "FirstThree", String("Hello"))
+		if err != nil {
+			t.Fatalf("FirstThree error = %v", err)
+		}
+		if got := out.Native().(string); got != "Hel" {
+			t.Errorf("FirstThree(\"Hello\") = %q, want %q", got, "Hel")
+		}
+	})
+
+	t.Run("get_Chars", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.StringOps", "FirstChar", String("Hello"))
+		if err != nil {
+			t.Fatalf("FirstChar error = %v", err)
+		}
+		if got := out.Native().(int32); got != 'H' {
+			t.Errorf("FirstChar(\"Hello\") = %d, want %d ('H')", got, int32('H'))
+		}
+	})
+
+	t.Run("Equals", func(t *testing.T) {
+		tests := []struct {
+			a, b string
+			want bool
+		}{{"abc", "abc", true}, {"abc", "abd", false}}
+		for _, tt := range tests {
+			out, err := asm.Call("Vmnet.Fixtures.StringOps", "SameText", String(tt.a), String(tt.b))
+			if err != nil {
+				t.Fatalf("SameText(%q, %q) error = %v", tt.a, tt.b, err)
+			}
+			if got := out.Native().(int32) != 0; got != tt.want {
+				t.Errorf("SameText(%q, %q) = %v, want %v", tt.a, tt.b, got, tt.want)
+			}
+		}
+	})
+}
+
 // TestStaticsConcurrentCctor races many goroutines to trigger Statics'
 // .cctor on the same Assembly's first static access — the exact scenario
 // runtime.Type.EnsureCctor and interpreter.Machine.cctorsRunning exist for.

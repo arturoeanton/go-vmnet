@@ -198,6 +198,17 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 				return nil, err
 			}
 			out = append(out, BranchIfFalse{target})
+		case "switch":
+			offsets := instr.Operand.([]int)
+			targets := make([]int, len(offsets))
+			for i, off := range offsets {
+				target, err := resolveTarget(off)
+				if err != nil {
+					return nil, err
+				}
+				targets[i] = target
+			}
+			out = append(out, Switch{Targets: targets})
 		case "beq.s", "beq":
 			target, err := resolveTarget(instr.Operand.(int))
 			if err != nil {

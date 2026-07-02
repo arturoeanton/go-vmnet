@@ -88,6 +88,11 @@ type Branch struct{ Target int }
 type BranchIfTrue struct{ Target int }
 type BranchIfFalse struct{ Target int }
 
+// Switch implements the `switch` opcode (spec §III.3.68): pop a KindI4
+// index and jump to Targets[index] if it's in range, or fall through
+// (execute the next instruction) otherwise — per ECMA-335, not an error.
+type Switch struct{ Targets []int }
+
 type CompareOp byte
 
 const (

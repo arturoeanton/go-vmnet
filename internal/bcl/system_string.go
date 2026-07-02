@@ -2,6 +2,7 @@ package bcl
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/arturoeanton/go-vmnet/internal/runtime"
@@ -12,6 +13,15 @@ func init() {
 	// this one native: it just concatenates whatever string args arrive.
 	register("System.String::Concat", true, stringConcat)
 	register("System.String::get_Length", true, stringLength)
+	register("System.String::Format", true, stringFormat)
+	register("System.String::Substring", true, stringSubstring)
+	register("System.String::get_Chars", true, stringGetChars)
+	// Instance a.Equals(b) (HasThis, args=[a,b]) and static
+	// Equals(a,b)/op_Equality(a,b) (no this, args=[a,b]) both arrive as a
+	// 2-element args slice comparing the same two positions either way, so
+	// one native backs all three.
+	register("System.String::Equals", true, stringEquals)
+	register("System.String::op_Equality", true, stringEquals)
 }
 
 // stringConcat backs every String.Concat overload, including the
@@ -35,4 +45,308 @@ func stringLength(args []runtime.Value) (runtime.Value, error) {
 		return runtime.Value{}, fmt.Errorf("bcl: System.String.get_Length expects a string receiver")
 	}
 	return runtime.Int32(int32(len([]rune(args[0].Str)))), nil
+}
+
+func stringEquals(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.Equals expects 2 string arguments")
+	}
+	a, b := args[0], args[1]
+	if a.Kind == runtime.KindNull || b.Kind == runtime.KindNull {
+		return runtime.Bool(a.Kind == b.Kind), nil
+	}
+	if a.Kind != runtime.KindString || b.Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.Equals expects 2 string arguments")
+	}
+	return runtime.Bool(a.Str == b.Str), nil
+}
+
+func stringSubstring(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 2 || args[0].Kind != runtime.KindString || args[1].Kind != runtime.KindI4 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.Substring expects (int) or (int, int)")
+	}
+	runes := []rune(args[0].Str)
+	start := int(args[1].I4)
+	end := len(runes)
+	if len(args) >= 3 {
+		if args[2].Kind != runtime.KindI4 {
+			return runtime.Value{}, fmt.Errorf("bcl: System.String.Substring length must be int")
+		}
+		end = start + int(args[2].I4)
+	}
+	if start < 0 || end < start || end > len(runes) {
+		return runtime.Value{}, &runtime.ManagedException{
+			TypeName: "System.ArgumentOutOfRangeException",
+			Message:  "Index and length must refer to a location within the string.",
+		}
+	}
+	return runtime.String(string(runes[start:end])), nil
+}
+
+func stringGetChars(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 2 || args[0].Kind != runtime.KindString || args[1].Kind != runtime.KindI4 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.get_Chars expects an int index")
+	}
+	runes := []rune(args[0].Str)
+	idx := int(args[1].I4)
+	if idx < 0 || idx >= len(runes) {
+		return runtime.Value{}, &runtime.ManagedException{
+			TypeName: "System.IndexOutOfRangeException",
+			Message:  "Index was outside the bounds of the string.",
+		}
+	}
+	return runtime.Int32(runes[idx]), nil
+}
+
+// stringFormat backs every String.Format overload. The fixed-arity
+// overloads (up to 3 substitution values) arrive as flat args after the
+// format string; the `params object[]` overload (4+ values) arrives as a
+// single trailing array argument, expanded here so both shapes share one
+// composite-format parser.
+func stringFormat(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 || args[0].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.Format expects a format string")
+	}
+	values := args[1:]
+	if len(values) == 1 && values[0].Kind == runtime.KindArray {
+		values = values[0].Arr.Elems
+	}
+	out, err := formatComposite(args[0].Str, values)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	return runtime.String(out), nil
+}
+
+// formatComposite implements the composite format string grammar (spec
+// "{index[,alignment][:formatString]}", `{{`/`}}` as literal braces).
+func formatComposite(format string, values []runtime.Value) (string, error) {
+	var sb strings.Builder
+	runes := []rune(format)
+	for i := 0; i < len(runes); {
+		c := runes[i]
+		switch c {
+		case '{':
+			if i+1 < len(runes) && runes[i+1] == '{' {
+				sb.WriteByte('{')
+				i += 2
+				continue
+			}
+			end := i + 1
+			for end < len(runes) && runes[end] != '}' {
+				end++
+			}
+			if end >= len(runes) {
+				return "", fmt.Errorf("bcl: malformed format string: unmatched '{'")
+			}
+			piece, err := formatSpec(string(runes[i+1:end]), values)
+			if err != nil {
+				return "", err
+			}
+			sb.WriteString(piece)
+			i = end + 1
+		case '}':
+			if i+1 < len(runes) && runes[i+1] == '}' {
+				sb.WriteByte('}')
+				i += 2
+				continue
+			}
+			return "", fmt.Errorf("bcl: malformed format string: unmatched '}'")
+		default:
+			sb.WriteRune(c)
+			i++
+		}
+	}
+	return sb.String(), nil
+}
+
+// maxFormatAlignment bounds String.Format's `{index,alignment}` padding
+// width — see the allocation-safety note in formatSpec.
+const maxFormatAlignment = 1 << 16
+
+func formatSpec(spec string, values []runtime.Value) (string, error) {
+	idxPart, formatStr, _ := strings.Cut(spec, ":")
+	alignment := 0
+	if base, alignStr, ok := strings.Cut(idxPart, ","); ok {
+		idxPart = base
+		a, err := strconv.Atoi(strings.TrimSpace(alignStr))
+		if err != nil {
+			return "", fmt.Errorf("bcl: malformed format alignment %q", alignStr)
+		}
+		// A plugin (or untrusted CallJSON/CallBytes input, which can carry
+		// a format string straight from outside the process) could ask for
+		// an enormous alignment to make strings.Repeat below allocate
+		// unbounded memory — same class of risk MaxArrayLength guards
+		// against for newarr (Fase 3.5). maxFormatAlignment keeps a single
+		// Format call's padding bounded regardless of caller input.
+		if a > maxFormatAlignment || a < -maxFormatAlignment {
+			return "", fmt.Errorf("bcl: format alignment %d exceeds the %d-character limit", a, maxFormatAlignment)
+		}
+		alignment = a
+	}
+	idx, err := strconv.Atoi(strings.TrimSpace(idxPart))
+	if err != nil {
+		return "", fmt.Errorf("bcl: malformed format index %q", idxPart)
+	}
+	if idx < 0 || idx >= len(values) {
+		return "", fmt.Errorf("bcl: format index %d out of range (%d value(s))", idx, len(values))
+	}
+	s, err := formatValue(values[idx], formatStr)
+	if err != nil {
+		return "", err
+	}
+	if width := alignment; width != 0 {
+		if width < 0 {
+			width = -width
+		}
+		if pad := width - len([]rune(s)); pad > 0 {
+			if alignment < 0 {
+				s += strings.Repeat(" ", pad)
+			} else {
+				s = strings.Repeat(" ", pad) + s
+			}
+		}
+	}
+	return s, nil
+}
+
+// formatValue applies a standard numeric format specifier (D/F/N/X/P/G —
+// spec's most common composite-format cases). An unrecognized specifier is
+// a Go error rather than a silent guess, matching vmnet's rule of never
+// producing a plausible-but-wrong result for something it doesn't model.
+func formatValue(v runtime.Value, spec string) (string, error) {
+	if spec == "" {
+		return displayString(v), nil
+	}
+	kind := byte(0)
+	if len(spec) > 0 {
+		kind = spec[0]
+		if kind >= 'a' && kind <= 'z' {
+			kind -= 'a' - 'A'
+		}
+	}
+	precision := -1
+	if len(spec) > 1 {
+		p, err := strconv.Atoi(spec[1:])
+		if err != nil {
+			return "", fmt.Errorf("bcl: unsupported format specifier %q", spec)
+		}
+		precision = p
+	}
+
+	asFloat, isFloat := valueAsFloat64(v)
+	asInt, isInt := valueAsInt64(v)
+
+	switch kind {
+	case 'D':
+		if !isInt {
+			return "", fmt.Errorf("bcl: format specifier \"D\" requires an integer value")
+		}
+		s := strconv.FormatInt(asInt, 10)
+		neg := strings.HasPrefix(s, "-")
+		digits := strings.TrimPrefix(s, "-")
+		if precision > len(digits) {
+			digits = strings.Repeat("0", precision-len(digits)) + digits
+		}
+		if neg {
+			return "-" + digits, nil
+		}
+		return digits, nil
+	case 'F':
+		if !isFloat && !isInt {
+			return "", fmt.Errorf("bcl: format specifier \"F\" requires a numeric value")
+		}
+		if precision < 0 {
+			precision = 2
+		}
+		f := asFloat
+		if !isFloat {
+			f = float64(asInt)
+		}
+		return strconv.FormatFloat(f, 'f', precision, 64), nil
+	case 'N':
+		if !isFloat && !isInt {
+			return "", fmt.Errorf("bcl: format specifier \"N\" requires a numeric value")
+		}
+		if precision < 0 {
+			precision = 2
+		}
+		f := asFloat
+		if !isFloat {
+			f = float64(asInt)
+		}
+		return groupThousands(strconv.FormatFloat(f, 'f', precision, 64)), nil
+	case 'X':
+		if !isInt {
+			return "", fmt.Errorf("bcl: format specifier \"X\" requires an integer value")
+		}
+		s := strings.ToUpper(strconv.FormatInt(asInt, 16))
+		if precision > len(s) {
+			s = strings.Repeat("0", precision-len(s)) + s
+		}
+		return s, nil
+	case 'P':
+		if !isFloat && !isInt {
+			return "", fmt.Errorf("bcl: format specifier \"P\" requires a numeric value")
+		}
+		if precision < 0 {
+			precision = 2
+		}
+		f := asFloat
+		if !isFloat {
+			f = float64(asInt)
+		}
+		return strconv.FormatFloat(f*100, 'f', precision, 64) + "%", nil
+	case 'G':
+		return displayString(v), nil
+	default:
+		return "", fmt.Errorf("bcl: unsupported format specifier %q", spec)
+	}
+}
+
+func valueAsInt64(v runtime.Value) (int64, bool) {
+	switch v.Kind {
+	case runtime.KindI4:
+		return int64(v.I4), true
+	case runtime.KindI8:
+		return v.I8, true
+	default:
+		return 0, false
+	}
+}
+
+func valueAsFloat64(v runtime.Value) (float64, bool) {
+	switch v.Kind {
+	case runtime.KindR4:
+		return float64(v.R4), true
+	case runtime.KindR8:
+		return v.R8, true
+	default:
+		return 0, false
+	}
+}
+
+// groupThousands inserts "," every 3 digits in the integer part of a
+// decimal string produced by strconv.FormatFloat, matching "N" format's
+// thousands separator (invariant-culture comma, not full culture support).
+func groupThousands(s string) string {
+	neg := strings.HasPrefix(s, "-")
+	s = strings.TrimPrefix(s, "-")
+	intPart, fracPart, hasFrac := strings.Cut(s, ".")
+
+	var grouped []byte
+	for i, c := range []byte(intPart) {
+		if i > 0 && (len(intPart)-i)%3 == 0 {
+			grouped = append(grouped, ',')
+		}
+		grouped = append(grouped, c)
+	}
+	out := string(grouped)
+	if hasFrac {
+		out += "." + fracPart
+	}
+	if neg {
+		out = "-" + out
+	}
+	return out
 }

@@ -9,6 +9,21 @@ import (
 
 func init() {
 	register("System.Math::Abs", true, mathAbs)
+	register("System.Double::IsNaN", true, doubleIsNaN)
+}
+
+func doubleIsNaN(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Double.IsNaN expects 1 argument, got %d", len(args))
+	}
+	switch v := args[0]; v.Kind {
+	case runtime.KindR8:
+		return runtime.Bool(math.IsNaN(v.R8)), nil
+	case runtime.KindR4:
+		return runtime.Bool(math.IsNaN(float64(v.R4))), nil
+	default:
+		return runtime.Value{}, fmt.Errorf("bcl: System.Double.IsNaN: unsupported argument kind")
+	}
 }
 
 func mathAbs(args []runtime.Value) (runtime.Value, error) {

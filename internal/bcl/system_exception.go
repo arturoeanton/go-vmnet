@@ -11,6 +11,8 @@ func init() {
 		"System.InvalidOperationException",
 		"System.ArgumentException",
 		"System.ArgumentNullException",
+		"System.ArgumentOutOfRangeException",
+		"System.IndexOutOfRangeException",
 		"System.NotSupportedException",
 	} {
 		registerCtor(name, newExceptionCtor(name))

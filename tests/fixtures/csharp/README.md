@@ -26,3 +26,5 @@ Output: `tests/fixtures/csharp/bin/Release/netstandard2.0/Vmnet.Fixtures.dll`
 | `ByRef.cs` | `ByRef` | `out`/`ref` params (`ldarga.s`/`ldloca.s`/`stind.i4`/`ldind.i4`) | Fase 3.5 |
 | `Unsupported.cs` | `Unsupported` | `try`/`finally` (deliberately unsupported, for checker tests) | Fase 3.5 |
 | `Statics.cs` | `Statics` | static fields (`ldsfld`/`stsfld`), lazy `.cctor` | Fase 3.5 |
+| `SwitchTest.cs` | `SwitchTest` | `switch` opcode (jump table) | Fase 3.6 |
+| `StringOps.cs` | `StringOps` | `StringBuilder`, `String.Format`/`Substring`/indexer/`Equals` | Fase 3.6 |

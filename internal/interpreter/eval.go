@@ -171,6 +171,16 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 				next = in.Target
 			}
 
+		case ir.Switch:
+			idx := frame.pop()
+			if idx.Kind != runtime.KindI4 {
+				return runtime.Value{}, fmt.Errorf("interpreter: switch on non-int32 value kind %d", idx.Kind)
+			}
+			if idx.I4 >= 0 && int(idx.I4) < len(in.Targets) {
+				next = in.Targets[idx.I4]
+			}
+			// out of range: falls through to the next instruction (spec §III.3.68)
+
 		case ir.BranchCompare:
 			b := frame.pop()
 			a := frame.pop()
