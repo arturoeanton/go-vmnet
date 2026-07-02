@@ -669,6 +669,7 @@ corrió el mismo probe de findings-por-opcode/BCL, ahora incluyendo Jint, contra
 | **3.11** | `foreach`/enumeradores + wins baratos (re-priorizado con datos — ver sección) | El probe mostró `IDisposable::Dispose`/`IEnumerator`1`/`EqualityComparer`1` en 7-8/8 paquetes, más ancho que DateTime/Span (2-5/8) |
 | **3.12** | `DateTime`, `Span<T>`/`ReadOnlySpan<T>`/`Memory<T>`/`ReadOnlyMemory<T>` | Impacto grande pero concentrado (principalmente Humanizer.Core/SimpleBase/System.Text.Json) |
 | **3.13** | `foreach` sobre colección tipada como interfaz (despacho por tipo real del receptor) + paquete de wins baratos (`String`/`Char`/`List`/`Dictionary`) | `IEnumerable`1::GetEnumerator`/`IEnumerator`1::get_Current`/`IEnumerator::MoveNext` eran el hallazgo más ancho (7/8) tras Fase 3.12 |
+| **3.14** | Reflection-lite: `ldtoken`/`typeof(T)`, `Object.GetType()`, `System.Type` (igualdad/`Name`/`FullName`) | `ldtoken` (6/8), `Object::GetType` (5/8) y `MemberInfo::get_Name` (5/8) eran los tres hallazgos más anchos tras Fase 3.13 |
 | **3.x** | Re-medición final, cierre de brecha restante hacia 85%, validación literal del demo Jint | Confirma el número Y que el escenario concreto corre, no solo el promedio |
 
 ### Fase 3.6 — `switch` + BCL barata de alto alcance
@@ -1496,6 +1497,101 @@ firme de 85% **todavía no se alcanza** — el hallazgo más ancho que queda es 
 ```bash
 go test ./... -race -count=3
 go test ./ -run 'TestInterfaceForeach|TestCustomException|TestCheapWins' -v
+```
+
+### Fase 3.14 — Reflection-lite: `ldtoken`/`typeof(T)`, `GetType()`, `System.Type`
+
+El probe post-3.13 confirmó la predicción de la fase anterior: `ldtoken` (6/8), `System.Object::
+GetType` (5/8) y `System.Reflection.MemberInfo::get_Name` (5/8) eran los tres hallazgos más
+anchos del proyecto.
+
+**Tareas**
+
+- [x] `ldtoken` (spec §III.4.16, decodificado desde Fase 1 pero nunca bajado a IR) — solo para la
+      forma `typeof(T)` (token de `TypeDef`/`TypeRef`/`TypeSpec`). Confirmado contra IL real
+      antes de implementar: `typeof(T)` compila siempre `ldtoken T` + `call System.Type::
+      GetTypeFromHandle(RuntimeTypeHandle)` — vmnet no modela `RuntimeTypeHandle` como un Kind
+      propio: `ir.LoadTypeToken` empuja directamente un `System.Type` real, y
+      `GetTypeFromHandle` se registra como función identidad, así el par de instrucciones se
+      comporta exactamente como el CLR sin necesitar una representación intermedia de "handle".
+      La otra forma de `ldtoken` (token de `Field`, el patrón `RuntimeHelpers.InitializeArray`
+      detrás de un inicializador de array literal) sigue sin soporte, mismo mensaje que antes.
+- [x] `System.Type` modelado como un objeto native-backed mínimo (`nativeTypeInfo{FullName
+      string}`, `internal/bcl/system_type.go`) — sin identidad de referencia real (`typeof(X)`
+      llamado dos veces produce dos `*nativeTypeInfo` Go distintos, a diferencia del Type
+      canónico único de la CLR); todas las operaciones soportadas comparan por `FullName`
+      (string), nunca por identidad de puntero — lo único observable desde la API pública de
+      `Type` de todos modos.
+- [x] `System.Object::GetType` — reusa la misma inspección de "forma real en runtime" que
+      `isAssignableTo` (Fase 3.8) ya hace para `isinst`/`castclass`, sin duplicar un segundo
+      mecanismo de identidad de tipo. Un primitivo boxeado tiene la misma ambigüedad ya
+      documentada en `isAssignableTo` (`KindI4` cubre `int32`/`bool`/`char`/`short`/`byte`) — se
+      asume el caso dominante (`int32`).
+- [x] `System.Type::get_Name`/`get_FullName`/`ToString`/`op_Equality`/`op_Inequality`/`Equals`,
+      `System.Reflection.MemberInfo::get_Name` (alias exacto de `get_Name` — `System.Type` es un
+      `MemberInfo` real en la BCL, así que el mismo call site puede resolver contra cualquiera de
+      los dos nombres según cómo el compilador tipó la expresión).
+- [x] Checker: `ir.LoadTypeToken` se agrega a `instrIsObjectModel` (un `System.Type` es un objeto
+      heap-alocado, igual que cualquier `newobj`); `System.Type::`/`System.Reflection.
+      MemberInfo::get_Name` promovidos a `rules` (el stub `System.Type::` que ya vivía solo en
+      `netstandard-lite` desde antes de esta fase se elimina — redundante una vez que
+      `netstandard-lite` hereda `rules`).
+
+**Fixtures y tests**
+
+- [x] `Reflection.cs` / `TestReflection` — `GetType() == typeof(T)` (verdadero para el tipo
+      exacto, falso contra el tipo base — confirma que la comparación no colapsa a "cualquier
+      Type es igual"), `Type.Name`, `Type.FullName`, `!=`
+
+### Lo que se dejó explícitamente afuera de esta fase
+
+```txt
+- Type::IsAssignableFrom — el segundo hallazgo más ancho que quedó (84 casos, 4/8) tras esta
+  fase, pero necesita caminar la jerarquía real de tipos (BaseTypeFullName/Interfaces) con
+  acceso a Machine.ResolveType, algo que un bcl.Native (func(args) (Value, error) plano, sin
+  Machine) no tiene hoy — necesitaría el mismo tipo de plumbing que ExplicitImplResolver (Fase
+  3.13), no un native de una línea.
+- Type::MakeGenericType/GetGenericTypeDefinition/GetInterfaces/get_IsGenericType/get_IsEnum,
+  Nullable.GetUnderlyingType — reflection sobre genéricos e introspección de forma real; vmnet
+  no modela argumentos de tipo genérico en runtime.Value en absoluto (spec §17.1, "generics
+  mínimos" — type-erased).
+- System.Reflection.MethodBase::Invoke/MethodInfo — invocación dinámica real, una superficie
+  completamente distinta (y bastante más riesgosa de exponer a un plugin) que "solo consultar
+  el nombre/tipo", fuera de alcance de "reflection-lite".
+- LINQ (System.Linq.Enumerable) — sigue siendo el hallazgo más ancho no-async del proyecto tras
+  esta fase (Select/Any/ToList/Where/ToArray suman ~174 casos en 4-5/8), ya anotado como
+  pendiente desde Fase 3.11/3.13 — candidato natural para la siguiente sub-fase.
+- Regex, async/Task, HashSet<T>/Interlocked/StringComparer — sin cambios respecto a lo ya
+  documentado como afuera en Fase 3.13.
+```
+
+### Re-certificación contra los mismos 8 targets (7 paquetes + Jint)
+
+| Paquete | % limpio Fase 3.13 | % limpio Fase 3.14 |
+|---|---|---|
+| `Ardalis.GuardClauses@5.0.0` | 93.0% | 93.3% |
+| `FluentValidation@11.9.2` | 82.0% | 84.6% |
+| `System.Text.Json@8.0.5` | 78.2% | 80.4% |
+| `Newtonsoft.Json@13.0.3` | 68.1% | 70.4% |
+| `Semver@2.3.0` | 82.7% | 82.7% |
+| `SimpleBase@4.0.0` | 60.9% | 60.9% |
+| `Humanizer.Core@2.14.1` | 87.9% | 88.0% |
+| **Promedio (7 paquetes)** | **79.0%** | **80.1%** |
+| `Jint@3.1.3` | 82.6% | 83.8% |
+| **Promedio (7 paquetes + Jint)** | **79.4%** | **80.5%** |
+
++1.1 puntos en los 7 paquetes (+1.1 con Jint) — `Semver`/`SimpleBase` no se mueven en absoluto
+(no usan reflection en su superficie pública), `FluentValidation`/`System.Text.Json`/
+`Newtonsoft.Json`/`Jint` sí (validación de tipo genérico, serialización basada en tipo, motor de
+JS con despacho por tipo — los cuatro tocan `GetType()`/`typeof` con volumen real). Con 80.5%
+(7 paquetes + Jint) el criterio de cierre firme de 85% **todavía no se alcanza** — LINQ es ahora
+el hallazgo más ancho no-async/no-regex restante, candidato natural para la siguiente sub-fase.
+
+### Cómo verificar Fase 3.14
+
+```bash
+go test ./... -race -count=3
+go test ./ -run TestReflection -v
 ```
 
 ---

@@ -571,6 +571,66 @@ func TestCheapWins(t *testing.T) {
 	})
 }
 
+// TestReflection exercises reflection-lite (Fase 3.14): `typeof(T)`
+// (ldtoken on a type token + the identity-function GetTypeFromHandle,
+// see ir.LoadTypeToken's doc comment), Object.GetType(), and
+// System.Type equality/Name/FullName — confirmed against real IL that
+// `x.GetType() == typeof(T)` is exactly `callvirt GetType` + `ldtoken T`
+// + `call GetTypeFromHandle` + `call Type::op_Equality`.
+func TestReflection(t *testing.T) {
+	asm := loadFixture(t)
+
+	t.Run("GetType() == typeof(T)", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.ReflectionTest", "TypeofEqualsGetType")
+		if err != nil {
+			t.Fatalf("TypeofEqualsGetType() error = %v", err)
+		}
+		if got := out.Native().(int32); got == 0 {
+			t.Errorf("TypeofEqualsGetType() = %d, want nonzero", got)
+		}
+	})
+
+	t.Run("GetType() does not match the base type", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.ReflectionTest", "GetTypeDoesNotMatchBaseType")
+		if err != nil {
+			t.Fatalf("GetTypeDoesNotMatchBaseType() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 0 {
+			t.Errorf("GetTypeDoesNotMatchBaseType() = %d, want 0", got)
+		}
+	})
+
+	t.Run("Type.Name", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.ReflectionTest", "TypeName")
+		if err != nil {
+			t.Fatalf("TypeName() error = %v", err)
+		}
+		if got := out.Native().(string); got != "Car" {
+			t.Errorf("TypeName() = %q, want %q", got, "Car")
+		}
+	})
+
+	t.Run("Type.FullName", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.ReflectionTest", "TypeFullName")
+		if err != nil {
+			t.Fatalf("TypeFullName() error = %v", err)
+		}
+		if got := out.Native().(string); got != "Vmnet.Fixtures.Car" {
+			t.Errorf("TypeFullName() = %q, want %q", got, "Vmnet.Fixtures.Car")
+		}
+	})
+
+	t.Run("Type op_Inequality", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.ReflectionTest", "TypeNotEquals")
+		if err != nil {
+			t.Fatalf("TypeNotEquals() error = %v", err)
+		}
+		if got := out.Native().(int32); got == 0 {
+			t.Errorf("TypeNotEquals() = %d, want nonzero", got)
+		}
+	})
+}
+
 // TestForeach exercises `foreach` over List<T>/Dictionary<K,V> (Fase
 // 3.11): the compiler-generated struct enumerator (GetEnumerator/
 // MoveNext/get_Current/Dispose, confirmed against real IL — List<T>'s

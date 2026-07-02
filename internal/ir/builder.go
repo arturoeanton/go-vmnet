@@ -441,6 +441,27 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool, ehClaus
 		case "rethrow":
 			out = append(out, Rethrow{})
 
+		case "ldtoken":
+			// ldtoken targets a type (typeof(T): TypeDef/TypeRef/TypeSpec —
+			// what this handles), a field (RuntimeFieldHandle, the
+			// RuntimeHelpers.InitializeArray pattern behind an array
+			// literal's blob initializer), or a method (RuntimeMethodHandle,
+			// far rarer). Only the type case is supported (Fase 3.14) — the
+			// other two fall through to the same "unsupported opcode" error
+			// as before, since resolveTypeTokenOrGeneric only understands
+			// type tokens anyway.
+			token := metadata.Token(instr.Operand.(uint32))
+			switch token.Table() {
+			case metadata.TableTypeRef, metadata.TableTypeDef, metadata.TableTypeSpec:
+				typeFullName, err := resolveTypeTokenOrGeneric(md, uint32(token))
+				if err != nil {
+					return nil, nil, fmt.Errorf("ir: ldtoken at IL offset %d: %w", instr.Offset, err)
+				}
+				out = append(out, LoadTypeToken{TypeFullName: typeFullName})
+			default:
+				return nil, nil, &UnsupportedOpcodeError{OpCode: name, Offset: instr.Offset}
+			}
+
 		default:
 			return nil, nil, &UnsupportedOpcodeError{OpCode: name, Offset: instr.Offset}
 		}

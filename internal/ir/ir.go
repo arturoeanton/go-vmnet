@@ -234,6 +234,17 @@ type InitObj struct{ TypeFullName string }
 type IsInst struct{ TypeFullName string }
 type CastClass struct{ TypeFullName string }
 
+// LoadTypeToken implements ldtoken (spec §III.4.16) when its operand is a
+// type token — the `typeof(T)` pattern, always compiled as `ldtoken T` +
+// `call System.Type::GetTypeFromHandle(RuntimeTypeHandle)`. vmnet skips
+// modeling RuntimeTypeHandle as its own value kind: this instruction
+// pushes a real System.Type value directly (see bcl.NewTypeValue,
+// Fase 3.14), and GetTypeFromHandle is registered as the identity
+// function over whatever LoadTypeToken already produced — the two
+// together behave exactly like the real two-step sequence without vmnet
+// needing an intermediate handle representation at all.
+type LoadTypeToken struct{ TypeFullName string }
+
 // LoadFtn implements ldftn/ldvirtftn (spec §III.4.19/4.20): push an
 // unbound delegate target (runtime.KindFunc) referencing FullName.
 // ldvirtftn additionally pops a receiver first to resolve the method

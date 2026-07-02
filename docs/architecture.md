@@ -298,3 +298,29 @@ sólido y repartido, sin un salto dominante único.
 Con 79.4% el criterio de cierre firme de 85% todavía no se alcanza; el
 hallazgo más ancho restante es reflection-lite (`ldtoken`/`GetType`/
 `Type`, 5-6/8), candidato natural para la próxima sub-fase.
+
+Fase 3.14 (reflection-lite: `ldtoken`/`typeof(T)`, `Object.GetType()`,
+`System.Type`) completa — exactamente el hallazgo anotado arriba.
+`typeof(T)` compila siempre `ldtoken T` + `call Type::
+GetTypeFromHandle(RuntimeTypeHandle)`, confirmado contra IL real; vmnet
+no modela `RuntimeTypeHandle` como Kind propio — `ir.LoadTypeToken`
+empuja directamente el `System.Type` real, y `GetTypeFromHandle` es la
+función identidad, así el par se comporta como el CLR sin una
+representación intermedia. `System.Type` es un objeto native-backed
+mínimo (`nativeTypeInfo{FullName string}`) sin identidad de referencia
+real — cada comparación (`op_Equality`, `Equals`) es por el string
+`FullName`, nunca por puntero Go, lo único observable desde la API
+pública de `Type` de todos modos. `Object.GetType()` reusa la misma
+inspección de "forma real en runtime" que `isAssignableTo` (Fase 3.8) ya
+hace para `isinst`/`castclass`. Certificación: promedio de los 7
+paquetes sube de 79.0% a 80.1% (79.4% a 80.5% con Jint) — movimiento
+más chico que Fase 3.13 (reflection es más disperso que el despacho por
+interfaz), pero limpio: `Semver`/`SimpleBase` no se mueven en absoluto
+(sin reflection en su superficie), los cuatro paquetes que sí usan
+`GetType()`/`typeof` con volumen real (`FluentValidation`,
+`System.Text.Json`, `Newtonsoft.Json`, `Jint`) sí suben. Con 80.5% el
+85% todavía no se alcanza; LINQ es ahora el hallazgo más ancho
+no-async/no-regex restante (~174 casos en 4-5/8, Select/Any/ToList/
+Where/ToArray), viable desde que existen delegates (3.9), enumeradores
+reales (3.11) y despacho por interfaz (3.13) — candidato natural para
+la siguiente sub-fase.

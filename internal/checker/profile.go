@@ -67,6 +67,8 @@ func init() {
 		"System.Char::",
 		"System.Int32::",
 		"System.String::",
+		"System.Type::",
+		"System.Reflection.MemberInfo::get_Name",
 		"System.Text.Encoding::",
 		"System.Text.StringBuilder::",
 		"System.Array::Empty",
@@ -94,9 +96,9 @@ func init() {
 		"System.IndexOutOfRangeException",
 		"System.InvalidCastException",
 	)
-	// netstandard-lite = rules plus the Fase 3 reflection-lite/Convert surface.
+	// netstandard-lite = rules plus the Fase 3 Convert surface (System.Type
+	// moved into `rules` in Fase 3.14, once it had real natives behind it).
 	bclPrefixes[ProfileNetStandardLite] = append(append([]string{}, bclPrefixes[ProfileRules]...),
-		"System.Type::",
 		"System.Convert::",
 	)
 }
@@ -139,12 +141,14 @@ func inProfile(p Profile, fullName string) bool {
 // ir.Leave/ir.EndFinally/ir.Rethrow (Fase 3.10) are included: a plain
 // `try { } finally { }` with no throw or catch anywhere still compiles to
 // leave/endfinally, so excluding only ir.Throw would miss it.
+// ir.LoadTypeToken (Fase 3.14) is included: `typeof(T)` pushes a real
+// System.Type object (a heap-allocated instance, same as ir.NewObj).
 func instrIsObjectModel(instr ir.Instr) bool {
 	switch v := instr.(type) {
 	case ir.NewObj, ir.LoadField, ir.StoreField, ir.Throw,
 		ir.NewArr, ir.LoadLen, ir.LoadElem, ir.StoreElem, ir.LoadElemAddr,
 		ir.LoadFieldAddr, ir.LoadStaticField, ir.StoreStaticField,
-		ir.InitObj, ir.IsInst, ir.CastClass, ir.LoadFtn,
+		ir.InitObj, ir.IsInst, ir.CastClass, ir.LoadFtn, ir.LoadTypeToken,
 		ir.Leave, ir.EndFinally, ir.Rethrow:
 		return true
 	case ir.Call:

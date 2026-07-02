@@ -3,6 +3,7 @@ package interpreter
 import (
 	"fmt"
 
+	"github.com/arturoeanton/go-vmnet/internal/bcl"
 	"github.com/arturoeanton/go-vmnet/internal/ir"
 	"github.com/arturoeanton/go-vmnet/internal/runtime"
 )
@@ -442,6 +443,9 @@ func (m *Machine) runFrame(frame *Frame, method *runtime.Method, depth int, inst
 				frame.pop() // ldvirtftn's receiver — see ir.LoadFtn's doc comment
 			}
 			frame.push(runtime.FuncVal(&runtime.Func{FullName: in.FullName}))
+
+		case ir.LoadTypeToken:
+			frame.push(bcl.NewTypeValue(in.TypeFullName))
 
 		case ir.Leave:
 			if finallys := handlersLeaving(method, frame.IP, in.Target); len(finallys) > 0 {
