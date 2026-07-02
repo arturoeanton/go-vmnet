@@ -14,6 +14,14 @@ type Machine struct {
 	Resolve     Resolver
 	ResolveType TypeResolver
 	Limits      Limits
+
+	// cctorsRunning tracks static constructors currently executing on
+	// this Machine's own call chain (a Machine is never shared across
+	// goroutines — see call.go's asm.machine()), so a .cctor that reads
+	// or writes its own type's static fields (the overwhelmingly common
+	// case) re-enters staticType without deadlocking on the Type's
+	// EnsureCctor latch. See internal/interpreter/statics.go.
+	cctorsRunning map[*runtime.Type]bool
 }
 
 func New(resolve Resolver, resolveType TypeResolver, limits Limits) *Machine {
@@ -77,6 +85,18 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 			}
 			frame.push(frame.Args[in.Index])
 
+		case ir.StoreArg:
+			if in.Index < 0 || in.Index >= len(frame.Args) {
+				return runtime.Value{}, fmt.Errorf("interpreter: starg index %d out of range", in.Index)
+			}
+			frame.Args[in.Index] = frame.pop()
+
+		case ir.LoadArgAddr:
+			if in.Index < 0 || in.Index >= len(frame.Args) {
+				return runtime.Value{}, fmt.Errorf("interpreter: ldarga index %d out of range", in.Index)
+			}
+			frame.push(runtime.RefTo(&frame.Args[in.Index]))
+
 		case ir.LoadLocal:
 			if in.Index < 0 || in.Index >= len(frame.Locals) {
 				return runtime.Value{}, fmt.Errorf("interpreter: ldloc index %d out of range", in.Index)
@@ -88,6 +108,12 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 				return runtime.Value{}, fmt.Errorf("interpreter: stloc index %d out of range", in.Index)
 			}
 			frame.Locals[in.Index] = frame.pop()
+
+		case ir.LoadLocalAddr:
+			if in.Index < 0 || in.Index >= len(frame.Locals) {
+				return runtime.Value{}, fmt.Errorf("interpreter: ldloca index %d out of range", in.Index)
+			}
+			frame.push(runtime.RefTo(&frame.Locals[in.Index]))
 
 		case ir.LoadConstI4:
 			frame.push(runtime.Int32(in.Value))
@@ -224,6 +250,43 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 			}
 			obj.Obj.Fields[idx] = val
 
+		case ir.LoadFieldAddr:
+			obj := frame.pop()
+			if obj.Kind != runtime.KindObject || obj.Obj == nil {
+				return runtime.Value{}, &runtime.ManagedException{
+					TypeName: "System.NullReferenceException",
+					Message:  fmt.Sprintf("Object reference not set to an instance of an object (reading &%s.%s)", in.TypeFullName, in.FieldName),
+				}
+			}
+			idx := fieldIndex(obj.Obj, in.FieldName)
+			if idx < 0 {
+				return runtime.Value{}, fmt.Errorf("interpreter: %s has no field %q", in.TypeFullName, in.FieldName)
+			}
+			frame.push(runtime.RefTo(&obj.Obj.Fields[idx]))
+
+		case ir.LoadStaticField:
+			t, err := m.staticType(in.TypeFullName, depth, instrCount)
+			if err != nil {
+				return runtime.Value{}, err
+			}
+			idx := t.StaticFieldIndex(in.FieldName)
+			if idx < 0 {
+				return runtime.Value{}, fmt.Errorf("interpreter: %s has no static field %q", in.TypeFullName, in.FieldName)
+			}
+			frame.push(t.StaticField(idx))
+
+		case ir.StoreStaticField:
+			val := frame.pop()
+			t, err := m.staticType(in.TypeFullName, depth, instrCount)
+			if err != nil {
+				return runtime.Value{}, err
+			}
+			idx := t.StaticFieldIndex(in.FieldName)
+			if idx < 0 {
+				return runtime.Value{}, fmt.Errorf("interpreter: %s has no static field %q", in.TypeFullName, in.FieldName)
+			}
+			t.SetStaticField(idx, val)
+
 		case ir.Throw:
 			v := frame.pop()
 			if v.Kind == runtime.KindObject && v.Obj != nil {
@@ -232,6 +295,69 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 				}
 			}
 			return runtime.Value{}, fmt.Errorf("interpreter: thrown object is not a recognized exception type")
+
+		case ir.NewArr:
+			lenVal := frame.pop()
+			if lenVal.Kind != runtime.KindI4 {
+				return runtime.Value{}, fmt.Errorf("interpreter: newarr length must be int32")
+			}
+			if lenVal.I4 < 0 {
+				return runtime.Value{}, &runtime.ManagedException{TypeName: "System.OverflowException", Message: "array length must be non-negative"}
+			}
+			if m.Limits.MaxArrayLength > 0 && int(lenVal.I4) > m.Limits.MaxArrayLength {
+				return runtime.Value{}, ErrArrayTooLarge
+			}
+			frame.push(runtime.ArrRef(runtime.NewArray(int(lenVal.I4))))
+
+		case ir.LoadLen:
+			v := frame.pop()
+			if v.Kind != runtime.KindArray || v.Arr == nil {
+				return runtime.Value{}, &runtime.ManagedException{TypeName: "System.NullReferenceException", Message: "array reference is null (ldlen)"}
+			}
+			frame.push(runtime.Int32(int32(len(v.Arr.Elems))))
+
+		case ir.LoadElem:
+			idxVal := frame.pop()
+			arrVal := frame.pop()
+			idx, err := arrayIndex(arrVal, idxVal, "ldelem")
+			if err != nil {
+				return runtime.Value{}, err
+			}
+			frame.push(arrVal.Arr.Elems[idx])
+
+		case ir.StoreElem:
+			val := frame.pop()
+			idxVal := frame.pop()
+			arrVal := frame.pop()
+			idx, err := arrayIndex(arrVal, idxVal, "stelem")
+			if err != nil {
+				return runtime.Value{}, err
+			}
+			arrVal.Arr.Elems[idx] = val
+
+		case ir.LoadElemAddr:
+			idxVal := frame.pop()
+			arrVal := frame.pop()
+			idx, err := arrayIndex(arrVal, idxVal, "ldelema")
+			if err != nil {
+				return runtime.Value{}, err
+			}
+			frame.push(runtime.RefTo(&arrVal.Arr.Elems[idx]))
+
+		case ir.LoadIndirect:
+			ref := frame.pop()
+			if ref.Kind != runtime.KindRef || ref.Ref == nil {
+				return runtime.Value{}, &runtime.ManagedException{TypeName: "System.NullReferenceException", Message: "dereferencing a null managed pointer (ldind)"}
+			}
+			frame.push(*ref.Ref)
+
+		case ir.StoreIndirect:
+			val := frame.pop()
+			ref := frame.pop()
+			if ref.Kind != runtime.KindRef || ref.Ref == nil {
+				return runtime.Value{}, &runtime.ManagedException{TypeName: "System.NullReferenceException", Message: "dereferencing a null managed pointer (stind)"}
+			}
+			*ref.Ref = val
 
 		case ir.Return:
 			if in.HasValue {
@@ -254,4 +380,24 @@ func fieldIndex(obj *runtime.Object, name string) int {
 		return -1
 	}
 	return obj.Type.FieldIndex(name)
+}
+
+// arrayIndex validates an ldelem/stelem array+index pair, returning a
+// managed IndexOutOfRangeException/NullReferenceException — matching real
+// CIL semantics — instead of a Go panic on out-of-bounds access.
+func arrayIndex(arrVal, idxVal runtime.Value, op string) (int, error) {
+	if arrVal.Kind != runtime.KindArray || arrVal.Arr == nil {
+		return 0, &runtime.ManagedException{TypeName: "System.NullReferenceException", Message: fmt.Sprintf("array reference is null (%s)", op)}
+	}
+	if idxVal.Kind != runtime.KindI4 {
+		return 0, fmt.Errorf("interpreter: %s index must be int32", op)
+	}
+	idx := int(idxVal.I4)
+	if idx < 0 || idx >= len(arrVal.Arr.Elems) {
+		return 0, &runtime.ManagedException{
+			TypeName: "System.IndexOutOfRangeException",
+			Message:  fmt.Sprintf("index %d is out of range (length %d)", idx, len(arrVal.Arr.Elems)),
+		}
+	}
+	return idx, nil
 }

@@ -24,6 +24,7 @@ NuGet arbitrario, backend CoreCLR. Estos quedan como roadmap post-v1.0 (v1.5 "hy
 | 2 | Motor de reglas de negocio | 6–8 sem | Es un producto usable, no solo un parser | Rule engine C# real llamado desde Go vía JSON, con sandbox |
 | 2.5 | Endurecimiento *(gate interno, sin demo de venta)* | 2–3 días | El intérprete no crashea el host bajo input adversarial ni concurrencia | `go test ./... -race` + fuzzing (~16.8M ejecuciones, 0 panics) |
 | 3 | Checker + ecosistema NuGet | 6–9 sem | Adopción de bajo riesgo + reuso de librerías existentes | 7 paquetes NuGet reales chequeados, 3 con funciones ejecutando de verdad |
+| 3.5 | Endurecimiento + compatibilidad real *(gate interno, sin demo de venta)* | 3–4 días | El motor cubre el patrón de código C# real más común (arrays, `ref`/`out`, static fields), no solo lo que estaba fácil | Re-certificación de los mismos 7 paquetes: promedio de métodos limpios sube de ~45% a ~57% |
 | 4 | v1.0 producción | 5–7 sem | Listo para pilotos reales | Benchmarks, seguridad, docs, CI multiplataforma, 5 min a "hello world" |
 
 **Riesgo mayor del proyecto**: no es el parser IL, es la BCL (`System.*`). Por eso las 4 fases
@@ -175,8 +176,9 @@ usable de verdad, con el primer nivel de sandboxing.
 - [x] `System.Object.ToString()` (despacha por `Kind` del valor boxeado)
 - [ ] `System.String` ampliado (Substring, Equals, ToUpper/Lower, Split, Format) — diferido, no
       lo pide ningún fixture de Fase 2
-- [ ] `System.Array` + soporte runtime de `SZARRAY` (`newarr`/`ldelem`/`stelem`/`ldlen`) —
-      diferido; ver nota de alcance del bridge `CallBytes` más abajo
+- [x] `System.Array` + soporte runtime de `SZARRAY` (`newarr`/`ldelem`/`stelem`/`ldlen`) —
+      diferido en su momento (ver nota de alcance del bridge `CallBytes` más abajo), implementado
+      en Fase 3.5
 - [ ] `System.DateTime`, `System.TimeSpan`, `System.Guid` — diferido
 
 **Generics (mínimo, spec §17.1)**
@@ -445,9 +447,12 @@ transitivas).
   primera versión mezclaba "qué grupo de dependencias corresponde a este TFM" con "es este TFM
   válido para vmnet", que son preguntas distintas.
 - System.Array, try/catch/finally, delegates/lambdas (y por lo tanto LINQ), reflection más allá
-  de lo que ya resuelve el checker genéricamente: siguen sin soportarse. Con los datos de la
-  tabla de arriba, System.Array es el bloqueador #1 real en paquetes NuGet reales — candidato
-  natural para la próxima fase de expansión de BCL, más que reflection-lite.
+  de lo que ya resuelve el checker genéricamente: siguen sin soportarse al cierre de Fase 3. Con
+  los datos de la tabla de arriba, System.Array (y, se descubrió al medir en Fase 3.5, `ref`/
+  `out` más que reflection) era el bloqueador #1 real en paquetes NuGet reales —
+  **System.Array, `ref`/`out` y campos estáticos se implementaron en Fase 3.5** (ver esa sección
+  más abajo para la re-certificación); try/catch/finally, delegates y reflection extendida
+  siguen pendientes.
 ```
 
 ### Demo de cierre de Fase 3 — "Sabemos qué funciona, y reusamos el ecosistema" (~10 min)
@@ -472,6 +477,173 @@ hubiera detectado."
 
 ---
 
+## Fase 3.5 — Endurecimiento + compatibilidad real de DLLs (previa a Fase 4, ~3–4 días)
+
+**Objetivo:** la certificación de Fase 3 midió con precisión qué falta, y el bloqueador #1 no era
+reflection ni async — eran patrones de código C# aburridos y omnipresentes: `System.Array`,
+`ref`/`out` (address-of), y campos estáticos. Antes de entrar a Fase 4 (producción), cerrar esos
+tres huecos y volver a medir contra los mismos 7 paquetes, para llegar a Fase 4 con un motor que
+ya corre una porción sustancialmente mayor de código real, no solo fixtures propios.
+
+Igual que Fase 2.5, no es una fase con demo de venta — es un gate de calidad interno, pero con
+métricas concretas de antes/después que sí sirven como evidencia de progreso real.
+
+### Tareas
+
+**Priorización basada en datos, no en intuición**
+- [x] Antes de escribir código: se corrió un probe temporal (`checker.Analyze` contra los 7
+      paquetes ya descargados en Fase 3) para contar findings agrupados por opcode/kind. El
+      resultado reordenó por completo la prioridad esperada: los opcodes de address-of
+      (`ldarga`/`ldloca`/`starg`/`ldflda` — la base de `ref`/`out`) eran el bloqueador #1 medido
+      (2532 findings), muy por delante de arrays (295) y static fields (689) — no lo que se
+      hubiera asumido mirando solo la tabla de Fase 3.
+
+**`internal/runtime`, `internal/ir`, `internal/interpreter` — System.Array**
+- [x] `runtime.Array` (heap-allocado, solo SZARRAY — sin arrays multidimensionales, cubre la
+      inmensa mayoría del uso real) y `runtime.Value.KindArray`
+- [x] IR + intérprete: `newarr`/`ldlen`/`ldelem.*`/`stelem.*` (todas las variantes tipadas
+      colapsan a una sola implementación — `Value` ya es un tagged union, no hace falta
+      distinguir por tipo de elemento como hace CIL)
+- [x] Bounds-checking real: índice fuera de rango o array nulo lanzan `ManagedException`, no
+      un panic de Go recuperado genéricamente
+- [x] `Limits.MaxArrayLength` (16M elementos por defecto) — un `newarr` con longitud
+      adversarial no puede agotar memoria del host
+
+**`internal/runtime`, `internal/ir`, `internal/interpreter` — punteros administrados (`ref`/`out`)**
+- [x] `runtime.Value.KindRef`: un puntero administrado es literalmente un `*Value` de Go
+      apuntando dentro de un slice de tamaño fijo (`Args`/`Locals`/`Object.Fields`/
+      `Array.Elems`). Decisión de diseño clave: esto hace que `ref`/`out` no necesiten *ningún*
+      caso especial en `Call`/`NewObj` — un parámetro byref es sencillamente un `Arg` cuyo
+      `Value` resulta tener `Kind == KindRef`
+- [x] IR + intérprete: `ldarga(.s)`/`ldloca(.s)`/`ldelema`/`ldflda` (address-of) y
+      `ldind.*`/`stind.*` (leer/escribir a través del puntero)
+- [x] `ldsflda` (dirección de un campo **estático**) deliberadamente **no** implementado: a
+      diferencia de los otros cuatro, exponer un `*Value` crudo hacia el slice de estáticos de
+      un `Type` (protegido por `sync.RWMutex`) dejaría a quien tenga el puntero saltearse ese
+      mutex en cada lectura/escritura futura — un riesgo de concurrencia real, no solo trabajo
+      pendiente. Queda documentado como gap explícito, no silencioso.
+
+**`internal/runtime`, `internal/interpreter` — campos estáticos + `.cctor` perezoso**
+- [x] `runtime.Type` pasa a cargar estado real: `statics []Value` (protegido por
+      `sync.RWMutex`, porque a diferencia de los campos de instancia sí es estado mutable
+      compartido entre callers concurrentes) y un `.cctor` que corre perezosamente en el primer
+      acceso estático, exactamente una vez, vía `sync.Once`
+- [x] IR + intérprete: `ldsfld`/`stsfld`
+- [x] **Bug real encontrado y arreglado — deadlock de reentrancia**: un `.cctor` que escribe su
+      propio campo estático (el caso *común*, no el raro — `static Foo() { Bar = 42; }`) volvía
+      a entrar a `EnsureCctor` sobre el mismo `sync.Once`, que no es reentrante, y colgaba el
+      proceso. Se arregló rastreando, por `Machine` (que nunca se comparte entre goroutines —
+      una por cada `Assembly.Call` de nivel superior), qué tipos tienen su `.cctor` corriendo en
+      esta misma cadena de llamadas; un acceso reentrante en la misma cadena sigue sin volver a
+      entrar al `sync.Once`, mientras que otra goroutine que llegue primero sigue bloqueando
+      correctamente contra el `.cctor` en curso.
+- [x] **Bug real encontrado y arreglado — race condition en el cache de tipos**: antes de esta
+      fase, `resolveTypeByFullName` hacía "leer del cache, si falta construir y guardar" con
+      locks separados para cada paso — inofensivo cuando `Type` solo describía el layout de
+      campos (inmutable), pero con estáticos y `.cctor` de por medio, dos goroutines resolviendo
+      el mismo tipo por primera vez podían construir *cada una su propio* `runtime.Type`; los
+      `SetStaticField` de la que "pierde la carrera" quedaban en un objeto que nadie más volvía
+      a ver. Se arregló sosteniendo un único lock sobre todo el "leer o construir y guardar",
+      verificado con `TestStaticsConcurrentCctor` (32 goroutines, `-race`, `-count=3`).
+- [x] **Bug real encontrado y arreglado — default(T) incorrecto**: un campo (estático o de
+      instancia) nunca asignado explícitamente (`static int Counter;`, sin `= 0`, el caso común
+      en C# real) quedaba en el `Value{}` vacío de Go (`KindNull`), que no es aritméticamente
+      compatible con ningún tipo numérico — la primera operación aritmética sobre ese campo
+      fallaba. Se agregó `metadata.ParseFieldSig` (parser nuevo de la firma de campo, ECMA-335
+      §II.23.2.4) para calcular el `default(T)` real por campo — cero tipado para todo tipo
+      valor, `null` para todo lo demás — y `runtime.Type` ahora guarda `FieldDefaults`/
+      `StaticFieldDefaults` en paralelo a los nombres de campo.
+
+**`internal/checker` — el checker no puede quedar desactualizado silenciosamente**
+- [x] **Drift real encontrado y arreglado**: `sigShapeFindings` todavía marcaba todo parámetro
+      `ref`/`out` (`SigByRef`) como no soportado, escrito antes de que byref se implementara —
+      el propio test de "dogfood" del checker (el assembly de fixtures se autocertifica contra
+      su propio checker) lo detectó apenas se agregó `ByRef.cs`, exactamente el propósito de ese
+      test.
+- [x] **Drift real encontrado y arreglado**: `instrIsObjectModel` (qué excluye el perfil
+      `minimal` — spec §24.1, "solo métodos estáticos y primitivas") nunca se actualizó al
+      agregar arrays y campos estáticos; el checker certificaba código que usa `System.Array` o
+      estado estático compartido como "compatible" bajo `minimal`, contradiciendo su propio
+      contrato documentado. `ldarga`/`ldloca`/`ldind`/`stind` sobre primitivas quedan
+      deliberadamente **fuera** de esa exclusión — un `ref int` nunca toca el heap ni el layout
+      de una clase, así que sigue dentro de lo que promete `minimal`.
+- [x] Mensaje de sugerencia para `newarr`/`ldelem`/`stelem`/`ldlen` (decía "`System.Array` no
+      soportado todavía") corregido — ya está soportado; el único caso real que sigue cayendo en
+      ese camino es el azúcar sintáctico de inicializadores de array literal (`ldtoken` +
+      `RuntimeHelpers.InitializeArray`), no el opcode en sí.
+
+**Fixtures y tests**
+- [x] `Arrays.cs`, `ByRef.cs`, `Statics.cs` — fixtures nuevas compiladas con el SDK de .NET real,
+      cada una con su test Go correspondiente (`TestArrays`, `TestByRef`, `TestStatics`,
+      `TestStaticsConcurrentCctor`)
+- [x] `Unsupported.cs` reescrita (`try`/`finally`, antes usaba arrays — ahora que arrays
+      funcionan, se reemplazó por otra construcción genuinamente no soportada, para no perder el
+      caso de test negativo del checker)
+- [x] `TestAnalyze_MinimalProfileFlagsObjectModel` extendido: prueba que arrays y static fields
+      quedan fuera de `minimal`, y que `ref`/`out` sobre primitivas se mantienen adentro —
+      bloquea una futura regresión de cualquiera de los dos lados
+- [x] `FuzzParseSignatures` (`internal/metadata`) — el parser nuevo `ParseFieldSig` recibe bytes
+      sin confiar (parte del `#Blob` stream de una DLL cargada), y de paso se cerró que
+      `ParseMethodSig`/`ParseLocalVarSig`/`ParseTypeSpec` nunca habían tenido fuzz test propio
+      (`FuzzParse` en `/metadata` solo llega hasta las filas crudas, nunca parsea sus blobs de
+      firma)
+
+### Lo que se dejó explícitamente afuera de esta fase
+
+```txt
+- ldsflda (dirección de un campo estático): ver nota de diseño arriba — riesgo de concurrencia
+  real, no trabajo pendiente sin mirar.
+- Arrays multidimensionales/jagged más allá de una dimensión: solo SZARRAY.
+- Inicializadores de array literal (`new int[] {1,2,3}` compila a newarr+ldtoken+
+  RuntimeHelpers.InitializeArray, que lee bytes crudos de un FieldRVA) — se puede lograr el
+  mismo resultado asignando elemento por elemento, que sí funciona.
+- try/catch/finally (leave/endfinally), isinst/castclass, switch, ldftn/delegates, localloc,
+  initobj (structs/generics de valor): confirmados como los siguientes bloqueadores reales por
+  volumen en la re-certificación de abajo — candidatos naturales para la próxima fase de
+  expansión del intérprete, no una sorpresa.
+- Superficie BCL nueva (DateTime, Span<T>/ReadOnlySpan<T>, Nullable<T>, String.Format,
+  CultureInfo): sigue siendo el bloqueador dominante en volumen absoluto de findings
+  (unsupported-bcl-method), pero es trabajo de "agregar método nativo", no de intérprete —
+  fuera del alcance de esta fase, que se enfocó en opcodes/semántica del motor.
+```
+
+### Re-certificación contra los mismos 7 paquetes reales
+
+Mismos 7 paquetes de Fase 3, mismo perfil (`netstandard-lite`), estado del código al cierre de
+Fase 3.5:
+
+| Paquete | Métodos analizados | % limpio Fase 3 | % limpio Fase 3.5 |
+|---|---|---|---|
+| `Ardalis.GuardClauses@5.0.0` | 285 | 85.6% | **86.7%** |
+| `System.Text.Json@8.0.5` | 3577 | ~41% | **60.5%** |
+| `FluentValidation@11.9.2` | 1289 | ~41% | **58.0%** |
+| `Semver@2.3.0` | 423 | ~38% | **56.0%** |
+| `Newtonsoft.Json@13.0.3` | 4064 | ~46% | **52.5%** |
+| `Humanizer.Core@2.14.1` | 1597 | ~34% | **43.0%** |
+| `SimpleBase@4.0.0` | 258 | ~33% | **40.7%** |
+| **Promedio** | | **~45.5%** | **~56.8%** |
+
+`System.Text.Json` y `Semver` son los saltos más grandes — ambos usan `System.Array` y `ref`/
+`out` extensivamente para parsing/comparación de bajo nivel, exactamente el patrón que esta fase
+apuntó a resolver. Los findings restantes (ver desglose por opcode arriba) ya no están dominados
+por address-of — ahora son mayormente `initobj`/`ldftn`/`isinst`/`switch`/`ldtoken`/`leave.s`
+(features de fase futura) y superficie BCL (`DateTime`/`Span`/`Nullable`), no un vacío de
+cobertura del intérprete en construcciones básicas del lenguaje.
+
+### Cómo verificar esta fase
+
+```bash
+go test ./... -race -count=3                                       # todo verde, incluye concurrencia
+go test ./ -run TestStatics -v                                     # .cctor perezoso + defaults tipados
+go test ./ -run TestStaticsConcurrentCctor -race -v                # 32 goroutines, sin deadlock ni data race
+go test ./ -run TestArrays -v
+go test ./ -run TestByRef -v
+go test ./internal/checker/... -run TestAnalyze_MinimalProfileFlagsObjectModel -v
+go test ./internal/metadata/... -run '^$' -fuzz '^FuzzParseSignatures$' -fuzztime=30s
+```
+
+---
+
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
 
 **Objetivo:** convertir el motor funcional en un producto adoptable, confiable, documentado y
@@ -482,7 +654,9 @@ con benchmarks — el paquete completo para que un equipo de ingeniería apruebe
 **Seguridad / sandbox**
 - [ ] Modelo `Permissions` completo (`AllowConsole/AllowFileRead/AllowNetwork`, deny-by-default)
       conectado a todos los métodos nativos de BCL
-- [ ] `MaxArrayLength`/`MaxStringBytes`
+- [x] `MaxArrayLength` — adelantado a Fase 3.5 junto con el soporte de `System.Array` (tenía que
+      existir desde el día uno de `newarr`, no tenía sentido esperar a Fase 4)
+- [ ] `MaxStringBytes`
 - [ ] `docs/security.md` — threat model, qué se bloquea por default
 
 **Modelo de errores**

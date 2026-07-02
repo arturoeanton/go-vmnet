@@ -22,7 +22,6 @@ const (
 	KindAsync             FindingKind = "async"
 	KindPInvoke           FindingKind = "p-invoke"
 	KindUnsafePointer     FindingKind = "unsafe-pointer"
-	KindByRefParameter    FindingKind = "byref-parameter"
 	KindOutOfProfile      FindingKind = "out-of-profile"
 )
 

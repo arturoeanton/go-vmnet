@@ -62,10 +62,10 @@ static e instancia, `newobj`/`callvirt`/fields (sin vtable — resolución
 directa), `List<T>` / `Dictionary<string,V>` con backing nativo Go,
 `throw` no manejado (propagado como error Go tipado,
 `vmnet.ManagedException`), y el bridge `byte[]`/JSON. Interface/vtable
-dispatch, `try/catch/finally`, `System.Array`, generics más allá de
-List/Dictionary, y `DateTime`/`Guid` quedan para fases siguientes
-(`docs/ROADMAP.md`) — el IR builder reporta cualquier opcode no soportado
-explícitamente en vez de ejecutarlo mal.
+dispatch, `try/catch/finally`, generics más allá de List/Dictionary, y
+`DateTime`/`Guid` quedan para fases siguientes (`docs/ROADMAP.md`) — el IR
+builder reporta cualquier opcode no soportado explícitamente en vez de
+ejecutarlo mal. (`System.Array` se agregó en Fase 3.5 — ver más abajo.)
 
 Además (Fase 2.5): el intérprete recupera cualquier panic en el borde
 público (`Machine.Invoke`) en vez de crashear el proceso host, aplica
@@ -89,3 +89,25 @@ correctamente a través de vmnet. El proceso de certificación encontró y
 corrigió dos gaps reales: resolución de `MethodSpec` (llamadas a métodos
 genéricos) y un bug de comparaciones sin signo (`.un` opcodes) que daba
 resultados silenciosamente incorrectos, no solo "no soportado".
+
+Fase 3.5 (endurecimiento + compatibilidad real de DLLs) completa. El motor
+ahora soporta `System.Array` (`newarr`/`ldlen`/`ldelem.*`/`stelem.*`, solo
+SZARRAY, con `Limits.MaxArrayLength`), punteros administrados para `ref`/
+`out` (`ldarga`/`ldloca`/`ldelema`/`ldflda` + `ldind.*`/`stind.*` —
+modelados como un `*runtime.Value` de Go apuntando dentro de un slice de
+tamaño fijo, sin ningún caso especial en `Call`/`NewObj`) y campos
+estáticos con `.cctor` perezoso (`ldsfld`/`stsfld`, `sync.Once` por
+`Type`). Re-certificado contra los mismos 7 paquetes de Fase 3: el
+promedio de métodos limpios subió de ~45.5% a ~56.8% (`docs/ROADMAP.md`
+tiene la tabla completa por paquete). El proceso encontró y corrigió tres
+bugs reales de concurrencia/correctitud que no existían como riesgo antes
+de que `runtime.Type` empezara a cargar estado mutable: un deadlock de
+reentrancia cuando un `.cctor` escribe su propio campo estático, una race
+condition en el cache de tipos de `Assembly` que podía duplicar un `Type`
+bajo acceso concurrente, y un `default(T)` incorrecto para campos value-type
+nunca asignados explícitamente (ahora resuelto parseando la firma real del
+campo — `metadata.ParseFieldSig`, nuevo). También detectó y corrigió dos
+casos de "drift" en `internal/checker` (el perfil `minimal` no excluía
+arrays/static fields como debía, y `sigShapeFindings` seguía marcando
+`ref`/`out` como no soportado después de que sí se implementó) — ambos
+atrapados por el propio test de dogfood del checker.

@@ -49,6 +49,10 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 			out = append(out, LoadArg{3})
 		case "ldarg.s", "ldarg":
 			out = append(out, LoadArg{Index: operandIndex(instr.Operand)})
+		case "starg.s", "starg":
+			out = append(out, StoreArg{Index: operandIndex(instr.Operand)})
+		case "ldarga.s", "ldarga":
+			out = append(out, LoadArgAddr{Index: operandIndex(instr.Operand)})
 
 		case "ldloc.0":
 			out = append(out, LoadLocal{0})
@@ -60,6 +64,8 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 			out = append(out, LoadLocal{3})
 		case "ldloc.s", "ldloc":
 			out = append(out, LoadLocal{Index: operandIndex(instr.Operand)})
+		case "ldloca.s", "ldloca":
+			out = append(out, LoadLocalAddr{Index: operandIndex(instr.Operand)})
 
 		case "stloc.0":
 			out = append(out, StoreLocal{0})
@@ -293,6 +299,30 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 			}
 			out = append(out, StoreField{TypeFullName: typeFullName, FieldName: fieldName})
 
+		case "ldsfld":
+			token := instr.Operand.(uint32)
+			typeFullName, fieldName, err := resolveFieldTarget(md, token)
+			if err != nil {
+				return nil, fmt.Errorf("ir: ldsfld at IL offset %d: %w", instr.Offset, err)
+			}
+			out = append(out, LoadStaticField{TypeFullName: typeFullName, FieldName: fieldName})
+
+		case "stsfld":
+			token := instr.Operand.(uint32)
+			typeFullName, fieldName, err := resolveFieldTarget(md, token)
+			if err != nil {
+				return nil, fmt.Errorf("ir: stsfld at IL offset %d: %w", instr.Offset, err)
+			}
+			out = append(out, StoreStaticField{TypeFullName: typeFullName, FieldName: fieldName})
+
+		case "ldflda":
+			token := instr.Operand.(uint32)
+			typeFullName, fieldName, err := resolveFieldTarget(md, token)
+			if err != nil {
+				return nil, fmt.Errorf("ir: ldflda at IL offset %d: %w", instr.Offset, err)
+			}
+			out = append(out, LoadFieldAddr{TypeFullName: typeFullName, FieldName: fieldName})
+
 		case "box", "unbox.any":
 			// vmnet's runtime.Value is already a uniform tagged union —
 			// boxing a value type doesn't need a representation change.
@@ -301,6 +331,26 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 
 		case "throw":
 			out = append(out, Throw{})
+
+		case "newarr":
+			out = append(out, NewArr{})
+		case "ldlen":
+			out = append(out, LoadLen{})
+		case "ldelem.i1", "ldelem.u1", "ldelem.i2", "ldelem.u2", "ldelem.i4", "ldelem.u4",
+			"ldelem.i8", "ldelem.i", "ldelem.r4", "ldelem.r8", "ldelem.ref", "ldelem":
+			out = append(out, LoadElem{})
+		case "stelem.i", "stelem.i1", "stelem.i2", "stelem.i4", "stelem.i8",
+			"stelem.r4", "stelem.r8", "stelem.ref", "stelem":
+			out = append(out, StoreElem{})
+		case "ldelema":
+			out = append(out, LoadElemAddr{})
+
+		case "ldind.i1", "ldind.u1", "ldind.i2", "ldind.u2", "ldind.i4", "ldind.u4",
+			"ldind.i8", "ldind.i", "ldind.r4", "ldind.r8", "ldind.ref":
+			out = append(out, LoadIndirect{})
+		case "stind.ref", "stind.i1", "stind.i2", "stind.i4", "stind.i8",
+			"stind.r4", "stind.r8", "stind.i":
+			out = append(out, StoreIndirect{})
 
 		case "ret":
 			out = append(out, Return{HasValue: !retVoid})
@@ -510,8 +560,25 @@ func resolveFieldTarget(md *metadata.Metadata, token uint32) (typeFullName, fiel
 			return "", "", err
 		}
 		return Qualify(typeDef.Namespace, typeDef.Name), row.Name, nil
+
+	case metadata.TableMemberRef:
+		// A field declared outside this assembly (e.g. on a BCL type) is
+		// referenced the same way an external method is — resolving the
+		// owning type only needs Class, never the signature blob (which
+		// for a field uses a different, FIELD-tagged format than a
+		// method's MethodDefSig/MethodRefSig).
+		row, err := md.MemberRef(t.RID())
+		if err != nil {
+			return "", "", err
+		}
+		typeName, err := resolveMemberRefClassName(md, row.Class)
+		if err != nil {
+			return "", "", err
+		}
+		return typeName, row.Name, nil
+
 	default:
-		return "", "", fmt.Errorf("unsupported field target table %#x (external fields aren't supported yet)", byte(t.Table()))
+		return "", "", fmt.Errorf("unsupported field target table %#x", byte(t.Table()))
 	}
 }
 

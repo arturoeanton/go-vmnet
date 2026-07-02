@@ -23,6 +23,8 @@ const (
 	KindString
 	KindBytes  // a CLI byte[], used at the JSON/bytes bridge boundary (Fase 2)
 	KindObject // a heap object reference: an instance of a Type, or a BCL-native-backed object
+	KindArray  // a CLI SZARRAY (Fase 3.5)
+	KindRef    // a managed pointer (Fase 3.5) — see ref.go
 )
 
 // Value is one CIL evaluation-stack slot.
@@ -35,6 +37,8 @@ type Value struct {
 	Str   string
 	Bytes []byte
 	Obj   *Object
+	Arr   *Array
+	Ref   *Value
 }
 
 func Null() Value             { return Value{Kind: KindNull} }
@@ -45,6 +49,11 @@ func Float64(v float64) Value { return Value{Kind: KindR8, R8: v} }
 func String(v string) Value   { return Value{Kind: KindString, Str: v} }
 func Bytes(v []byte) Value    { return Value{Kind: KindBytes, Bytes: v} }
 func ObjRef(o *Object) Value  { return Value{Kind: KindObject, Obj: o} }
+func ArrRef(a *Array) Value   { return Value{Kind: KindArray, Arr: a} }
+
+// RefTo wraps a pointer to another Value slot (a local, an argument, an
+// array element, ...) as a managed-pointer Value. See ref.go.
+func RefTo(v *Value) Value { return Value{Kind: KindRef, Ref: v} }
 
 // Bool encodes a CIL boolean as the int32 0/1 it actually is on the stack.
 func Bool(v bool) Value {
@@ -72,6 +81,10 @@ func (v Value) Truthy() bool {
 		return v.Bytes != nil
 	case KindObject:
 		return v.Obj != nil
+	case KindArray:
+		return v.Arr != nil
+	case KindRef:
+		return v.Ref != nil
 	case KindNull:
 		return false
 	}
@@ -102,6 +115,16 @@ func (v Value) String() string {
 			return fmt.Sprintf("<%s>", v.Obj.Type.Name)
 		}
 		return "<object>"
+	case KindArray:
+		if v.Arr == nil {
+			return "null"
+		}
+		return fmt.Sprintf("<array[%d]>", len(v.Arr.Elems))
+	case KindRef:
+		if v.Ref == nil {
+			return "null"
+		}
+		return "<ref>"
 	}
 	return "<invalid value>"
 }

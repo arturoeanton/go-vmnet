@@ -18,6 +18,7 @@ type Dup struct{}
 type Pop struct{}
 
 type LoadArg struct{ Index int }
+type StoreArg struct{ Index int }
 type LoadLocal struct{ Index int }
 type StoreLocal struct{ Index int }
 
@@ -143,7 +144,57 @@ type StoreField struct {
 	FieldName    string
 }
 
+// LoadStaticField/StoreStaticField implement ldsfld/stsfld. Unlike
+// instance fields, the storage lives on the Type itself (shared across
+// every instance and every caller — see runtime.Type) and the interpreter
+// runs the type's static constructor (.cctor), if any, before the first
+// access (Fase 3.5).
+type LoadStaticField struct {
+	TypeFullName string
+	FieldName    string
+}
+
+type StoreStaticField struct {
+	TypeFullName string
+	FieldName    string
+}
+
 // Throw pops the top of stack (an exception object) and aborts execution
 // with it. Fase 2 only supports unhandled throw — try/catch/finally are
 // deferred (docs/ROADMAP.md).
 type Throw struct{}
+
+// NewArr pops a length and pushes a new zero-initialized array (spec
+// §11.2 newarr; only SZARRAY — single-dimensional, zero-based — is
+// modeled, matching the vast majority of real-world array usage).
+type NewArr struct{}
+
+// LoadLen pops an array reference and pushes its length (ldlen).
+type LoadLen struct{}
+
+// LoadElem/StoreElem implement every ldelem.*/stelem.* variant uniformly:
+// vmnet's Value is already a tagged union, so there's no need to
+// special-case by element type the way real CIL does.
+type LoadElem struct{}
+type StoreElem struct{}
+
+// LoadArgAddr/LoadLocalAddr/LoadElemAddr/LoadFieldAddr push a managed
+// pointer (runtime.KindRef) to a storage slot — an argument, a local, an
+// array element or an instance field — instead of the value in it
+// (ldarga/ldloca/ldelema/ldflda). This is also how `ref`/`out` parameters
+// work: the caller pushes one of these before `call`, and the callee just
+// receives it as a normal argument whose Value happens to be a KindRef —
+// no special-casing needed anywhere in Call itself (Fase 3.5).
+type LoadArgAddr struct{ Index int }
+type LoadLocalAddr struct{ Index int }
+type LoadElemAddr struct{}
+type LoadFieldAddr struct {
+	TypeFullName string
+	FieldName    string
+}
+
+// LoadIndirect/StoreIndirect (ldind.*/stind.*) read/write through a
+// managed pointer. vmnet doesn't distinguish the ldind.i4 vs ldind.r8 vs
+// ... variants — the pointed-to Value already carries its own Kind.
+type LoadIndirect struct{}
+type StoreIndirect struct{}

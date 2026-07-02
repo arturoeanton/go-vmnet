@@ -39,19 +39,6 @@ func (asm *Assembly) storeMethod(fullName string, m *runtime.Method) {
 	asm.methods[fullName] = m
 }
 
-func (asm *Assembly) cachedType(fullName string) (*runtime.Type, bool) {
-	asm.cacheMu.RLock()
-	defer asm.cacheMu.RUnlock()
-	t, ok := asm.types[fullName]
-	return t, ok
-}
-
-func (asm *Assembly) storeType(fullName string, t *runtime.Type) {
-	asm.cacheMu.Lock()
-	defer asm.cacheMu.Unlock()
-	asm.types[fullName] = t
-}
-
 // Name returns the name Assembly was loaded with (the file's base name for
 // LoadFile, or the caller-supplied name for LoadBytes).
 func (asm *Assembly) Name() string { return asm.name }
@@ -165,8 +152,19 @@ func (asm *Assembly) buildMethod(methodRID uint32, row metadata.MethodDefRow) (*
 // resolveTypeByFullName implements interpreter.TypeResolver: it builds a
 // runtime.Type (field layout) for a plain class discovered while executing
 // newobj/ldfld/stfld.
+//
+// Unlike buildMethod, this holds cacheMu for the whole check-build-store
+// sequence instead of just the individual reads/writes: since Fase 3.5 a
+// Type carries real mutable state (static fields, a .cctor latch), so two
+// goroutines racing to resolve the same not-yet-cached type could each
+// build and use their own separate *runtime.Type — one goroutine's .cctor
+// writes would then be invisible to everyone using the other instance. A
+// duplicate *runtime.Method has no such state and stays harmless to build
+// twice, so buildMethod is left as check-then-build-then-store.
 func (asm *Assembly) resolveTypeByFullName(fullName string) (*runtime.Type, error) {
-	if t, ok := asm.cachedType(fullName); ok {
+	asm.cacheMu.Lock()
+	defer asm.cacheMu.Unlock()
+	if t, ok := asm.types[fullName]; ok {
 		return t, nil
 	}
 	namespace, name := splitTypeName(fullName)
@@ -179,18 +177,55 @@ func (asm *Assembly) resolveTypeByFullName(fullName string) (*runtime.Type, erro
 	if err != nil {
 		return nil, err
 	}
-	fields := make([]string, 0, end-start)
+	var fields, staticFields []string
+	var fieldDefaults, staticFieldDefaults []runtime.Value
 	for rid := start; rid < end; rid++ {
 		f, err := asm.md.Field(rid)
 		if err != nil {
 			return nil, err
 		}
-		fields = append(fields, f.Name)
+		def := runtime.Null()
+		if sig, err := metadata.ParseFieldSig(f.Signature); err == nil {
+			def = fieldDefaultValue(sig.Kind)
+		}
+		if f.Flags&fieldAttrStatic != 0 {
+			staticFields = append(staticFields, f.Name)
+			staticFieldDefaults = append(staticFieldDefaults, def)
+		} else {
+			fields = append(fields, f.Name)
+			fieldDefaults = append(fieldDefaults, def)
+		}
 	}
 
-	t := &runtime.Type{Namespace: typeDef.Namespace, Name: typeDef.Name, Fields: fields}
-	asm.storeType(fullName, t)
+	t := runtime.NewType(typeDef.Namespace, typeDef.Name, fields, staticFields, fieldDefaults, staticFieldDefaults)
+	asm.types[fullName] = t
 	return t, nil
+}
+
+// fieldAttrStatic is FieldAttributes.Static (ECMA-335 §II.23.1.5).
+const fieldAttrStatic = 0x0010
+
+// fieldDefaultValue maps a field's signature type to its CLR implicit
+// zero-init value: a typed numeric zero for value types (so arithmetic on
+// a never-explicitly-assigned field works, matching real `static int x;`
+// semantics), or Null() for anything reference-shaped (string/class/array/
+// pointer) or not modeled here (user-defined value types), which is
+// already vmnet's existing null-reference representation.
+func fieldDefaultValue(kind metadata.SigTypeKind) runtime.Value {
+	switch kind {
+	case metadata.SigBoolean, metadata.SigChar,
+		metadata.SigI1, metadata.SigU1, metadata.SigI2, metadata.SigU2,
+		metadata.SigI4, metadata.SigU4, metadata.SigI, metadata.SigU:
+		return runtime.Int32(0)
+	case metadata.SigI8, metadata.SigU8:
+		return runtime.Int64(0)
+	case metadata.SigR4:
+		return runtime.Float32(0)
+	case metadata.SigR8:
+		return runtime.Float64(0)
+	default:
+		return runtime.Null()
+	}
 }
 
 func splitTypeName(typeName string) (namespace, name string) {

@@ -52,7 +52,9 @@ func (m *Machine) newObj(in newObjArgs, depth int, instrCount *int64) (runtime.V
 	if err != nil {
 		return runtime.Value{}, err
 	}
-	obj := &runtime.Object{Type: typ, Fields: make([]runtime.Value, len(typ.Fields))}
+	fields := make([]runtime.Value, len(typ.Fields))
+	copy(fields, typ.FieldDefaults)
+	obj := &runtime.Object{Type: typ, Fields: fields}
 	objVal := runtime.ObjRef(obj)
 
 	ctorArgs := make([]runtime.Value, 0, len(in.Args)+1)

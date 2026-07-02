@@ -288,6 +288,19 @@ func ParseMethodSig(blob []byte) (MethodSig, error) {
 	return sig, nil
 }
 
+// ParseFieldSig parses a Field table row's signature blob (ECMA-335
+// §II.23.2.4): FIELD (0x06) CustomMod* Type.
+func ParseFieldSig(blob []byte) (SigType, error) {
+	if len(blob) == 0 {
+		return SigType{}, fmt.Errorf("metadata: empty field signature")
+	}
+	if blob[0] != 0x06 {
+		return SigType{}, fmt.Errorf("metadata: expected FIELD marker (0x06), got %#x", blob[0])
+	}
+	t, _, err := parseType(blob[1:])
+	return t, err
+}
+
 // ParseLocalVarSig parses a StandAloneSig blob referenced by a fat method
 // header's LocalVarSigToken.
 func ParseLocalVarSig(blob []byte) ([]SigType, error) {

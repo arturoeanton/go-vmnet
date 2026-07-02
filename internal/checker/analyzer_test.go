@@ -43,7 +43,7 @@ func TestAnalyze_OwnAssemblyIsCompatible(t *testing.T) {
 				t.Fatal("MethodsAnalyzed = 0, want > 0 (did the fixture assembly fail to load?)")
 			}
 			for _, f := range r.Findings {
-				if f.Method != "Vmnet.Fixtures.Unsupported::SumArray" {
+				if f.Method != "Vmnet.Fixtures.Unsupported::TryFinally" {
 					t.Errorf("unexpected finding outside Unsupported.cs: %+v", f)
 				}
 			}
@@ -53,47 +53,62 @@ func TestAnalyze_OwnAssemblyIsCompatible(t *testing.T) {
 
 // TestAnalyze_MinimalProfileFlagsObjectModel proves the `minimal` profile
 // (spec §24.1: static methods and primitives only) rejects the same
-// assembly's object-model methods (Customer, CollectionsTest, ...) even
-// though the runtime can execute them under `rules`.
+// assembly's object-model methods (Customer, CollectionsTest, arrays,
+// static fields, ...) even though the runtime can execute them under
+// `rules`. Arrays and static fields were added in Fase 3.5 alongside
+// `ref`/`out` primitive parameters — this also locks in that the latter
+// stay allowed under `minimal` (they never touch the heap or a type's
+// field layout), so a future change can't silently regress either side.
 func TestAnalyze_MinimalProfileFlagsObjectModel(t *testing.T) {
 	r := analyzeFixture(t, ProfileMinimal)
 	if r.Status == StatusCompatible {
 		t.Fatal("Status = compatible under minimal, want partial/unsupported (Customer/CollectionsTest use the object model)")
 	}
 
-	foundObjectModelFinding := false
+	wantOutOfProfile := map[string]bool{
+		"Vmnet.Fixtures.Customer::get_Name":       false,
+		"Vmnet.Fixtures.Arrays::SumArray":         false,
+		"Vmnet.Fixtures.Statics::GetInitValue":    false,
+		"Vmnet.Fixtures.Statics::IncrementAndGet": false,
+	}
 	for _, f := range r.Findings {
-		if f.Kind == KindOutOfProfile && f.Method == "Vmnet.Fixtures.Customer::get_Name" {
-			foundObjectModelFinding = true
+		if f.Kind == KindOutOfProfile {
+			if _, ok := wantOutOfProfile[f.Method]; ok {
+				wantOutOfProfile[f.Method] = true
+			}
+		}
+		if f.Method == "Vmnet.Fixtures.ByRef::CallIncrementTwice" {
+			t.Errorf("ByRef::CallIncrementTwice (ref/out primitives only) unexpectedly flagged under minimal: %+v", f)
 		}
 	}
-	if !foundObjectModelFinding {
-		t.Errorf("expected an out-of-profile finding for Customer::get_Name, got: %+v", r.Findings)
+	for method, found := range wantOutOfProfile {
+		if !found {
+			t.Errorf("expected an out-of-profile finding for %s, got: %+v", method, r.Findings)
+		}
 	}
 }
 
 // TestAnalyze_UnsupportedOpcodeIsReported proves a method using
-// System.Array (newarr/ldelem/stelem/ldlen — not lowered by the IR
-// builder) shows up as a concrete, located finding, not a silent skip or
-// a crash.
+// try/finally (leave/endfinally — not lowered by the IR builder) shows up
+// as a concrete, located finding, not a silent skip or a crash.
 func TestAnalyze_UnsupportedOpcodeIsReported(t *testing.T) {
 	r := analyzeFixture(t, ProfileNetStandardLite)
 
 	var found *Finding
 	for i := range r.Findings {
-		if r.Findings[i].Method == "Vmnet.Fixtures.Unsupported::SumArray" {
+		if r.Findings[i].Method == "Vmnet.Fixtures.Unsupported::TryFinally" {
 			found = &r.Findings[i]
 			break
 		}
 	}
 	if found == nil {
-		t.Fatalf("expected a finding for Unsupported::SumArray, got: %+v", r.Findings)
+		t.Fatalf("expected a finding for Unsupported::TryFinally, got: %+v", r.Findings)
 	}
 	if found.Kind != KindUnsupportedOpcode {
 		t.Errorf("finding.Kind = %s, want %s", found.Kind, KindUnsupportedOpcode)
 	}
 	if r.Status == StatusCompatible {
-		t.Error("Status = compatible, want partial (Unsupported.SumArray should have blocked it)")
+		t.Error("Status = compatible, want partial (Unsupported.TryFinally should have blocked it)")
 	}
 }
 

@@ -77,10 +77,19 @@ func inProfile(p Profile, fullName string) bool {
 }
 
 // instrIsObjectModel reports whether instr requires the object model
-// (excluded from ProfileMinimal).
+// (excluded from ProfileMinimal — spec §24.1: `minimal` is
+// static-methods-and-primitives only). Besides classes/fields/callvirt/
+// throw, that also rules out arrays (heap-allocated System.Array
+// instances, not primitives) and static fields (shared mutable state, not
+// a "static methods and primitives" promise) added in Fase 3.5.
+// LoadArgAddr/LoadLocalAddr/LoadIndirect/StoreIndirect are deliberately
+// NOT included: a `ref`/`out` primitive parameter never touches the heap
+// or a type's field layout, so it stays within minimal's promised surface.
 func instrIsObjectModel(instr ir.Instr) bool {
 	switch v := instr.(type) {
-	case ir.NewObj, ir.LoadField, ir.StoreField, ir.Throw:
+	case ir.NewObj, ir.LoadField, ir.StoreField, ir.Throw,
+		ir.NewArr, ir.LoadLen, ir.LoadElem, ir.StoreElem, ir.LoadElemAddr,
+		ir.LoadFieldAddr, ir.LoadStaticField, ir.StoreStaticField:
 		return true
 	case ir.Call:
 		return v.Virtual

@@ -217,17 +217,18 @@ func suggestionFor(opcode string) string {
 	switch opcode {
 	case "leave", "leave.s", "endfinally":
 		return "try/catch/finally are not supported yet — an unhandled throw is"
-	case "newarr", "ldelem", "stelem", "ldlen":
-		return "System.Array is not supported yet"
+	case "ldtoken":
+		return "array literal initializers (RuntimeHelpers.InitializeArray) are not supported yet — assign elements individually instead"
 	default:
 		return "not yet implemented — see docs/ROADMAP.md"
 	}
 }
 
 // signatureFindings flags parameter/return shapes vmnet can't execute
-// correctly even though the signature itself parses fine: raw unmanaged
-// pointers (true `unsafe` code) and by-ref parameters (safe C#, but
-// vmnet's interpreter doesn't model write-back semantics yet).
+// correctly even though the signature itself parses fine. As of Fase 3.5,
+// that's only raw unmanaged pointers (true `unsafe` code, spec-illegal in
+// normal C#) — by-ref parameters (ref/out/in) execute correctly via
+// managed pointers (runtime.KindRef), so they're no longer flagged here.
 func signatureFindings(fullName string, sig metadata.MethodSig) []Finding {
 	var findings []Finding
 	findings = append(findings, sigShapeFindings(fullName, "return type", sig.RetType)...)
@@ -241,8 +242,6 @@ func sigShapeFindings(fullName, where string, t metadata.SigType) []Finding {
 	switch t.Kind {
 	case metadata.SigPointer:
 		return []Finding{{Kind: KindUnsafePointer, Method: fullName, Detail: where + " is an unmanaged pointer (unsafe code)"}}
-	case metadata.SigByRef:
-		return []Finding{{Kind: KindByRefParameter, Method: fullName, Detail: where + " is by-ref (ref/out/in)", Suggestion: "vmnet doesn't model by-ref write-back yet"}}
 	default:
 		return nil
 	}

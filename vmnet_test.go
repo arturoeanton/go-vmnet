@@ -201,3 +201,110 @@ func TestConcurrentCalls(t *testing.T) {
 		}
 	}
 }
+
+// TestArrays exercises System.Array support added in Fase 3.5: newarr,
+// individual stelem/ldelem writes and reads, and ldlen via .Length.
+func TestArrays(t *testing.T) {
+	asm := loadFixture(t)
+	out, err := asm.Call("Vmnet.Fixtures.Arrays", "SumArray")
+	if err != nil {
+		t.Fatalf("Arrays.SumArray() error = %v", err)
+	}
+	if got := out.Native().(int32); got != 6 {
+		t.Errorf("Arrays.SumArray() = %d, want 6", got)
+	}
+}
+
+// TestByRef exercises the managed-pointer support added in Fase 3.5
+// (ldarga.s/ldloca.s/ldind.i4/stind.i4) via `out`/`ref` parameters — the
+// single largest real-world blocker found during Fase 3 certification
+// (docs/ROADMAP.md).
+func TestByRef(t *testing.T) {
+	asm := loadFixture(t)
+
+	t.Run("out parameter", func(t *testing.T) {
+		tests := []struct{ in, want int32 }{{5, 10}, {0, 0}, {-1, -1}}
+		for _, tt := range tests {
+			out, err := asm.Call("Vmnet.Fixtures.ByRef", "CallTryDouble", Int32(tt.in))
+			if err != nil {
+				t.Fatalf("CallTryDouble(%d) error = %v", tt.in, err)
+			}
+			if got := out.Native().(int32); got != tt.want {
+				t.Errorf("CallTryDouble(%d) = %d, want %d", tt.in, got, tt.want)
+			}
+		}
+	})
+
+	t.Run("ref parameter mutated across two calls", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.ByRef", "CallIncrementTwice", Int32(10))
+		if err != nil {
+			t.Fatalf("CallIncrementTwice(10) error = %v", err)
+		}
+		if got := out.Native().(int32); got != 12 {
+			t.Errorf("CallIncrementTwice(10) = %d, want 12", got)
+		}
+	})
+}
+
+// TestStatics exercises static fields (ldsfld/stsfld) and the lazy .cctor
+// added in Fase 3.5 (internal/interpreter/statics.go). It checks three
+// things a naive implementation gets wrong: the .cctor runs exactly once
+// and its writes are visible afterward, static state persists across
+// separate top-level Call()s on the same Assembly (Type is cached), and a
+// never-explicitly-assigned int field defaults to 0, not an untyped null
+// that would break arithmetic.
+func TestStatics(t *testing.T) {
+	asm := loadFixture(t)
+
+	out, err := asm.Call("Vmnet.Fixtures.Statics", "GetInitValue")
+	if err != nil {
+		t.Fatalf("Statics.GetInitValue() error = %v", err)
+	}
+	if got := out.Native().(int32); got != 42 {
+		t.Errorf("Statics.GetInitValue() = %d, want 42 (.cctor should have run)", got)
+	}
+
+	for i, want := range []int32{1, 2, 3} {
+		out, err := asm.Call("Vmnet.Fixtures.Statics", "IncrementAndGet")
+		if err != nil {
+			t.Fatalf("Statics.IncrementAndGet() call %d error = %v", i+1, err)
+		}
+		if got := out.Native().(int32); got != want {
+			t.Errorf("Statics.IncrementAndGet() call %d = %d, want %d", i+1, got, want)
+		}
+	}
+}
+
+// TestStaticsConcurrentCctor races many goroutines to trigger Statics'
+// .cctor on the same Assembly's first static access — the exact scenario
+// runtime.Type.EnsureCctor and interpreter.Machine.cctorsRunning exist for.
+// Run with -race: this must neither deadlock (the bug fixed in Fase 3.5,
+// where a .cctor writing its own type's static field re-entered its own
+// sync.Once) nor report a data race on the shared statics slice.
+func TestStaticsConcurrentCctor(t *testing.T) {
+	asm := loadFixture(t)
+
+	const goroutines = 32
+	results := make(chan int32, goroutines)
+	errs := make(chan error, goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			out, err := asm.Call("Vmnet.Fixtures.Statics", "GetInitValue")
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- out.Native().(int32)
+		}()
+	}
+	for i := 0; i < goroutines; i++ {
+		select {
+		case err := <-errs:
+			t.Fatalf("Statics.GetInitValue() error = %v", err)
+		case got := <-results:
+			if got != 42 {
+				t.Errorf("Statics.GetInitValue() = %d, want 42", got)
+			}
+		}
+	}
+}
