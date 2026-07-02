@@ -220,7 +220,20 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 				}
 			}
 
-			result, hasReturn, err := m.call(in.FullName, callArgs, depth, instrCount)
+			// A delegate's Invoke (any delegate type — Action, Func`2, a
+			// user's own `delegate` declaration — they all compile to the
+			// exact same shape) is intercepted by receiver Kind, not by
+			// FullName: vmnet never registers "SomeDelegateType::Invoke"
+			// anywhere, since the delegate type name is unbounded (Fase
+			// 3.9). See runtime.Func's doc comment.
+			var result runtime.Value
+			var hasReturn bool
+			var err error
+			if in.HasThis && callArgs[0].Kind == runtime.KindFunc {
+				result, hasReturn, err = m.invokeFunc(callArgs[0].Func, callArgs[1:], depth, instrCount)
+			} else {
+				result, hasReturn, err = m.call(in.FullName, callArgs, depth, instrCount)
+			}
 			if err != nil {
 				return runtime.Value{}, err
 			}
@@ -386,6 +399,12 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 					Message:  fmt.Sprintf("Unable to cast object to type '%s'.", in.TypeFullName),
 				}
 			}
+
+		case ir.LoadFtn:
+			if in.Virtual {
+				frame.pop() // ldvirtftn's receiver — see ir.LoadFtn's doc comment
+			}
+			frame.push(runtime.FuncVal(&runtime.Func{FullName: in.FullName}))
 
 		case ir.Return:
 			if in.HasValue {

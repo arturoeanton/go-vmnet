@@ -165,6 +165,14 @@ func resolvableMethod(md *metadata.Metadata, fullName string) bool {
 	if _, _, ok := bcl.Lookup(fullName); ok {
 		return true
 	}
+	// A delegate's Invoke (Fase 3.9) is resolved by the interpreter
+	// structurally at runtime (any delegate type at all — Action, Func`2,
+	// a local `delegate` declaration), not via per-type registration in
+	// bcl.Lookup, so the checker has to recognize the same shape itself —
+	// see isDelegateType.
+	if typeName, ok := strings.CutSuffix(fullName, "::Invoke"); ok && isDelegateType(md, typeName) {
+		return true
+	}
 	return isLocalMethod(md, fullName)
 }
 
@@ -175,7 +183,77 @@ func resolvableCtor(md *metadata.Metadata, typeFullName, ctorFullName string) bo
 	if _, ok := bcl.LookupValueTypeCtor(typeFullName); ok {
 		return true
 	}
+	if strings.HasSuffix(ctorFullName, "::.ctor") && isDelegateType(md, typeFullName) {
+		return true
+	}
 	return isLocalMethod(md, ctorFullName)
+}
+
+// wellKnownDelegatePrefixes covers the overwhelming majority of
+// real-world delegate usage — BCL delegate types have no TypeDef in the
+// loaded assembly (same problem as Nullable`1 in Fase 3.7), so unlike a
+// plugin's own `delegate` declaration (checked below via its real
+// TypeDef's Extends) there's no metadata to inspect at all, only the name.
+var wellKnownDelegatePrefixes = []string{
+	"System.Action",
+	"System.Func`",
+	"System.Predicate`1",
+	"System.Comparison`1",
+	"System.EventHandler",
+	"System.AsyncCallback",
+}
+
+// isDelegateType reports whether typeFullName names a delegate: a
+// well-known BCL one by prefix, or a plugin's own `delegate` declaration
+// (a real TypeDef extending System.MulticastDelegate/System.Delegate,
+// resolvable the same way analyzer.go's isValueType-equivalent check in
+// assembly.go works for structs).
+func isDelegateType(md *metadata.Metadata, typeFullName string) bool {
+	for _, prefix := range wellKnownDelegatePrefixes {
+		if strings.HasPrefix(typeFullName, prefix) {
+			return true
+		}
+	}
+	dot := strings.LastIndex(typeFullName, ".")
+	namespace, name := "", typeFullName
+	if dot >= 0 {
+		namespace, name = typeFullName[:dot], typeFullName[dot+1:]
+	}
+	_, typeDef, err := md.FindTypeDef(namespace, name)
+	if err != nil || typeDef.Extends.IsNil() {
+		return false
+	}
+	base, err := resolveBaseTypeName(md, typeDef.Extends)
+	return err == nil && (base == "System.MulticastDelegate" || base == "System.Delegate")
+}
+
+// resolveBaseTypeName resolves a TypeDef/TypeRef token to "Namespace.Name"
+// — a narrower duplicate of assembly.go's resolveTypeTokenName (root
+// package, not importable from here) sized to exactly what isDelegateType
+// needs: a delegate's Extends is always a plain TypeRef, never a TypeSpec.
+func resolveBaseTypeName(md *metadata.Metadata, tok metadata.Token) (string, error) {
+	switch tok.Table() {
+	case metadata.TableTypeRef:
+		row, err := md.TypeRef(tok.RID())
+		if err != nil {
+			return "", err
+		}
+		if row.Namespace == "" {
+			return row.Name, nil
+		}
+		return row.Namespace + "." + row.Name, nil
+	case metadata.TableTypeDef:
+		row, err := md.TypeDef(tok.RID())
+		if err != nil {
+			return "", err
+		}
+		if row.Namespace == "" {
+			return row.Name, nil
+		}
+		return row.Namespace + "." + row.Name, nil
+	default:
+		return "", fmt.Errorf("unsupported base-type token table %#x", byte(tok.Table()))
+	}
 }
 
 func isLocalMethod(md *metadata.Metadata, fullName string) bool {

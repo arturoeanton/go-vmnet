@@ -34,10 +34,35 @@ func (m *Machine) call(fullName string, args []runtime.Value, depth int, instrCo
 	return v, method.HasReturn, nil
 }
 
+// invokeFunc calls a delegate: fn's captured receiver (nil for a static
+// target), if any, is prepended to args, then dispatched exactly like any
+// other call (BCL native or interpreted local method) — see
+// runtime.Func's doc comment for why closures need nothing beyond this.
+func (m *Machine) invokeFunc(fn *runtime.Func, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, bool, error) {
+	if fn == nil {
+		return runtime.Value{}, false, &runtime.ManagedException{TypeName: "System.NullReferenceException", Message: "delegate is null"}
+	}
+	callArgs := args
+	if fn.Receiver != nil {
+		callArgs = append([]runtime.Value{*fn.Receiver}, args...)
+	}
+	return m.call(fn.FullName, callArgs, depth, instrCount)
+}
+
 // newObj implements the ir.NewObj instruction: allocate (native value
 // type, native reference type, or plain assembly type) and, for
 // non-fully-native cases, run the constructor.
 func (m *Machine) newObj(in newObjArgs, depth int, instrCount *int64) (runtime.Value, error) {
+	// A delegate constructor (any delegate type at all — see
+	// runtime.Func's doc comment) always has exactly this shape:
+	// (receiver-or-null, unbound-function-from-ldftn). Detected
+	// structurally rather than by TypeFullName, which is unbounded (a
+	// custom `delegate` declaration, or a foreign BCL one like Action<T>
+	// with no TypeDef in the loaded assembly — Fase 3.9).
+	if len(in.Args) == 2 && in.Args[1].Kind == runtime.KindFunc {
+		return runtime.BindDelegate(in.Args[0], *in.Args[1].Func), nil
+	}
+
 	if vtCtor, ok := bcl.LookupValueTypeCtor(in.TypeFullName); ok {
 		s, err := vtCtor(in.Args)
 		if err != nil {

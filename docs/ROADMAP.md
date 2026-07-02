@@ -936,6 +936,86 @@ go test ./... -race -count=3
 go test ./ -run TestTypeChecks -v
 ```
 
+### Fase 3.9 — Delegates/closures: `ldftn`, `Action`/`Func`, `Invoke`
+
+**Tareas**
+
+- [x] `runtime.KindFunc`/`runtime.Func` (`FullName` del método target + `Receiver` opcional,
+      `nil` para un target estático) — deliberadamente **sin** modelar `System.Delegate`/
+      `MulticastDelegate` como tipos BCL reales: todo tipo delegate (`Action`, `Func`2`, uno
+      declarado por el usuario) compila su construcción a la **misma forma exacta** sin importar
+      el nombre — `ldftn` empuja un target sin bind, `newobj AlgúnDelegado::.ctor(object,
+      native int)` lo combina con el receptor recién empujado antes (`null` para un target
+      estático). Detectar esa forma estructuralmente en vez de registrar cada tipo delegate por
+      nombre es lo que hace que `Action<T>`/`Func<T,TResult>`/un delegate propio funcionen todos
+      sin trabajo extra.
+- [x] IR + intérprete: `ldftn`/`ldvirtftn` (`ldvirtftn` descarta el receptor que pop — sin vtable
+      real, igual que `constrained.` en Fase 3.7), y el despacho de `Invoke` intercepta por
+      **Kind del receptor** (`KindFunc`), no por nombre de método — nunca hay que registrar
+      "AlgúnDelegado::Invoke" en ningún lado.
+- [x] **Closures sin trabajo adicional**: una lambda que captura variables externas compila a
+      una clase generada por el compilador con las variables capturadas como *campos reales* y
+      el cuerpo de la lambda como un método de instancia sobre ella — el mecanismo de
+      objetos/campos que ya existe desde Fase 2 alcanza sin ningún caso especial. Verificado con
+      una closure que además **muta** un local capturado (el compilador reescribe el local para
+      compartir el campo entre el método contenedor y la lambda) — funcionó a la primera vez
+      probado contra un fixture real.
+- [x] **Bug real encontrado y arreglado — drift del checker**: el propio test de dogfood lo
+      atrapó de inmediato — el checker no tenía forma de saber que `Func`2::Invoke`/
+      `Action`1::.ctor` ahora resuelven, porque la detección es puramente estructural en el
+      intérprete (nunca se registra en `bcl.Lookup`). Se agregó `isDelegateType` al checker:
+      reconoce los prefijos BCL conocidos (`Action`, `Func\``, `Predicate\`1`, ...) por nombre, y
+      un delegate declarado localmente (`public delegate ...`) resolviendo su `TypeDef` real y
+      chequeando que su `Extends` sea `System.MulticastDelegate`/`System.Delegate` — mismo patrón
+      que `isValueType` en `assembly.go`.
+
+**Fixtures y tests**
+
+- [x] `Delegates.cs` (`Delegates`, `IntTransform`) / `TestDelegates` — conversión de grupo de
+      métodos (target estático, el compilador la cachea en un campo estático), closure
+      capturando un parámetro, closure capturando *y mutando* un local, y un tipo delegate
+      declarado localmente (ejercita el camino de `TypeDef` de `isDelegateType`, no solo el de
+      prefijos BCL conocidos)
+
+### Lo que se dejó explícitamente afuera de esta fase
+
+```txt
+- Delegates multicast (`+=`/`-=`, System.Delegate.Combine/Remove): runtime.Func modela un solo
+  target, no una lista de invocación. El caso dominante medido (Action<T>/Func<T,TResult> de un
+  solo uso — predicados de validación, callbacks) no los necesita.
+- BeginInvoke/EndInvoke (invocación asíncrona basada en IAsyncResult) y DynamicInvoke
+  (reflection): solo Invoke está soportado.
+- Covarianza/contravarianza de delegates: no se verifica ni se necesita — vmnet no hace type
+  checking estático de todos modos.
+```
+
+### Re-certificación contra los mismos 8 targets (7 paquetes + Jint)
+
+| Paquete | % limpio Fase 3.8 | % limpio Fase 3.9 |
+|---|---|---|
+| `Ardalis.GuardClauses@5.0.0` | 87.4% | 90.5% |
+| `FluentValidation@11.9.2` | 63.9% | **77.3%** |
+| `Semver@2.3.0` | 74.9% | 76.8% |
+| `System.Text.Json@8.0.5` | 68.1% | 69.3% |
+| `Newtonsoft.Json@13.0.3` | 62.9% | 63.8% |
+| `SimpleBase@4.0.0` | 46.1% | 48.4% |
+| `Humanizer.Core@2.14.1` | 46.3% | 46.8% |
+| **Promedio (7 paquetes)** | **64.2%** | **67.6%** |
+| `Jint@3.1.3` | 74.4% | 77.3% |
+| **Promedio (7 paquetes + Jint)** | **65.5%** | **68.8%** |
+
+`FluentValidation` es el salto más grande de todo el camino a 85% hasta ahora (+13.4 puntos) —
+una librería de validación es, literalmente, un árbol de predicados (`Func<T,bool>`) y callbacks
+componibles. Confirma que delegates era, junto con la jerarquía de tipos, uno de los dos
+bloqueadores realmente dominantes.
+
+### Cómo verificar Fase 3.9
+
+```bash
+go test ./... -race -count=3
+go test ./ -run TestDelegates -v
+```
+
 ---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")

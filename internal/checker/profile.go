@@ -54,6 +54,11 @@ func init() {
 		"System.Globalization.CultureInfo::",
 		"System.Environment::get_CurrentManagedThreadId",
 		"System.Nullable`1::",
+		"System.Action",
+		"System.Func`",
+		"System.Predicate`1::",
+		"System.Comparison`1::",
+		"System.EventHandler",
 		"System.Exception",
 		"System.InvalidOperationException",
 		"System.ArgumentException",
@@ -103,12 +108,15 @@ func inProfile(p Profile, fullName string) bool {
 // included: a value type's own field layout, and the class/interface
 // hierarchy walk isinst/castclass need, are type-system machinery in the
 // same sense classes are, even when nothing gets heap-allocated.
+// ir.LoadFtn (Fase 3.9) is included too: a delegate is a heap-allocated
+// closure once ir.NewObj (already excluded) constructs it, and ldftn only
+// exists to feed that construction.
 func instrIsObjectModel(instr ir.Instr) bool {
 	switch v := instr.(type) {
 	case ir.NewObj, ir.LoadField, ir.StoreField, ir.Throw,
 		ir.NewArr, ir.LoadLen, ir.LoadElem, ir.StoreElem, ir.LoadElemAddr,
 		ir.LoadFieldAddr, ir.LoadStaticField, ir.StoreStaticField,
-		ir.InitObj, ir.IsInst, ir.CastClass:
+		ir.InitObj, ir.IsInst, ir.CastClass, ir.LoadFtn:
 		return true
 	case ir.Call:
 		return v.Virtual

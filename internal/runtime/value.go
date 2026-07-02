@@ -26,6 +26,7 @@ const (
 	KindArray  // a CLI SZARRAY (Fase 3.5)
 	KindRef    // a managed pointer (Fase 3.5) — see ref.go
 	KindStruct // a value type instance (Fase 3.7) — see struct.go
+	KindFunc   // a delegate (Fase 3.9) — see func.go
 )
 
 // Value is one CIL evaluation-stack slot.
@@ -41,6 +42,7 @@ type Value struct {
 	Arr    *Array
 	Ref    *Value
 	Struct *Struct
+	Func   *Func
 }
 
 func Null() Value             { return Value{Kind: KindNull} }
@@ -59,6 +61,9 @@ func RefTo(v *Value) Value { return Value{Kind: KindRef, Ref: v} }
 
 // StructVal wraps a value-type instance as a Value. See struct.go.
 func StructVal(s *Struct) Value { return Value{Kind: KindStruct, Struct: s} }
+
+// FuncVal wraps a delegate as a Value. See func.go.
+func FuncVal(f *Func) Value { return Value{Kind: KindFunc, Func: f} }
 
 // Bool encodes a CIL boolean as the int32 0/1 it actually is on the stack.
 func Bool(v bool) Value {
@@ -94,6 +99,8 @@ func (v Value) Truthy() bool {
 		// A value type instance is never null (spec: value types have no
 		// null state), same as CLR struct semantics.
 		return true
+	case KindFunc:
+		return v.Func != nil
 	case KindNull:
 		return false
 	}
@@ -139,6 +146,11 @@ func (v Value) String() string {
 			return "<struct>"
 		}
 		return fmt.Sprintf("<%s>", v.Struct.Type.Name)
+	case KindFunc:
+		if v.Func == nil {
+			return "null"
+		}
+		return fmt.Sprintf("<delegate:%s>", v.Func.FullName)
 	}
 	return "<invalid value>"
 }

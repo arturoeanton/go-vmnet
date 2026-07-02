@@ -385,6 +385,38 @@ func TestStructs(t *testing.T) {
 	})
 }
 
+// TestDelegates exercises delegates/closures (Fase 3.9): a method-group
+// conversion (static target, no receiver, cached by the compiler in a
+// static field), a closure capturing a parameter, a closure capturing
+// *and mutating* an outer local (the compiler rewrites the local into a
+// shared display-class field — vmnet needs no special support beyond its
+// existing object/field model for this to work), and a locally-declared
+// `delegate` type (exercising isDelegateType's TypeDef path in the
+// checker, not just the well-known-BCL-prefix one).
+func TestDelegates(t *testing.T) {
+	asm := loadFixture(t)
+
+	tests := []struct {
+		method string
+		args   []Value
+		want   int32
+	}{
+		{"InvokeStaticFunc", []Value{Int32(5)}, 10},
+		{"InvokeClosure", []Value{Int32(3), Int32(10)}, 30},
+		{"InvokeMutatingClosure", []Value{Int32(7)}, 8},
+		{"InvokeLocalDelegateType", []Value{Int32(5)}, 10},
+	}
+	for _, tt := range tests {
+		out, err := asm.Call("Vmnet.Fixtures.Delegates", tt.method, tt.args...)
+		if err != nil {
+			t.Fatalf("%s(...) error = %v", tt.method, err)
+		}
+		if got := out.Native().(int32); got != tt.want {
+			t.Errorf("%s(...) = %d, want %d", tt.method, got, tt.want)
+		}
+	}
+}
+
 // TestTypeChecks exercises isinst/castclass (Fase 3.8) against a real
 // class/interface hierarchy: `is`/`as`/explicit cast on a base-typed
 // reference actually holding a subtype, a failed cast throwing

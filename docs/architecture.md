@@ -161,3 +161,21 @@ memoria real de la CLR. Certificación (7 paquetes + Jint): promedio de los
 7 sube de ~63.2% a ~64.2%; Jint da el salto grande, ~66.1% a ~74.4%
 (despacho por tipo/casteos constantes en un motor de JS), ~63.6% a ~65.5%
 con Jint incluido en el promedio de 8.
+
+Fase 3.9 (delegates/closures) completa: `runtime.KindFunc` representa un
+delegate como el nombre completo de su método target más un receptor
+opcional, detectado **estructuralmente** (no por nombre de tipo) tanto en
+`newobj` (`ldftn` + receptor + `.ctor(object, native int)`, la misma forma
+para cualquier tipo delegate) como en el despacho de `Invoke` (por Kind
+del receptor). Las closures no necesitaron ningún trabajo adicional: el
+compilador de C# ya las baja a una clase real con las variables
+capturadas como campos, que el modelo de objetos existente desde Fase 2
+maneja sin casos especiales — verificado incluso con una closure que muta
+un local capturado. El propio test de dogfood del checker atrapó de
+inmediato el drift esperado (el checker no sabía que `Func`2::Invoke`
+ahora resuelve, ya que nunca se registra en `bcl.Lookup`) — se agregó
+`isDelegateType` reconociendo prefijos BCL conocidos más delegates
+declarados localmente vía su `TypeDef` real. Certificación: promedio de
+los 7 paquetes sube de ~64.2% a ~67.6% (~65.5% a ~68.8% con Jint);
+`FluentValidation` (una librería de predicados/callbacks) da el salto más
+grande medido en todo el camino a 85%, +13.4 puntos.

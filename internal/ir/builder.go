@@ -391,6 +391,22 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 			}
 			out = append(out, CastClass{TypeFullName: typeFullName})
 
+		case "ldftn":
+			token := instr.Operand.(uint32)
+			fullName, _, _, _, err := resolveCallTarget(md, token)
+			if err != nil {
+				return nil, fmt.Errorf("ir: ldftn at IL offset %d: %w", instr.Offset, err)
+			}
+			out = append(out, LoadFtn{FullName: fullName})
+
+		case "ldvirtftn":
+			token := instr.Operand.(uint32)
+			fullName, _, _, _, err := resolveCallTarget(md, token)
+			if err != nil {
+				return nil, fmt.Errorf("ir: ldvirtftn at IL offset %d: %w", instr.Offset, err)
+			}
+			out = append(out, LoadFtn{FullName: fullName, Virtual: true})
+
 		case "constrained.", "volatile.", "readonly.":
 			// Prefixes vmnet doesn't need: constrained. only matters for
 			// choosing between boxing and a value type's own override at a

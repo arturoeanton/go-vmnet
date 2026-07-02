@@ -233,3 +233,19 @@ type InitObj struct{ TypeFullName string }
 // always throws in that case.
 type IsInst struct{ TypeFullName string }
 type CastClass struct{ TypeFullName string }
+
+// LoadFtn implements ldftn/ldvirtftn (spec §III.4.19/4.20): push an
+// unbound delegate target (runtime.KindFunc) referencing FullName.
+// ldvirtftn additionally pops a receiver first to resolve the method
+// virtually — vmnet already resolves callvirt targets statically (no real
+// vtable for method dispatch; Fase 3.8 covers isinst/castclass, a
+// different mechanism), so that receiver is popped and discarded, not
+// used to pick a different FullName. The delegate's actual receiver (for
+// an instance-method or closure target) is bound later, from whatever
+// `ldarg.0`/`ldloc`/`ldnull` was pushed just before ldftn, when a
+// `newobj SomeDelegateType::.ctor(object, native int)` combines the two —
+// see internal/interpreter/calls.go's newObj and runtime.BindDelegate.
+type LoadFtn struct {
+	FullName string
+	Virtual  bool
+}
