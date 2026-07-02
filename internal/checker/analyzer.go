@@ -180,7 +180,36 @@ func resolvableMethod(md *metadata.Metadata, fullName string) bool {
 	if typeName, ok := strings.CutSuffix(fullName, "::Invoke"); ok && isDelegateType(md, typeName) {
 		return true
 	}
+	if interfaceDispatchTargets[fullName] {
+		return true
+	}
 	return isLocalMethod(md, fullName)
+}
+
+// interfaceDispatchTargets lists the foreach iteration protocol's
+// interface-declared "Type::Method" call targets — what
+// System.Collections.Generic.IEnumerable`1::GetEnumerator etc. actually
+// look like at a call site typed against the interface rather than a
+// concrete collection. The interpreter's runtime fallback (Fase 3.13,
+// internal/interpreter/calls.go's tryCall/receiverTypeName) resolves
+// these by redirecting to the receiver's real concrete type at call
+// time — something the checker, being static, can't determine itself
+// (it would need real data-flow analysis of which concrete type flows
+// into an interface-typed local). This is a best-effort allowlist of
+// exactly what the Fase 3.13 probe measured as the dominant real-world
+// pattern, not a claim that every interface call resolves; same
+// approximate posture as isDelegateType's well-known prefixes.
+var interfaceDispatchTargets = map[string]bool{
+	"System.Collections.Generic.IEnumerable`1::GetEnumerator": true,
+	"System.Collections.IEnumerable::GetEnumerator":           true,
+	"System.Collections.Generic.IEnumerator`1::get_Current":   true,
+	"System.Collections.Generic.IEnumerator`1::MoveNext":      true,
+	"System.Collections.IEnumerator::get_Current":             true,
+	"System.Collections.IEnumerator::MoveNext":                true,
+	"System.Collections.IEnumerator::Reset":                   true,
+	"System.Collections.Generic.ICollection`1::Add":           true,
+	"System.Collections.Generic.ICollection`1::get_Count":     true,
+	"System.Collections.ICollection::get_Count":               true,
 }
 
 func resolvableCtor(md *metadata.Metadata, typeFullName, ctorFullName string) bool {

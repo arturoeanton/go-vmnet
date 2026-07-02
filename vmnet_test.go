@@ -382,6 +382,16 @@ func TestStructs(t *testing.T) {
 		if v := gotDefault.Native().(int32); v != 0 {
 			t.Errorf("GetValueOrDefaultTest(false, 42) = %d, want 0", v)
 		}
+
+		// Fase 3.13: `int? n = 42;` (ldloca+call .ctor directly on the
+		// local, not newobj) — see DirectNullableAssignTest's doc comment.
+		direct, err := asm.Call("Vmnet.Fixtures.Structs", "DirectNullableAssignTest")
+		if err != nil {
+			t.Fatalf("DirectNullableAssignTest() error = %v", err)
+		}
+		if v := direct.Native().(int32); v != 42 {
+			t.Errorf("DirectNullableAssignTest() = %d, want 42", v)
+		}
 	})
 }
 
@@ -455,6 +465,108 @@ func TestDateTimeSpan(t *testing.T) {
 		}
 		if got := out.Native().(int32); got != 600 {
 			t.Errorf("SpanWriteThrough() = %d, want 600", got)
+		}
+	})
+}
+
+// TestInterfaceForeach exercises `foreach` over a collection accessed
+// through an interface-typed reference (Fase 3.13), as opposed to
+// TestForeach's concrete-type case (Fase 3.11): a List<int> assigned to
+// an IEnumerable<int> local, and a compiler-generated `yield return`
+// iterator whose own declared return type is the interface — both need
+// the interpreter's runtime interface-call fallback (redirect a call
+// site declared against IEnumerable`1/IEnumerator`1/IEnumerator to the
+// receiver's actual concrete type, since vmnet has no vtable), not just
+// isinst/castclass (Fase 3.8).
+func TestInterfaceForeach(t *testing.T) {
+	asm := loadFixture(t)
+
+	t.Run("List<T> summed through IEnumerable<T>", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.InterfaceForeachTest", "SumViaInterface")
+		if err != nil {
+			t.Fatalf("SumViaInterface() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 60 {
+			t.Errorf("SumViaInterface() = %d, want 60", got)
+		}
+	})
+
+	t.Run("yield-return iterator summed through IEnumerable<T>", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.InterfaceForeachTest", "SumCustomIterator")
+		if err != nil {
+			t.Fatalf("SumCustomIterator() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 10 {
+			t.Errorf("SumCustomIterator() = %d, want 10", got)
+		}
+	})
+}
+
+// TestCheapWins exercises the Fase 3.13 cheap-win BCL bundle: a set of
+// high-breadth, low-effort String/Char/List/Dictionary natives found by
+// the Fase 3.13 probe (same "measure, then bundle the cheap wins"
+// pattern as Fase 3.6).
+func TestCheapWins(t *testing.T) {
+	asm := loadFixture(t)
+
+	t.Run("String checks", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins", "StringChecks", String("Hello World"))
+		if err != nil {
+			t.Fatalf("StringChecks() error = %v", err)
+		}
+		want := "0116;Hello Go;Hello World"
+		if got := out.Native().(string); got != want {
+			t.Errorf("StringChecks() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("Split/Join", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins", "SplitJoin", String("a,b,c"))
+		if err != nil {
+			t.Fatalf("SplitJoin() error = %v", err)
+		}
+		if got := out.Native().(string); got != "a|b|c" {
+			t.Errorf("SplitJoin() = %q, want %q", got, "a|b|c")
+		}
+	})
+
+	t.Run("Char checks", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins", "CharChecks")
+		if err != nil {
+			t.Fatalf("CharChecks() error = %v", err)
+		}
+		if got := out.Native().(string); got != "111x" {
+			t.Errorf("CharChecks() = %q, want %q", got, "111x")
+		}
+	})
+
+	t.Run("Int32.ToString", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins", "IntToString", Int32(42))
+		if err != nil {
+			t.Fatalf("IntToString(42) error = %v", err)
+		}
+		if got := out.Native().(string); got != "42" {
+			t.Errorf("IntToString(42) = %q, want %q", got, "42")
+		}
+	})
+
+	t.Run("List extras", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins", "ListExtras")
+		if err != nil {
+			t.Fatalf("ListExtras() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 331 {
+			t.Errorf("ListExtras() = %d, want 331", got)
+		}
+	})
+
+	t.Run("Dictionary.TryGetValue", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins", "DictTryGetValue")
+		if err != nil {
+			t.Fatalf("DictTryGetValue() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 200 {
+			t.Errorf("DictTryGetValue() = %d, want 200", got)
 		}
 	})
 }
@@ -634,6 +746,37 @@ func TestTryCatch(t *testing.T) {
 		var ex *runtime.ManagedException
 		if !errors.As(err, &ex) || ex.TypeName != "System.NotSupportedException" {
 			t.Errorf("UncaughtExceptionPropagates() error = %v, want a System.NotSupportedException", err)
+		}
+	})
+}
+
+// TestCustomException exercises a plugin-declared exception subclass
+// (Fase 3.13): base-constructor chaining (`: base(message)`, a plain
+// non-virtual `call System.Exception::.ctor`, not newobj), catching by
+// the exact declared subtype, and catching by the real base type
+// (System.Exception) — both need the thrown ManagedException's TypeName
+// to be the actual most-derived plugin type, not the fixed BCL name
+// registerCtor's exact-type path uses.
+func TestCustomException(t *testing.T) {
+	asm := loadFixture(t)
+
+	t.Run("catch by exact subtype", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CustomExceptionTest", "CatchExact")
+		if err != nil {
+			t.Fatalf("CatchExact() error = %v", err)
+		}
+		if got := out.Native().(string); got != "exact:custom-boom" {
+			t.Errorf("CatchExact() = %q, want %q", got, "exact:custom-boom")
+		}
+	})
+
+	t.Run("catch by real base type", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CustomExceptionTest", "CatchBase")
+		if err != nil {
+			t.Fatalf("CatchBase() error = %v", err)
+		}
+		if got := out.Native().(string); got != "base:custom-boom-2" {
+			t.Errorf("CatchBase() = %q, want %q", got, "base:custom-boom-2")
 		}
 	})
 }

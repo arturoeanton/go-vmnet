@@ -60,6 +60,19 @@ namespace Vmnet.Fixtures
             return n.GetValueOrDefault();
         }
 
+        // Fase 3.13: `int? n = 42;` (a non-conditional, direct assignment)
+        // compiles to `ldloca`+`call .ctor` straight on the local's own
+        // storage, not `newobj` — confirmed against real IL, the same
+        // compiler shape already needing its own entry point for
+        // System.DateTime (Fase 3.12) and plugin structs (this file,
+        // Fase 3.7). HasValueTest/GetValueOrDefaultTest above never hit
+        // this path: their ternary always goes through newobj instead.
+        public static int DirectNullableAssignTest()
+        {
+            int? n = 42;
+            return n.Value;
+        }
+
         public static string DescribeGeneric<T>(T item)
         {
             return item.ToString();

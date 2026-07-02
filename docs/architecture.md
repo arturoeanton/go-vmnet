@@ -246,3 +246,55 @@ por completo por `Humanizer.Core` (+34.4 puntos: es una librería de
 "humanizar" fechas, DateTime era su único bloqueador real). Con 76.9%
 el criterio de cierre firme de 85% todavía no se alcanza; queda al
 menos una Fase 3.x más antes de Fase 4.
+
+Fase 3.13 (`foreach` sobre colección tipada como interfaz + paquete de
+wins baratos) completa. El probe post-3.12 mostró que
+`IEnumerable`1::GetEnumerator`/`IEnumerator`1::get_Current`/
+`IEnumerator::MoveNext` eran el hallazgo más ancho del proyecto entero
+(7/8 targets) — exactamente lo que Fase 3.11 había dejado afuera por
+necesitar despacho virtual real. `Machine.call` gana un fallback: cuando
+el nombre declarado en el sitio de `callvirt` (baked in en tiempo de
+compilación, p.ej. `IEnumerable`1::GetEnumerator`, ya que vmnet no tiene
+vtable) no resuelve, reintenta una vez contra el tipo concreto real del
+receptor (`receiverTypeName` — `Struct.Type`/`Obj.Type` para la mayoría
+de valores, `bcl.NativeTypeName` para colecciones nativas sin
+`runtime.Type` propio como `List<T>`), cubriendo uniformemente tanto
+colecciones BCL accedidas por interfaz como clases del plugin que
+implementan una interfaz. Un iterador `yield return` necesitó una pieza
+más: su `GetEnumerator`/`Current` compila como implementación *explícita*
+de interfaz (nombre mangled tipo
+`"IEnumerable<System.Int32>.GetEnumerator"`, confirmado con `strings`
+sobre el DLL antes de asumir nada) — `ExplicitImplResolver` camina la
+tabla `MethodImpl` (spec §II.22.27, mismo patrón que `InterfaceImpl` de
+Fase 3.8) para encontrarlo.
+
+El fallback aplicado sin más expuso una recursión infinita real: un
+constructor de excepción propia encadenando `: base(message)` (un `call`
+plano, no `newobj` — solo el tipo exacto se `newobj`ea) se redirigía a sí
+mismo, agotando la pila. Causa raíz: el fallback nunca debía aplicar a un
+`call` no-virtual, solo a `callvirt` — arreglado propagando el flag
+`Virtual` (ya existente en la IR, nunca antes threaded hasta
+`Machine.call`) y condicionando el fallback a él. Arreglar esto de fondo
+reveló que `System.Exception::.ctor` nunca había resuelto para una
+subclase propia del plugin en absoluto (mismo patrón "solo newobj estaba
+cubierto" que ya había mordido a DateTime/Nullable`1`), y que una vez
+resuelto, el nombre de tipo quedaba pegado al tipo *base* en vez del
+derivado real, y que el matching de `catch` no caminaba la jerarquía real
+del plugin — los tres arreglados en cadena (base-ctor chaining registrado
+también como `call` plano; `TypeName` tomado del `Obj.Type` real del
+receptor; `nativeMatches` — ahora método de `Machine` — alternando entre
+el mapa fijo de excepciones BCL y el `BaseTypeFullName` real del plugin
+en la misma caminata).
+
+El paquete de wins baratos (medido, no adivinado) suma `String`
+(`IsNullOrEmpty`/`Split`/`StartsWith`/`IndexOf`/`Replace`/`Trim`/...),
+`Char` (`IsUpper`/`IsDigit`/`ToString`/...), `Int32.ToString`, extras de
+`List<T>`/`Dictionary<K,V>` (`set_Item`/`ToArray`/`AddRange`/`Contains`/
+`TryGetValue`), y confirma que `Nullable`1::.ctor` necesitaba el mismo
+fix de "asignación directa a un local" (`ldloca`+`call .ctor` sin
+`newobj`) que `DateTime` en Fase 3.12. Certificación: promedio de los 7
+paquetes sube de 76.3% a 79.0% (76.9% a 79.4% con Jint) — movimiento
+sólido y repartido, sin un salto dominante único.
+Con 79.4% el criterio de cierre firme de 85% todavía no se alcanza; el
+hallazgo más ancho restante es reflection-lite (`ldtoken`/`GetType`/
+`Type`, 5-6/8), candidato natural para la próxima sub-fase.

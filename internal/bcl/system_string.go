@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/arturoeanton/go-vmnet/internal/runtime"
 )
@@ -22,7 +23,17 @@ func init() {
 	// one native backs all three.
 	register("System.String::Equals", true, stringEquals)
 	register("System.String::op_Equality", true, stringEquals)
+	register("System.String::op_Inequality", true, stringNotEquals)
 	register("System.String::Join", true, stringJoin)
+	register("System.String::IsNullOrEmpty", true, stringIsNullOrEmpty)
+	register("System.String::IsNullOrWhiteSpace", true, stringIsNullOrWhiteSpace)
+	register("System.String::StartsWith", true, stringStartsWith)
+	register("System.String::IndexOf", true, stringIndexOf)
+	register("System.String::LastIndexOf", true, stringLastIndexOf)
+	register("System.String::Split", true, stringSplit)
+	register("System.String::ToCharArray", true, stringToCharArray)
+	register("System.String::Replace", true, stringReplace)
+	register("System.String::Trim", true, stringTrim)
 }
 
 // stringJoin backs every String.Join overload: the params-array shape
@@ -91,6 +102,215 @@ func stringEquals(args []runtime.Value) (runtime.Value, error) {
 		return runtime.Value{}, fmt.Errorf("bcl: System.String.Equals expects 2 string arguments")
 	}
 	return runtime.Bool(a.Str == b.Str), nil
+}
+
+func stringNotEquals(args []runtime.Value) (runtime.Value, error) {
+	v, err := stringEquals(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	return runtime.Bool(!v.Truthy()), nil
+}
+
+func stringIsNullOrEmpty(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.IsNullOrEmpty expects 1 argument")
+	}
+	return runtime.Bool(args[0].Kind == runtime.KindNull || args[0].Str == ""), nil
+}
+
+func stringIsNullOrWhiteSpace(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.IsNullOrWhiteSpace expects 1 argument")
+	}
+	return runtime.Bool(args[0].Kind == runtime.KindNull || strings.TrimSpace(args[0].Str) == ""), nil
+}
+
+// stringStartsWith ignores a trailing StringComparison argument (ordinal
+// comparison is all vmnet models — no culture support, same limitation
+// documented for CultureInfo since Fase 3.6).
+func stringStartsWith(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 2 || args[0].Kind != runtime.KindString || args[1].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.StartsWith expects a string argument")
+	}
+	return runtime.Bool(strings.HasPrefix(args[0].Str, args[1].Str)), nil
+}
+
+// stringIndexOf/stringLastIndexOf work in rune positions, consistent with
+// every other index vmnet exposes over a string (Substring, get_Chars) —
+// not real UTF-16 code-unit positions, a documented simplification.
+func stringIndexOf(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 2 || args[0].Kind != runtime.KindString || args[1].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.IndexOf expects a string argument")
+	}
+	runes := []rune(args[0].Str)
+	needle := []rune(args[1].Str)
+	start := 0
+	if len(args) >= 3 && args[2].Kind == runtime.KindI4 {
+		start = int(args[2].I4)
+	}
+	if start < 0 || start > len(runes) {
+		return runtime.Value{}, &runtime.ManagedException{TypeName: "System.ArgumentOutOfRangeException", Message: "IndexOf start index out of range"}
+	}
+	for i := start; i+len(needle) <= len(runes); i++ {
+		if runesEqual(runes[i:i+len(needle)], needle) {
+			return runtime.Int32(int32(i)), nil
+		}
+	}
+	return runtime.Int32(-1), nil
+}
+
+func stringLastIndexOf(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 2 || args[0].Kind != runtime.KindString || args[1].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.LastIndexOf expects a string argument")
+	}
+	runes := []rune(args[0].Str)
+	needle := []rune(args[1].Str)
+	for i := len(runes) - len(needle); i >= 0; i-- {
+		if runesEqual(runes[i:i+len(needle)], needle) {
+			return runtime.Int32(int32(i)), nil
+		}
+	}
+	return runtime.Int32(-1), nil
+}
+
+func runesEqual(a, b []rune) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// stringSplit backs every Split overload vmnet is likely to see: a
+// char[]/string[] separator array (empty or absent means "split on
+// whitespace", matching real Split(null)'s documented behavior), plus an
+// optional trailing StringSplitOptions/count argument — only
+// RemoveEmptyEntries (a nonzero int among the trailing args) is honored,
+// a max-count limit is not.
+func stringSplit(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 || args[0].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.Split expects a string receiver")
+	}
+	var seps []string
+	if len(args) >= 2 && args[1].Kind == runtime.KindArray && args[1].Arr != nil {
+		for _, e := range args[1].Arr.Elems {
+			switch e.Kind {
+			case runtime.KindI4:
+				seps = append(seps, string(rune(e.I4)))
+			case runtime.KindString:
+				if e.Str != "" {
+					seps = append(seps, e.Str)
+				}
+			}
+		}
+	}
+	removeEmpty := false
+	if len(args) > 2 {
+		for _, a := range args[2:] {
+			if a.Kind == runtime.KindI4 && a.I4 != 0 {
+				removeEmpty = true
+			}
+		}
+	}
+
+	isSep := func(r rune) bool {
+		if len(seps) == 0 {
+			return unicode.IsSpace(r)
+		}
+		for _, sep := range seps {
+			if []rune(sep)[0] == r && len([]rune(sep)) == 1 {
+				return true
+			}
+		}
+		return false
+	}
+
+	var parts []string
+	var cur strings.Builder
+	for _, r := range args[0].Str {
+		if isSep(r) {
+			parts = append(parts, cur.String())
+			cur.Reset()
+		} else {
+			cur.WriteRune(r)
+		}
+	}
+	parts = append(parts, cur.String())
+
+	if removeEmpty {
+		filtered := parts[:0]
+		for _, p := range parts {
+			if p != "" {
+				filtered = append(filtered, p)
+			}
+		}
+		parts = filtered
+	}
+
+	elems := make([]runtime.Value, len(parts))
+	for i, p := range parts {
+		elems[i] = runtime.String(p)
+	}
+	return runtime.ArrRef(&runtime.Array{Elems: elems}), nil
+}
+
+func stringToCharArray(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 || args[0].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.ToCharArray expects a string receiver")
+	}
+	runes := []rune(args[0].Str)
+	elems := make([]runtime.Value, len(runes))
+	for i, r := range runes {
+		elems[i] = runtime.Int32(r)
+	}
+	return runtime.ArrRef(&runtime.Array{Elems: elems}), nil
+}
+
+// stringReplace covers both Replace(string,string) and Replace(char,char)
+// — the compiler picks the char overload for single-quoted literals.
+func stringReplace(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 3 || args[0].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.Replace expects a string receiver and 2 arguments")
+	}
+	oldArg, newArg := args[1], args[2]
+	toStr := func(v runtime.Value) (string, bool) {
+		switch v.Kind {
+		case runtime.KindString:
+			return v.Str, true
+		case runtime.KindI4:
+			return string(rune(v.I4)), true
+		default:
+			return "", false
+		}
+	}
+	oldStr, ok1 := toStr(oldArg)
+	newStr, ok2 := toStr(newArg)
+	if !ok1 || !ok2 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.Replace: unsupported argument kind")
+	}
+	return runtime.String(strings.ReplaceAll(args[0].Str, oldStr, newStr)), nil
+}
+
+// stringTrim covers both Trim() and Trim(params char[]).
+func stringTrim(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 || args[0].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.Trim expects a string receiver")
+	}
+	if len(args) >= 2 && args[1].Kind == runtime.KindArray && args[1].Arr != nil && len(args[1].Arr.Elems) > 0 {
+		var cutset []rune
+		for _, e := range args[1].Arr.Elems {
+			if e.Kind == runtime.KindI4 {
+				cutset = append(cutset, rune(e.I4))
+			}
+		}
+		return runtime.String(strings.Trim(args[0].Str, string(cutset))), nil
+	}
+	return runtime.String(strings.TrimSpace(args[0].Str)), nil
 }
 
 func stringSubstring(args []runtime.Value) (runtime.Value, error) {

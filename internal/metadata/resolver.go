@@ -229,6 +229,48 @@ func (md *Metadata) InterfaceImpls(typeRID uint32) ([]Token, error) {
 	return out, nil
 }
 
+// MethodImplRow is one explicit interface implementation (spec
+// §II.22.27): Class overrides/implements MethodDeclaration (a method on a
+// base class or, overwhelmingly the common case in practice, an
+// interface) via its own MethodBody. The C# compiler emits this whenever
+// a class implements an interface method under a different name than the
+// interface declares it — always true for one of a pair when a class
+// implements both IEnumerable.GetEnumerator (non-generic) and
+// IEnumerable<T>.GetEnumerator (generic), since they can't both be a
+// plain "GetEnumerator" method (same name, return types alone don't
+// overload); the compiler-generated `yield return` state machine is the
+// single most common real-world source of this (Fase 3.13).
+type MethodImplRow struct {
+	MethodBody        Token
+	MethodDeclaration Token
+}
+
+// MethodImpls returns every MethodImpl row owned by TypeDef typeRID.
+// Class is a simple (uncoded) index — compared directly, same pattern as
+// InterfaceImpls above.
+func (md *Metadata) MethodImpls(typeRID uint32) ([]MethodImplRow, error) {
+	t := md.tables[TableMethodImpl]
+	if t == nil {
+		return nil, nil
+	}
+	var out []MethodImplRow
+	for i := uint32(0); i < t.rowCount; i++ {
+		if t.col(i, 0) != typeRID {
+			continue
+		}
+		body, err := decodeCodedIndex(codedMethodDefOrRef, t.col(i, 1))
+		if err != nil {
+			return nil, err
+		}
+		decl, err := decodeCodedIndex(codedMethodDefOrRef, t.col(i, 2))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, MethodImplRow{MethodBody: body, MethodDeclaration: decl})
+	}
+	return out, nil
+}
+
 // FieldDefOwner finds which TypeDef owns Field fieldRID, scanning TypeDef
 // field ranges (TypeDefFieldRange).
 func (md *Metadata) FieldDefOwner(fieldRID uint32) (typeRID uint32, err error) {

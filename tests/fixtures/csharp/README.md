@@ -34,3 +34,6 @@ Output: `tests/fixtures/csharp/bin/Release/netstandard2.0/Vmnet.Fixtures.dll`
 | `TryCatch.cs` | `TryCatch` | real `try`/`catch`/`finally` (catch by type/base type, nested finally, rethrow) | Fase 3.10 |
 | `Foreach.cs` | `ForeachTest` | `foreach` over `List<T>`/`Dictionary<K,V>`, `EqualityComparer<T>.Default`, `Math.Min`/`Max`, `String.Join` | Fase 3.11 |
 | `DateTimeSpan.cs` | `DateTimeSpanTest` | `System.DateTime` (ctor, calendar math, `CompareTo`), `Span<T>`/`ReadOnlySpan<T>` (`AsSpan`, `Slice`, ref-returning indexer read/write, `ToString`) | Fase 3.12 |
+| `InterfaceForeach.cs` | `InterfaceForeachTest` | `foreach` over a collection through an interface-typed reference (`IEnumerable<T>`) — a `List<T>` and a compiler-generated `yield return` iterator (explicit interface implementation) | Fase 3.13 |
+| `CheapWins.cs` | `CheapWins` | `String`/`Char` predicates and helpers (`IsNullOrEmpty`, `Split`, `StartsWith`, `IndexOf`, `Replace`, `Trim`, `IsUpper`, `IsDigit`, ...), `Int32.ToString`, `List<T>`/`Dictionary<K,V>` extras (`set_Item`, `ToArray`, `AddRange`, `Contains`, `TryGetValue`) | Fase 3.13 |
+| `TryCatch.cs` (`CustomException`/`CustomExceptionTest`) | `CustomExceptionTest` | a plugin-declared exception subclass: base-constructor chaining (`: base(message)`), catch by exact subtype and by real base type | Fase 3.13 |

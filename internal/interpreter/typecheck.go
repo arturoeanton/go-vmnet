@@ -1,6 +1,11 @@
 package interpreter
 
-import "github.com/arturoeanton/go-vmnet/internal/runtime"
+import (
+	"strings"
+
+	"github.com/arturoeanton/go-vmnet/internal/bcl"
+	"github.com/arturoeanton/go-vmnet/internal/runtime"
+)
 
 // isAssignableTo implements isinst/castclass's real type check (Fase
 // 3.8): does v's runtime type equal, or derive from (class inheritance),
@@ -53,7 +58,7 @@ func (m *Machine) isAssignableTo(v runtime.Value, target string) bool {
 		if v.Obj.Type != nil {
 			return m.typeMatches(v.Obj.Type, target)
 		}
-		return nativeMatches(v.Obj.Native, target)
+		return m.nativeMatches(v.Obj.Native, target)
 	default:
 		return false
 	}
@@ -100,6 +105,51 @@ func fullTypeName(t *runtime.Type) string {
 	return t.Namespace + "." + t.Name
 }
 
+// receiverTypeName returns v's concrete BCL/plugin type full name, if
+// determinable — the single piece of type identity the interface-call
+// fallback (calls.go, Fase 3.13) needs. A struct receiver (foreach's own
+// enumerator structs from Fase 3.7/3.11, possibly still boxed as a
+// managed pointer from `ldloca`) and a plugin-class object both already
+// carry a real *runtime.Type; a native-backed BCL object (List<T>,
+// Dictionary<K,V>, ...) has none, so bcl.NativeTypeName supplies the
+// same hand-maintained name its own register() calls use.
+func receiverTypeName(v runtime.Value) (string, bool) {
+	if v.Kind == runtime.KindRef && v.Ref != nil {
+		v = *v.Ref
+	}
+	switch v.Kind {
+	case runtime.KindStruct:
+		if v.Struct == nil || v.Struct.Type == nil {
+			return "", false
+		}
+		return fullTypeName(v.Struct.Type), true
+	case runtime.KindObject:
+		if v.Obj == nil {
+			return "", false
+		}
+		if v.Obj.Type != nil {
+			return fullTypeName(v.Obj.Type), true
+		}
+		return bcl.NativeTypeName(v.Obj.Native)
+	default:
+		return "", false
+	}
+}
+
+// splitCallName splits a "Namespace.Type::Method" full name into its
+// class and method parts, so the interface-call fallback can rebuild the
+// same call against the receiver's concrete type name instead of the
+// declared interface it was compiled against, and — if that plain name
+// doesn't resolve either — ask ExplicitImplResolver about the original
+// declared (class, method) pair.
+func splitCallName(fullName string) (class, method string, ok bool) {
+	idx := strings.LastIndex(fullName, "::")
+	if idx < 0 {
+		return "", "", false
+	}
+	return fullName[:idx], fullName[idx+2:], true
+}
+
 // exceptionBaseType is a small, hand-maintained slice of the real .NET
 // exception hierarchy, covering exactly the exception types vmnet
 // registers native constructors for (internal/bcl/system_exception.go) —
@@ -117,13 +167,23 @@ var exceptionBaseType = map[string]string{
 }
 
 // nativeMatches handles isinst/castclass against a native-backed
-// KindObject (Obj.Type == nil): a *runtime.ManagedException walks the
-// hand-maintained exception hierarchy above; anything else
-// (List/Dictionary/StringBuilder) has no interface modeling yet — a
-// documented gap (docs/ROADMAP.md Fase 3.8), not a silent wrong answer,
-// since it only ever returns false (isinst -> null, castclass -> throws),
-// never a false positive.
-func nativeMatches(native any, target string) bool {
+// KindObject (Obj.Type == nil): a *runtime.ManagedException walks up its
+// type chain one step at a time, alternating between two sources as
+// needed — the hand-maintained BCL exception hierarchy above, and (Fase
+// 3.13) a plugin's own exception subclass's real TypeDef.BaseTypeFullName
+// once base-constructor chaining lets one exist at all (see
+// baseExceptionCtorInPlace, internal/bcl/system_exception.go, which sets
+// TypeName to the real most-derived plugin type name, e.g.
+// "Vmnet.Fixtures.MyException", not the fixed BCL base name it's
+// registered under) — so `catch (MyException e)` matches immediately on
+// the exact name, and `catch (Exception e)` still matches too, by
+// resolving MyException's own TypeDef and following its base chain back
+// into the hand-maintained map once it reaches a real BCL name.
+// Anything else (List/Dictionary/StringBuilder) has no interface
+// modeling yet — a documented gap (docs/ROADMAP.md Fase 3.8), not a
+// silent wrong answer, since it only ever returns false (isinst -> null,
+// castclass -> throws), never a false positive.
+func (m *Machine) nativeMatches(native any, target string) bool {
 	ex, ok := native.(*runtime.ManagedException)
 	if !ok {
 		return false
@@ -133,7 +193,18 @@ func nativeMatches(native any, target string) bool {
 		if name == target {
 			return true
 		}
-		name = exceptionBaseType[name]
+		if next, ok := exceptionBaseType[name]; ok {
+			name = next
+			continue
+		}
+		if m.ResolveType == nil {
+			return false
+		}
+		t, err := m.ResolveType(name)
+		if err != nil {
+			return false
+		}
+		name = t.BaseTypeFullName
 	}
 	return false
 }

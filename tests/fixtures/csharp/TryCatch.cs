@@ -137,4 +137,42 @@ namespace Vmnet.Fixtures
             }
         }
     }
+
+    // Fase 3.13 addition: a plugin's own exception subclass, chaining to
+    // its base via `: base(message)` — a plain (non-virtual) `call
+    // System.Exception::.ctor(this, message)`, not `newobj` (only the
+    // exact BCL type gets newobj'd for a native exception ctor).
+    public class CustomException : Exception
+    {
+        public CustomException(string message) : base(message) { }
+    }
+
+    public static class CustomExceptionTest
+    {
+        public static string CatchExact()
+        {
+            try
+            {
+                throw new CustomException("custom-boom");
+            }
+            catch (CustomException e)
+            {
+                return "exact:" + e.Message;
+            }
+        }
+
+        // catch (Exception e) must also match a thrown CustomException —
+        // real base-class walk, not just the exact declared catch type.
+        public static string CatchBase()
+        {
+            try
+            {
+                throw new CustomException("custom-boom-2");
+            }
+            catch (Exception e)
+            {
+                return "base:" + e.Message;
+            }
+        }
+    }
 }

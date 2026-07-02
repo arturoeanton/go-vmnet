@@ -78,6 +78,85 @@ func (asm *Assembly) resolveByFullName(fullName string) (*runtime.Method, error)
 	return asm.buildMethod(methodRID, row)
 }
 
+// resolveExplicitImpl implements interpreter.ExplicitImplResolver (Fase
+// 3.13): given a concrete type ("Namespace.Type", already known at the
+// call site to be the receiver's real runtime type — see
+// receiverTypeName in internal/interpreter/typecheck.go) and an
+// interface method it was actually called through
+// (interfaceFullName+methodName, e.g.
+// "System.Collections.Generic.IEnumerable`1"+"GetEnumerator"), finds the
+// real method name that implements it, if the class implements that
+// interface method *explicitly* — a mangled name like
+// "System.Collections.Generic.IEnumerable<System.Int32>.GetEnumerator"
+// rather than a plain "GetEnumerator", which is exactly what the C#
+// compiler emits for a `yield return` iterator's state machine (it needs
+// both the generic and non-generic GetEnumerator/Current, which can't
+// both be a same-named method). Ordinary (non-explicit) interface
+// implementations need no help here — plain isLocalMethod/Resolve by
+// concrete-type-plus-method-name already finds those directly.
+func (asm *Assembly) resolveExplicitImpl(concreteTypeFullName, interfaceFullName, methodName string) (string, bool) {
+	namespace, name := splitTypeName(concreteTypeFullName)
+	typeRID, _, err := asm.md.FindTypeDef(namespace, name)
+	if err != nil {
+		return "", false
+	}
+	impls, err := asm.md.MethodImpls(typeRID)
+	if err != nil {
+		return "", false
+	}
+	for _, impl := range impls {
+		declClass, declMethod, err := resolveMethodDefOrRefName(asm.md, impl.MethodDeclaration)
+		if err != nil || declMethod != methodName || declClass != interfaceFullName {
+			continue
+		}
+		_, bodyMethod, err := resolveMethodDefOrRefName(asm.md, impl.MethodBody)
+		if err != nil {
+			continue
+		}
+		return bodyMethod, true
+	}
+	return "", false
+}
+
+// resolveMethodDefOrRefName resolves a MethodDefOrRef-coded token (spec
+// §II.24.2.6) to its owning type's full name and its own method name —
+// used only by resolveExplicitImpl above, which needs both halves of a
+// MethodImpl row's tokens (almost always MemberRefs pointing at an
+// interface, sometimes a TypeSpec-instantiated generic interface like
+// IEnumerable<int>, which resolveTypeTokenName already collapses back to
+// its open form "IEnumerable`1" the same way every other call-target
+// resolution in this file does).
+func resolveMethodDefOrRefName(md *metadata.Metadata, tok metadata.Token) (className, methodName string, err error) {
+	switch tok.Table() {
+	case metadata.TableMethodDef:
+		row, err := md.MethodDef(tok.RID())
+		if err != nil {
+			return "", "", err
+		}
+		ownerRID, err := md.MethodDefOwner(tok.RID())
+		if err != nil {
+			return "", "", err
+		}
+		owner, err := md.TypeDef(ownerRID)
+		if err != nil {
+			return "", "", err
+		}
+		return qualify(owner.Namespace, owner.Name), row.Name, nil
+	case metadata.TableMemberRef:
+		row, err := md.MemberRef(tok.RID())
+		if err != nil {
+			return "", "", err
+		}
+		className, err := resolveTypeTokenName(md, row.Class)
+		if err != nil {
+			return "", "", err
+		}
+		return className, row.Name, nil
+	default:
+		return "", "", fmt.Errorf("vmnet: unsupported MethodDefOrRef token table %#x", byte(tok.Table()))
+	}
+}
+
 // buildMethod resolves a MethodDef row all the way down to executable IR:
 // signature, method body bytes (via RVA), IL decode and IR lowering. The
 // result is cached by full name.

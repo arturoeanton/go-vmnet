@@ -668,6 +668,7 @@ corrió el mismo probe de findings-por-opcode/BCL, ahora incluyendo Jint, contra
 | **3.10** | `try`/`catch`/`finally` (`leave`/`leave.s`/`endfinally`) | 8/8 paquetes; hoy solo existe throw no manejado |
 | **3.11** | `foreach`/enumeradores + wins baratos (re-priorizado con datos — ver sección) | El probe mostró `IDisposable::Dispose`/`IEnumerator`1`/`EqualityComparer`1` en 7-8/8 paquetes, más ancho que DateTime/Span (2-5/8) |
 | **3.12** | `DateTime`, `Span<T>`/`ReadOnlySpan<T>`/`Memory<T>`/`ReadOnlyMemory<T>` | Impacto grande pero concentrado (principalmente Humanizer.Core/SimpleBase/System.Text.Json) |
+| **3.13** | `foreach` sobre colección tipada como interfaz (despacho por tipo real del receptor) + paquete de wins baratos (`String`/`Char`/`List`/`Dictionary`) | `IEnumerable`1::GetEnumerator`/`IEnumerator`1::get_Current`/`IEnumerator::MoveNext` eran el hallazgo más ancho (7/8) tras Fase 3.12 |
 | **3.x** | Re-medición final, cierre de brecha restante hacia 85%, validación literal del demo Jint | Confirma el número Y que el escenario concreto corre, no solo el promedio |
 
 ### Fase 3.6 — `switch` + BCL barata de alto alcance
@@ -1335,6 +1336,166 @@ queda una Fase 3.x adicional antes de poder cerrar Fase 3.6+ y pasar a Fase 4.
 ```bash
 go test ./... -race -count=3
 go test ./ -run TestDateTimeSpan -v
+```
+
+### Fase 3.13 — `foreach` sobre interfaz (despacho por tipo real) + paquete de wins baratos
+
+Con el mismo probe de findings-por-target de siempre, corrido de nuevo tras Fase 3.12: los tres
+hallazgos más anchos del proyecto entero eran `System.Collections.IEnumerator::MoveNext` (7/8),
+`IEnumerator`1::get_Current` (7/8) e `IEnumerable`1::GetEnumerator` (7/8) — `foreach` sobre una
+colección tipada como interfaz (`IEnumerable<T> xs = list; foreach (x in xs)`), en vez de tipo
+concreto (`List<T> xs = ...`), exactamente lo que Fase 3.11 había dejado afuera explícitamente por
+necesitar "despacho virtual real, no solo isinst/castclass".
+
+**Tareas — despacho por interfaz**
+
+- [x] `Machine.call` gana un fallback (`internal/interpreter/calls.go`): cuando el nombre
+      declarado en el sitio de llamada (`"IEnumerable`1::GetEnumerator"`, baked in en tiempo de
+      compilación desde el `MemberRef` — vmnet no tiene vtable) no resuelve ni como native ni
+      como método interpretado, se reintenta una vez contra el **tipo concreto real del
+      receptor** (`receiverTypeName`, `internal/interpreter/typecheck.go`): el `Struct.Type`/
+      `Obj.Type` de la mayoría de los valores ya alcanza; para un `List<T>`/`Dictionary<K,V>`
+      nativo (sin `runtime.Type` propio, solo `Native`) se agregó `bcl.NativeTypeName` — mismo
+      patrón de despacho-por-Go-type que `nativeToString` (Fase 3.6). Esto cubre uniformemente
+      tanto colecciones BCL accedidas por interfaz como clases del propio plugin que implementan
+      una interfaz (una `IEnumerator` escrita a mano, un `IEquatable<T>` propio), sin registrar
+      nada extra por tipo.
+- [x] **Bug real encontrado y arreglado — recursión infinita en encadenamiento de constructores
+      base**: el fallback de arriba, aplicado sin condición, hacía que `MyException(string) :
+      base(message)` (un `call System.Exception::.ctor(this, msg)` — no `newobj`, ya que solo el
+      tipo *exacto* se `newobj`ea; una llamada de constructor base corre sobre el objeto ya
+      asignado del tipo *derivado*) redirigiera hacia el tipo concreto del receptor... que es el
+      propio tipo derivado en construcción, re-invocando su propio constructor y agotando la pila
+      (`interpreter: call depth exceeded`). La causa raíz: el fallback nunca debía aplicar a un
+      `call` plano (no-virtual) — solo `callvirt` necesita redespacho por tipo real; un `call`
+      nombra un target exacto a propósito (constructor base, método sellado/privado). Arreglado
+      agregando el flag `virtual bool` (ya existente en `ir.Call.Virtual`, nunca antes propagado
+      hasta `Machine.call`) y condicionando el fallback a `virtual == true`.
+- [x] `ExplicitImplResolver` (`internal/interpreter/calls.go`, implementado en
+      `assembly.go:resolveExplicitImpl`): un iterador `yield return` compila su
+      `GetEnumerator`/`Current` como **implementación explícita de interfaz** — un `MethodDef` con
+      nombre mangled (`"System.Collections.Generic.IEnumerable<System.Int32>.GetEnumerator"`, no
+      un simple `"GetEnumerator"`), confirmado con `strings` sobre el DLL real antes de asumir
+      nada. El fallback por nombre-plano de arriba no lo encuentra; se agregó
+      `metadata.MethodImpls` (mismo patrón que `InterfaceImpls` de Fase 3.8, tabla `MethodImpl`,
+      spec §II.22.27) para caminar las implementaciones explícitas del tipo concreto y encontrar
+      el nombre real detrás de la interfaz declarada.
+- [x] Checker (`internal/checker/analyzer.go`): `interfaceDispatchTargets`, un allowlist explícito
+      de los targets de interfaz que el runtime fallback resuelve — el checker es estático y no
+      puede saber el tipo concreto real de un receptor (necesitaría análisis de flujo de datos),
+      así que esto es "mejor esfuerzo", mismo espíritu que `isDelegateType`.
+
+**Tareas — corrección de excepciones personalizadas (encontrado al verificar el fix de arriba)**
+
+- [x] **Bug real encontrado y arreglado — `System.Exception::.ctor` nunca resolvía para una
+      subclase propia del plugin**: el mismo patrón de "solo `newobj` estaba cubierto" que ya
+      había mordido a `DateTime`/`Nullable`1` en fases anteriores, esta vez para el encadenamiento
+      de constructor base. Se registró `"System.Exception::.ctor"` (y cada excepción ya conocida)
+      también como `call` plano, mutando el objeto ya asignado (`Obj.Native = &ManagedException{
+      ...}`) — una excepción a la regla "Type xor Native" de `runtime.Object` documentada
+      explícitamente, necesaria porque `ir.Throw` exige `Obj.Native` en *cualquier* objeto
+      lanzado, plugin o no.
+- [x] **Bug real encontrado y arreglado — el nombre de tipo quedaba pegado al tipo base, no al
+      derivado real**: la primera versión seteaba `TypeName: "System.Exception"` (el nombre fijo
+      bajo el que el native está registrado), así que `catch (MyException e)` nunca matcheaba —
+      arreglado leyendo el `Obj.Type` real del receptor (el TypeDef del plugin) para el nombre.
+- [x] **Bug real encontrado y arreglado — `catch (Exception e)` no atrapaba una subclase
+      propia una vez arreglado lo anterior**: el matching de catch (`exceptionMatchesCatch`)
+      nunca miraba la jerarquía real de tipos del plugin — solo un mapa fijo `exceptionBaseType`
+      de nombres BCL conocidos. `nativeMatches` (ahora método de `Machine`, ya que necesita
+      `ResolveType`) camina una sola cadena alternando entre ambas fuentes: el mapa fijo cuando el
+      nombre es una excepción BCL conocida, o el `BaseTypeFullName` real del `TypeDef` del plugin
+      cuando no lo es — así `MyException -> System.Exception` (vía TypeDef real) empalma con
+      `System.Exception -> ...` (vía el mapa) en la misma caminata.
+
+**Tareas — paquete de wins baratos**
+
+- [x] `System.String`: `IsNullOrEmpty`, `IsNullOrWhiteSpace`, `StartsWith`, `IndexOf`/
+      `LastIndexOf` (en posiciones de rune, consistente con `Substring`/`get_Chars` ya
+      existentes), `Split` (separador `char[]`/`string[]`, vacío o ausente = espacio en blanco —
+      mismo comportamiento documentado que `Split(null)` real; `StringSplitOptions.
+      RemoveEmptyEntries` se honra, un límite de cantidad no), `ToCharArray`, `Replace` (cubre
+      `(string,string)` y `(char,char)`), `Trim`/`Trim(char[])`, `op_Inequality`.
+- [x] `System.Char` (`internal/bcl/system_char.go`, archivo nuevo): `IsUpper`/`IsLower`/`IsDigit`/
+      `IsLetter`/`IsLetterOrDigit`/`IsWhiteSpace`/`ToUpper`/`ToLower`/`ToString` — todos sobre un
+      `int32` plano (`char` no tiene su propio `Kind` en `runtime.Value`, spec §III.1.1).
+- [x] `System.Int32::ToString` (`internal/bcl/system_numeric.go`, archivo nuevo) — sin soporte de
+      format string (mismo límite ya documentado para `CultureInfo`).
+- [x] `List<T>`: `set_Item`, `ToArray`, `AddRange` (acepta otro `List<T>` o un array),
+      `Contains` (reusa `valuesEqual` de Fase 3.7). `Dictionary<K,V>::TryGetValue` (el parámetro
+      `out` usa el mismo mecanismo de puntero administrado que cualquier `ref`/`out` primitivo
+      desde Fase 3.5; en un miss escribe `Null()`, no un `default(TValue)` tipado — aproximación
+      documentada, vmnet no tiene el argumento de tipo genérico en este sitio de llamada).
+- [x] `ICollection`1::Add`/`get_Count` e `ICollection::get_Count` (no genérica) agregados al
+      allowlist del checker — el runtime ya los resolvía gratis vía el fallback de despacho por
+      interfaz de arriba, reusando los natives de `List`1::Add`/`get_Count` ya existentes; nada
+      nuevo que registrar.
+- [x] `Nullable`1::.ctor` como `call` plano además de `newobj`: `int? n = 42;` (asignación directa
+      a un local, sin ternario) compila `ldloca`+`call .ctor` directo sobre el local, confirmado
+      contra IL real antes de arreglar — el mismo patrón exacto que `DateTime` necesitó en Fase
+      3.12, encontrado esta vez por sospecha directa (mismo "shape" de bug) y confirmado empí-
+      ricamente, no asumido.
+
+**Fixtures y tests**
+
+- [x] `InterfaceForeach.cs` / `TestInterfaceForeach` — suma sobre un `List<int>` accedido vía
+      `IEnumerable<int>`, suma sobre un iterador `yield return` (implementación explícita de
+      interfaz)
+- [x] `TryCatch.cs` (`CustomException`/`CustomExceptionTest`) / `TestCustomException` — catch por
+      subtipo exacto y por tipo base real
+- [x] `Structs.cs` (`DirectNullableAssignTest`) — cubierto dentro de `TestStructs`
+- [x] `CheapWins.cs` / `TestCheapWins` — String/Char/Int32/List/Dictionary del paquete de arriba
+
+### Lo que se dejó explícitamente afuera de esta fase
+
+```txt
+- Reflection-lite más allá del stub de System.Type ya existente: `object.GetType()`,
+  `MemberInfo.get_Name`, `Type::op_Equality`/`IsAssignableFrom`/`get_FullName`, y el opcode
+  `ldtoken` (typeof(T)) — el segundo hallazgo más ancho tras esta fase (5/8, ldtoken 6/8), pero
+  es una superficie nueva (necesita un objeto System.Type real, no el stub actual) que merece su
+  propia sub-fase, no un agregado apurado a esta.
+- LINQ (System.Linq.Enumerable: Select/Any/Where/ToList/ToArray/FirstOrDefault/All) — viable
+  ahora que hay delegates (3.9) y enumeradores reales + despacho por interfaz (3.11/3.13), pero
+  es una superficie grande por sí sola — mismo candidato ya anotado como pendiente en Fase 3.11.
+- Regex (System.Text.RegularExpressions) — el motor de regex de Go es RE2 (sin backreferences,
+  sin lookaround), semánticamente distinto del motor de .NET; traducir sintaxis o limitar el
+  subconjunto soportado es una decisión de diseño propia, no un native de una línea.
+- Async/Task (AsyncTaskMethodBuilder) — fuera de alcance permanente, no solo de esta fase (spec
+  §3, "qué no es"; ya documentado en el registro de riesgos).
+- HashSet<T>, Stack<T>, ConcurrentDictionary<K,V>, TimeSpan, StringComparer — aparecieron en el
+  probe (4/8, volumen moderado) pero cada uno es una superficie nueva propia, no una extensión de
+  algo que ya existe (a diferencia de los métodos de List/Dictionary agregados en esta fase).
+- La colisión de nombres de tipos anidados para TypeDef propios del plugin (documentada como
+  riesgo preexistente desde Fase 3.11) sigue sin resolverse — no empeorada por esta fase.
+```
+
+### Re-certificación contra los mismos 8 targets (7 paquetes + Jint)
+
+| Paquete | % limpio Fase 3.12 | % limpio Fase 3.13 |
+|---|---|---|
+| `Ardalis.GuardClauses@5.0.0` | 91.2% | 93.0% |
+| `FluentValidation@11.9.2` | 78.9% | 82.0% |
+| `System.Text.Json@8.0.5` | 77.1% | 78.2% |
+| `Newtonsoft.Json@13.0.3` | 65.8% | 68.1% |
+| `Semver@2.3.0` | 78.0% | 82.7% |
+| `SimpleBase@4.0.0` | 60.5% | 60.9% |
+| `Humanizer.Core@2.14.1` | 82.4% | 87.9% |
+| **Promedio (7 paquetes)** | **76.3%** | **79.0%** |
+| `Jint@3.1.3` | 81.0% | 82.6% |
+| **Promedio (7 paquetes + Jint)** | **76.9%** | **79.4%** |
+
++2.7 puntos en los 7 paquetes (+2.5 con Jint) — movimiento sólido y bien repartido (todos los
+paquetes suben, ninguno un salto único dominante como Humanizer en 3.12), consistente con haber
+atacado tanto un hallazgo realmente ancho (despacho por interfaz, 7/8) como un paquete disperso de
+wins baratos de menor volumen individual. Con 79.4% (7 paquetes + Jint), el criterio de cierre
+firme de 85% **todavía no se alcanza** — el hallazgo más ancho que queda es reflection-lite
+(`ldtoken`/`GetType`/`Type`, 5-6/8), candidato natural para la próxima sub-fase.
+
+### Cómo verificar Fase 3.13
+
+```bash
+go test ./... -race -count=3
+go test ./ -run 'TestInterfaceForeach|TestCustomException|TestCheapWins' -v
 ```
 
 ---

@@ -11,9 +11,10 @@ import (
 // ResolveType supplies field layouts for anything that isn't a BCL native
 // (bcl.Lookup / bcl.LookupCtor).
 type Machine struct {
-	Resolve     Resolver
-	ResolveType TypeResolver
-	Limits      Limits
+	Resolve             Resolver
+	ResolveType         TypeResolver
+	ResolveExplicitImpl ExplicitImplResolver
+	Limits              Limits
 
 	// cctorsRunning tracks static constructors currently executing on
 	// this Machine's own call chain (a Machine is never shared across
@@ -26,6 +27,17 @@ type Machine struct {
 
 func New(resolve Resolver, resolveType TypeResolver, limits Limits) *Machine {
 	return &Machine{Resolve: resolve, ResolveType: resolveType, Limits: limits}
+}
+
+// WithExplicitImplResolver attaches an ExplicitImplResolver (Fase 3.13) to
+// an already-constructed Machine — a separate setter rather than a New
+// parameter so every existing caller (tests especially, see
+// internal/interpreter/*_test.go) keeps compiling unchanged; the explicit
+// interface impl fallback is a pure improvement that degrades to "no
+// match" (not an error) when unset.
+func (m *Machine) WithExplicitImplResolver(r ExplicitImplResolver) *Machine {
+	m.ResolveExplicitImpl = r
+	return m
 }
 
 // Invoke runs method with args and returns its result (the zero Value if
@@ -257,7 +269,7 @@ func (m *Machine) runFrame(frame *Frame, method *runtime.Method, depth int, inst
 			if in.HasThis && callArgs[0].Kind == runtime.KindFunc {
 				result, hasReturn, err = m.invokeFunc(callArgs[0].Func, callArgs[1:], depth, instrCount)
 			} else {
-				result, hasReturn, err = m.call(in.FullName, callArgs, depth, instrCount)
+				result, hasReturn, err = m.call(in.FullName, callArgs, in.Virtual, depth, instrCount)
 			}
 			if err != nil {
 				return runtime.Value{}, err

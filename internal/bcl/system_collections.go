@@ -60,6 +60,10 @@ func init() {
 	register("System.Collections.Generic.List`1::Add", false, listAdd)
 	register("System.Collections.Generic.List`1::get_Count", true, listCount)
 	register("System.Collections.Generic.List`1::get_Item", true, listGetItem)
+	register("System.Collections.Generic.List`1::set_Item", false, listSetItem)
+	register("System.Collections.Generic.List`1::ToArray", true, listToArray)
+	register("System.Collections.Generic.List`1::AddRange", false, listAddRange)
+	register("System.Collections.Generic.List`1::Contains", true, listContains)
 	register("System.Collections.Generic.List`1::GetEnumerator", true, listGetEnumerator)
 	register("System.Collections.Generic.List`1+Enumerator::MoveNext", true, listEnumeratorMoveNext)
 	register("System.Collections.Generic.List`1+Enumerator::get_Current", true, listEnumeratorGetCurrent)
@@ -71,6 +75,7 @@ func init() {
 	register("System.Collections.Generic.Dictionary`2::get_Item", true, dictGetItem)
 	register("System.Collections.Generic.Dictionary`2::set_Item", false, dictSetItem)
 	register("System.Collections.Generic.Dictionary`2::ContainsKey", true, dictContainsKey)
+	register("System.Collections.Generic.Dictionary`2::TryGetValue", true, dictTryGetValue)
 	register("System.Collections.Generic.Dictionary`2::get_Count", true, dictCount)
 	register("System.Collections.Generic.Dictionary`2::GetEnumerator", true, dictGetEnumerator)
 	register("System.Collections.Generic.Dictionary`2+Enumerator::MoveNext", true, dictEnumeratorMoveNext)
@@ -259,6 +264,74 @@ func listGetItem(args []runtime.Value) (runtime.Value, error) {
 	return l.items[idx], nil
 }
 
+func listSetItem(args []runtime.Value) (runtime.Value, error) {
+	l, err := asList(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	if len(args) != 3 || args[1].Kind != runtime.KindI4 {
+		return runtime.Value{}, fmt.Errorf("bcl: List indexer setter expects an int32 index")
+	}
+	idx := int(args[1].I4)
+	if idx < 0 || idx >= len(l.items) {
+		return runtime.Value{}, &runtime.ManagedException{TypeName: "System.ArgumentOutOfRangeException", Message: "Index was out of range."}
+	}
+	l.items[idx] = args[2]
+	return runtime.Value{}, nil
+}
+
+func listToArray(args []runtime.Value) (runtime.Value, error) {
+	l, err := asList(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	out := make([]runtime.Value, len(l.items))
+	copy(out, l.items)
+	return runtime.ArrRef(&runtime.Array{Elems: out}), nil
+}
+
+// listAddRange accepts either another List<T> (the common case) or a
+// plain array — mirroring stringJoin's same two-shape unwrapping for an
+// IEnumerable<T> argument.
+func listAddRange(args []runtime.Value) (runtime.Value, error) {
+	l, err := asList(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("bcl: List.AddRange expects 1 argument")
+	}
+	switch other := args[1]; other.Kind {
+	case runtime.KindArray:
+		if other.Arr != nil {
+			l.items = append(l.items, other.Arr.Elems...)
+		}
+	case runtime.KindObject:
+		if other.Obj != nil {
+			if ol, ok := other.Obj.Native.(*nativeList); ok {
+				l.items = append(l.items, ol.items...)
+			}
+		}
+	}
+	return runtime.Value{}, nil
+}
+
+func listContains(args []runtime.Value) (runtime.Value, error) {
+	l, err := asList(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("bcl: List.Contains expects 1 argument")
+	}
+	for _, item := range l.items {
+		if valuesEqual(item, args[1]) {
+			return runtime.Bool(true), nil
+		}
+	}
+	return runtime.Bool(false), nil
+}
+
 func asDict(args []runtime.Value) (*nativeDict, error) {
 	if len(args) == 0 || args[0].Kind != runtime.KindObject || args[0].Obj == nil {
 		return nil, fmt.Errorf("bcl: Dictionary method called without a receiver")
@@ -332,6 +405,31 @@ func dictContainsKey(args []runtime.Value) (runtime.Value, error) {
 		return runtime.Value{}, err
 	}
 	_, ok := d.m[key]
+	return runtime.Bool(ok), nil
+}
+
+// dictTryGetValue's out parameter arrives as a managed pointer (KindRef),
+// the same mechanism any `out`/`ref` primitive parameter already uses
+// (Fase 3.5's ByRef.cs). On a miss it writes Null() rather than a real
+// default(TValue) — vmnet has no generic type-argument info at this call
+// site to produce a typed zero value instead, a documented approximation.
+func dictTryGetValue(args []runtime.Value) (runtime.Value, error) {
+	d, err := asDict(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	key, err := dictKey(args, 1)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	if len(args) < 3 || args[2].Kind != runtime.KindRef || args[2].Ref == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: Dictionary.TryGetValue expects an out parameter")
+	}
+	v, ok := d.m[key]
+	if !ok {
+		v = runtime.Null()
+	}
+	*args[2].Ref = v
 	return runtime.Bool(ok), nil
 }
 

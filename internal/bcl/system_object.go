@@ -87,6 +87,30 @@ func nativeToString(native any) (string, bool) {
 	}
 }
 
+// NativeTypeName returns the BCL full type name of a native-backed
+// Object (List<T>, Dictionary<K,V>, StringBuilder, ...) — vmnet gives
+// these no *runtime.Type (they're backed by a plain Go struct in Native,
+// not fields), so unlike a plugin object or a synthetic value type there
+// is normally nothing to ask "what is your real type" at runtime. This
+// exists for exactly one caller: the interpreter's interface-call
+// fallback (Fase 3.13), which redirects a call site declared against an
+// interface (e.g. IEnumerable`1::GetEnumerator) to the receiver's actual
+// concrete type when the interface name itself has no native registered
+// — the names returned here must match the strings register() calls use
+// in system_collections.go/system_stringbuilder.go exactly.
+func NativeTypeName(native any) (string, bool) {
+	switch native.(type) {
+	case *nativeList:
+		return "System.Collections.Generic.List`1", true
+	case *nativeDict:
+		return "System.Collections.Generic.Dictionary`2", true
+	case *nativeStringBuilder:
+		return "System.Text.StringBuilder", true
+	default:
+		return "", false
+	}
+}
+
 // objectEquals/objectGetHashCode back Object::Equals/GetHashCode — the
 // other pair of virtual methods (besides ToString) the `constrained.`
 // prefix commonly precedes on a generic type parameter or value type

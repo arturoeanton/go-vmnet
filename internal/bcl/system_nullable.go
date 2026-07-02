@@ -1,6 +1,10 @@
 package bcl
 
-import "github.com/arturoeanton/go-vmnet/internal/runtime"
+import (
+	"fmt"
+
+	"github.com/arturoeanton/go-vmnet/internal/runtime"
+)
 
 // nullableType is Nullable`1's synthetic Type descriptor: no TypeDef
 // exists for it in a loaded assembly (it's a system-assembly value type),
@@ -18,6 +22,12 @@ var nullableType = runtime.NewValueType(
 func init() {
 	registerValueType(nullableType)
 	registerValueTypeCtor("System.Nullable`1", nullableCtor)
+	// `int? x = 5;` compiles as `ldloca`+`call .ctor` directly on the
+	// local's storage, not `newobj` (confirmed against real IL, Fase
+	// 3.13) — the same compiler optimization already needing its own
+	// entry point for System.DateTime (Fase 3.12) and plugin structs
+	// (Fase 3.7).
+	register("System.Nullable`1::.ctor", false, nullableCtorInPlace)
 	register("System.Nullable`1::get_HasValue", true, nullableGetHasValue)
 	register("System.Nullable`1::get_Value", true, nullableGetValue)
 	register("System.Nullable`1::GetValueOrDefault", true, nullableGetValueOrDefault)
@@ -30,6 +40,18 @@ func nullableCtor(args []runtime.Value) (*runtime.Struct, error) {
 		s.Fields[1] = args[0]
 	}
 	return s, nil
+}
+
+func nullableCtorInPlace(args []runtime.Value) (runtime.Value, error) {
+	if len(args) == 0 || args[0].Kind != runtime.KindRef || args[0].Ref == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: Nullable constructor called without a receiver")
+	}
+	s, err := nullableCtor(args[1:])
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	*args[0].Ref = runtime.StructVal(s)
+	return runtime.Value{}, nil
 }
 
 // asNullable unwraps a Nullable<T> receiver via derefStructReceiver

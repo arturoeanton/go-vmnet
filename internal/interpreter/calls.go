@@ -15,23 +15,93 @@ type Resolver func(fullName string) (*runtime.Method, error)
 // name, for newobj/ldfld/stfld.
 type TypeResolver func(fullName string) (*runtime.Type, error)
 
-func (m *Machine) call(fullName string, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, bool, error) {
-	if native, hasReturn, ok := bcl.Lookup(fullName); ok {
-		v, err := native(args)
+// ExplicitImplResolver finds the real method name a concrete type uses to
+// explicitly implement an interface method (Fase 3.13) — e.g. a `yield
+// return` iterator's compiler-generated class implements
+// IEnumerable`1::GetEnumerator not as a plain "GetEnumerator" method but
+// as "System.Collections.Generic.IEnumerable<System.Int32>.GetEnumerator"
+// (the mangled name explicit interface implementation requires), which a
+// plain concreteType+"::"+method lookup can never find. Returns ok=false
+// when the type implements the interface method under its plain name (or
+// doesn't implement it at all) — the ordinary receiverTypeName fallback
+// in Machine.call already covers that case.
+type ExplicitImplResolver func(concreteTypeFullName, interfaceFullName, methodName string) (implMethodName string, ok bool)
+
+// call dispatches fullName as either a BCL native or an interpreted
+// method. virtual must be true only for an actual `callvirt` site — the
+// interface/virtual-dispatch fallback below must never apply to a plain
+// `call` (a base-class constructor chaining via `base(...)`, a
+// non-virtual/sealed/private method, `newobj`'s own constructor
+// invocation): those name an exact target on purpose, and redirecting by
+// the receiver's concrete type would, for a constructor specifically,
+// just re-invoke the very constructor currently running — an infinite
+// recursion caught by a real example (a plugin exception subclass
+// chaining `: base(message)`) while building this fallback, not a
+// hypothetical edge case.
+func (m *Machine) call(fullName string, args []runtime.Value, virtual bool, depth int, instrCount *int64) (runtime.Value, bool, error) {
+	if v, hasReturn, err, found := m.tryCall(fullName, args, depth, instrCount); found {
 		return v, hasReturn, err
 	}
+
+	// Interface-typed call site fallback (Fase 3.13): fullName is baked in
+	// at compile time from the *declared* type of the call site (see
+	// resolveMemberRefClassName in internal/ir/builder.go) — for
+	// `IEnumerable<T> xs = list; foreach (var x in xs)` that's literally
+	// "System.Collections.Generic.IEnumerable`1::GetEnumerator", never the
+	// receiver's actual concrete type. vmnet has no vtable to dispatch a
+	// virtual/interface call through, so when the declared name resolves
+	// to nothing, retry once against the receiver's real concrete type
+	// instead. This covers both BCL collections accessed through an
+	// interface-typed local (List<T> called as IEnumerable<T>) and plugin
+	// classes implementing an interface explicitly (a hand-written
+	// IEnumerator, a custom IEquatable<T>, ...) uniformly, since both
+	// paths go through the same two lookups in tryCall.
+	if virtual && len(args) > 0 {
+		if concrete, ok := receiverTypeName(args[0]); ok {
+			if class, method, ok := splitCallName(fullName); ok {
+				if retryName := concrete + "::" + method; retryName != fullName {
+					if v, hasReturn, err, found := m.tryCall(retryName, args, depth, instrCount); found {
+						return v, hasReturn, err
+					}
+				}
+				// The plain name didn't resolve either — the concrete type
+				// may still implement the interface method, just under the
+				// mangled name explicit interface implementation requires
+				// (a `yield return` iterator's GetEnumerator/Current, most
+				// commonly). See ExplicitImplResolver's doc comment.
+				if m.ResolveExplicitImpl != nil {
+					if implMethod, ok := m.ResolveExplicitImpl(concrete, class, method); ok {
+						if v, hasReturn, err, found := m.tryCall(concrete+"::"+implMethod, args, depth, instrCount); found {
+							return v, hasReturn, err
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return runtime.Value{}, false, fmt.Errorf("interpreter: unsupported BCL method %q (no native registered)", fullName)
+}
+
+// tryCall attempts fullName as either a BCL native or an interpreted
+// method, reporting via found whether the name resolved at all — as
+// opposed to resolving but then failing at runtime (err), which the
+// caller must propagate rather than silently swallow into a fallback
+// retry.
+func (m *Machine) tryCall(fullName string, args []runtime.Value, depth int, instrCount *int64) (v runtime.Value, hasReturn bool, err error, found bool) {
+	if native, hr, ok := bcl.Lookup(fullName); ok {
+		v, err = native(args)
+		return v, hr, err, true
+	}
 	if m.Resolve == nil {
-		return runtime.Value{}, false, fmt.Errorf("interpreter: unsupported BCL method %q (no native registered)", fullName)
+		return runtime.Value{}, false, nil, false
 	}
-	method, err := m.Resolve(fullName)
-	if err != nil {
-		return runtime.Value{}, false, fmt.Errorf("interpreter: unsupported BCL method %q: %w", fullName, err)
+	method, rerr := m.Resolve(fullName)
+	if rerr != nil {
+		return runtime.Value{}, false, nil, false
 	}
-	v, err := m.invoke(method, args, depth+1, instrCount)
-	if err != nil {
-		return runtime.Value{}, false, err
-	}
-	return v, method.HasReturn, nil
+	v, err = m.invoke(method, args, depth+1, instrCount)
+	return v, method.HasReturn, err, true
 }
 
 // invokeFunc calls a delegate: fn's captured receiver (nil for a static
@@ -46,7 +116,11 @@ func (m *Machine) invokeFunc(fn *runtime.Func, args []runtime.Value, depth int, 
 	if fn.Receiver != nil {
 		callArgs = append([]runtime.Value{*fn.Receiver}, args...)
 	}
-	return m.call(fn.FullName, callArgs, depth, instrCount)
+	// fn.FullName is already the exact bound target (resolved at ldftn
+	// time, Fase 3.9) — never a declared-interface name needing
+	// redirection, so this is never a candidate for the virtual-dispatch
+	// fallback either.
+	return m.call(fn.FullName, callArgs, false, depth, instrCount)
 }
 
 // newObj implements the ir.NewObj instruction: allocate (native value
@@ -96,7 +170,7 @@ func (m *Machine) newObj(in newObjArgs, depth int, instrCount *int64) (runtime.V
 		ctorArgs := make([]runtime.Value, 0, len(in.Args)+1)
 		ctorArgs = append(ctorArgs, runtime.RefTo(&objVal))
 		ctorArgs = append(ctorArgs, in.Args...)
-		if _, _, err := m.call(in.CtorFullName, ctorArgs, depth, instrCount); err != nil {
+		if _, _, err := m.call(in.CtorFullName, ctorArgs, false, depth, instrCount); err != nil {
 			return runtime.Value{}, err
 		}
 		return objVal, nil
@@ -110,7 +184,7 @@ func (m *Machine) newObj(in newObjArgs, depth int, instrCount *int64) (runtime.V
 	ctorArgs := make([]runtime.Value, 0, len(in.Args)+1)
 	ctorArgs = append(ctorArgs, objVal)
 	ctorArgs = append(ctorArgs, in.Args...)
-	if _, _, err := m.call(in.CtorFullName, ctorArgs, depth, instrCount); err != nil {
+	if _, _, err := m.call(in.CtorFullName, ctorArgs, false, depth, instrCount); err != nil {
 		return runtime.Value{}, err
 	}
 	return objVal, nil
