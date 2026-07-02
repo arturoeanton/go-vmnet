@@ -299,6 +299,128 @@ func TestSwitch(t *testing.T) {
 	}
 }
 
+// TestStructs exercises value types (Fase 3.7): a struct constructed
+// in-place via `ldloca` + `call .ctor` with no preceding `initobj` at all
+// (relying on locals starting pre-zeroed — runtime.Method.LocalDefaults),
+// `Point p = default;` (an explicit `initobj`), copy-on-assignment
+// semantics (mutating a copy must not affect the original), and
+// `constrained.` dispatching `item.ToString()` on a generic type
+// parameter bound to a struct.
+func TestStructs(t *testing.T) {
+	asm := loadFixture(t)
+
+	t.Run("construct in place", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.Structs", "CreateAndSum")
+		if err != nil {
+			t.Fatalf("CreateAndSum() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 7 {
+			t.Errorf("CreateAndSum() = %d, want 7", got)
+		}
+	})
+
+	t.Run("default is zeroed", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.Structs", "DefaultIsZero")
+		if err != nil {
+			t.Fatalf("DefaultIsZero() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 0 {
+			t.Errorf("DefaultIsZero() = %d, want 0", got)
+		}
+	})
+
+	t.Run("copy semantics", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.Structs", "CopySemantics")
+		if err != nil {
+			t.Fatalf("CopySemantics() error = %v", err)
+		}
+		// a=(1,1) untouched -> 2; b=(1,1) scaled by 10 -> (10,10) -> 20.
+		if got := out.Native().(int32); got != 220 {
+			t.Errorf("CopySemantics() = %d, want 220 (mutating the copy leaked into the original)", got)
+		}
+	})
+
+	t.Run("constrained. dispatches ToString on a generic struct param", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.Structs", "DescribePoint")
+		if err != nil {
+			t.Fatalf("DescribePoint() error = %v", err)
+		}
+		if got := out.Native().(string); got != "<Point>" {
+			t.Errorf("DescribePoint() = %q, want %q", got, "<Point>")
+		}
+	})
+
+	t.Run("Nullable<T>", func(t *testing.T) {
+		hasValue, err := asm.Call("Vmnet.Fixtures.Structs", "HasValueTest", Int32(1), Int32(5))
+		if err != nil {
+			t.Fatalf("HasValueTest(true, 5) error = %v", err)
+		}
+		if got := hasValue.Native().(int32); got == 0 {
+			t.Errorf("HasValueTest(true, 5) = %d, want nonzero", got)
+		}
+
+		noValue, err := asm.Call("Vmnet.Fixtures.Structs", "HasValueTest", Int32(0), Int32(5))
+		if err != nil {
+			t.Fatalf("HasValueTest(false, 5) error = %v", err)
+		}
+		if got := noValue.Native().(int32); got != 0 {
+			t.Errorf("HasValueTest(false, 5) = %d, want 0", got)
+		}
+
+		got, err := asm.Call("Vmnet.Fixtures.Structs", "GetValueOrDefaultTest", Int32(1), Int32(42))
+		if err != nil {
+			t.Fatalf("GetValueOrDefaultTest(true, 42) error = %v", err)
+		}
+		if v := got.Native().(int32); v != 42 {
+			t.Errorf("GetValueOrDefaultTest(true, 42) = %d, want 42", v)
+		}
+
+		gotDefault, err := asm.Call("Vmnet.Fixtures.Structs", "GetValueOrDefaultTest", Int32(0), Int32(42))
+		if err != nil {
+			t.Fatalf("GetValueOrDefaultTest(false, 42) error = %v", err)
+		}
+		if v := gotDefault.Native().(int32); v != 0 {
+			t.Errorf("GetValueOrDefaultTest(false, 42) = %d, want 0", v)
+		}
+	})
+}
+
+// TestStructsConcurrentResolve races many goroutines to resolve a
+// struct-typed type (Point) for the first time on the same Assembly —
+// the scenario resolveTypeByFullName's Fase 3.7 redesign exists for (it
+// no longer holds cacheMu across the whole build, to avoid a deadlock
+// when a struct field/local recursively resolves another type — see its
+// doc comment in assembly.go). Run with -race: must neither deadlock nor
+// report a data race, and every goroutine must get a correct result
+// regardless of which one "wins" the race to populate the cache.
+func TestStructsConcurrentResolve(t *testing.T) {
+	asm := loadFixture(t)
+
+	const goroutines = 32
+	results := make(chan int32, goroutines)
+	errs := make(chan error, goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			out, err := asm.Call("Vmnet.Fixtures.Structs", "CreateAndSum")
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- out.Native().(int32)
+		}()
+	}
+	for i := 0; i < goroutines; i++ {
+		select {
+		case err := <-errs:
+			t.Fatalf("CreateAndSum() error = %v", err)
+		case got := <-results:
+			if got != 7 {
+				t.Errorf("CreateAndSum() = %d, want 7", got)
+			}
+		}
+	}
+}
+
 // TestStringOps exercises the BCL natives added in Fase 3.6 alongside
 // `switch`: StringBuilder (including ToString(), which needs the
 // objectToString-dispatch workaround in internal/bcl/system_object.go

@@ -46,3 +46,45 @@ func LookupCtor(typeFullName string) (fn NativeCtor, ok bool) {
 	fn, ok = ctorRegistry[typeFullName]
 	return fn, ok
 }
+
+// valueTypeRegistry holds the synthetic runtime.Type descriptors for BCL
+// value types vmnet models natively (Nullable`1, ...) — these have no
+// TypeDef in a loaded assembly (they live in a system assembly vmnet never
+// parses), so unlike a plugin's own structs they can't be resolved via
+// Assembly.resolveTypeByFullName. Fase 3.7.
+var valueTypeRegistry = map[string]*runtime.Type{}
+
+func registerValueType(t *runtime.Type) {
+	fullName := t.Name
+	if t.Namespace != "" {
+		fullName = t.Namespace + "." + t.Name
+	}
+	valueTypeRegistry[fullName] = t
+}
+
+// LookupValueType returns the synthetic Type descriptor for a native BCL
+// value type by full name ("Namespace.Type"), if any — used by
+// interpreter.Machine's initobj handling (internal/interpreter/structs.go).
+func LookupValueType(typeFullName string) (*runtime.Type, bool) {
+	t, ok := valueTypeRegistry[typeFullName]
+	return t, ok
+}
+
+// NativeValueTypeCtor is a BCL value-type constructor: unlike NativeCtor
+// (always builds a *runtime.Object), it builds a *runtime.Struct directly,
+// since `newobj` on a value type pushes the value itself rather than a
+// heap reference (spec §III.4.21).
+type NativeValueTypeCtor func(args []runtime.Value) (*runtime.Struct, error)
+
+var valueTypeCtorRegistry = map[string]NativeValueTypeCtor{}
+
+func registerValueTypeCtor(typeFullName string, fn NativeValueTypeCtor) {
+	valueTypeCtorRegistry[typeFullName] = fn
+}
+
+// LookupValueTypeCtor returns the native constructor registered for a BCL
+// value type's full name, if any.
+func LookupValueTypeCtor(typeFullName string) (fn NativeValueTypeCtor, ok bool) {
+	fn, ok = valueTypeCtorRegistry[typeFullName]
+	return fn, ok
+}

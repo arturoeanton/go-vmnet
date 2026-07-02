@@ -127,3 +127,20 @@ que sin un parche dirigido en `objectToString` siempre corría el
 Jint, el motor de JavaScript completo para .NET usado como target del
 demo de "lenguaje dinámico" planeado): promedio de los 7 paquetes sube de
 ~56.8% a ~59.8%; con Jint incluido, ~60.3%.
+
+Fase 3.7 (value types) completa: el motor ahora modela structs de verdad
+(`runtime.KindStruct`, copiados por valor vía `Value.Clone()` en cada
+punto donde un valor entra a un slot persistente, no compartidos por
+referencia como `Object`) — `initobj`/`ldobj`/`stobj`/`constrained.`,
+`newobj` empujando el valor en vez de una referencia para un value type,
+y `System.Nullable`1`. Encontró y arregló dos bugs reales expuestos
+apenas se probó contra un fixture con structs: locals de tipo struct
+arrancaban sin inicializar (el compilador de C# confía en la garantía
+`InitLocals` de la CLI y omite `initobj` cuando puede probar que el
+struct se sobreescribe completo antes de usarse — ahora
+`runtime.Method.LocalDefaults` los prezera igual que ya se hacía para
+campos), y un deadlock de recursión en el lock de resolución de tipos de
+Fase 3.5 (asumía que construir un tipo nunca necesita resolver otro,
+falso en cuanto un campo/local de struct referencia otro tipo — rediseño
+verificado con `TestStructsConcurrentResolve`). Certificación: promedio
+de los 7 paquetes sube de ~59.8% a ~63.2%; con Jint, ~63.6%.

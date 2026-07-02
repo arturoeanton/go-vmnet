@@ -25,20 +25,22 @@ const (
 	KindObject // a heap object reference: an instance of a Type, or a BCL-native-backed object
 	KindArray  // a CLI SZARRAY (Fase 3.5)
 	KindRef    // a managed pointer (Fase 3.5) — see ref.go
+	KindStruct // a value type instance (Fase 3.7) — see struct.go
 )
 
 // Value is one CIL evaluation-stack slot.
 type Value struct {
-	Kind  Kind
-	I4    int32
-	I8    int64
-	R4    float32
-	R8    float64
-	Str   string
-	Bytes []byte
-	Obj   *Object
-	Arr   *Array
-	Ref   *Value
+	Kind   Kind
+	I4     int32
+	I8     int64
+	R4     float32
+	R8     float64
+	Str    string
+	Bytes  []byte
+	Obj    *Object
+	Arr    *Array
+	Ref    *Value
+	Struct *Struct
 }
 
 func Null() Value             { return Value{Kind: KindNull} }
@@ -54,6 +56,9 @@ func ArrRef(a *Array) Value   { return Value{Kind: KindArray, Arr: a} }
 // RefTo wraps a pointer to another Value slot (a local, an argument, an
 // array element, ...) as a managed-pointer Value. See ref.go.
 func RefTo(v *Value) Value { return Value{Kind: KindRef, Ref: v} }
+
+// StructVal wraps a value-type instance as a Value. See struct.go.
+func StructVal(s *Struct) Value { return Value{Kind: KindStruct, Struct: s} }
 
 // Bool encodes a CIL boolean as the int32 0/1 it actually is on the stack.
 func Bool(v bool) Value {
@@ -85,6 +90,10 @@ func (v Value) Truthy() bool {
 		return v.Arr != nil
 	case KindRef:
 		return v.Ref != nil
+	case KindStruct:
+		// A value type instance is never null (spec: value types have no
+		// null state), same as CLR struct semantics.
+		return true
 	case KindNull:
 		return false
 	}
@@ -125,6 +134,11 @@ func (v Value) String() string {
 			return "null"
 		}
 		return "<ref>"
+	case KindStruct:
+		if v.Struct == nil || v.Struct.Type == nil {
+			return "<struct>"
+		}
+		return fmt.Sprintf("<%s>", v.Struct.Type.Name)
 	}
 	return "<invalid value>"
 }

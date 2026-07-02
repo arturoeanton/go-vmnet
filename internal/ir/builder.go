@@ -362,6 +362,31 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool) ([]Inst
 		case "stind.ref", "stind.i1", "stind.i2", "stind.i4", "stind.i8",
 			"stind.r4", "stind.r8", "stind.i":
 			out = append(out, StoreIndirect{})
+		case "ldobj":
+			out = append(out, LoadIndirect{})
+		case "stobj":
+			out = append(out, StoreIndirect{})
+
+		case "initobj":
+			token := instr.Operand.(uint32)
+			typeFullName, err := resolveInitObjTarget(md, token)
+			if err != nil {
+				return nil, fmt.Errorf("ir: initobj at IL offset %d: %w", instr.Offset, err)
+			}
+			out = append(out, InitObj{TypeFullName: typeFullName})
+
+		case "constrained.", "volatile.", "readonly.":
+			// Prefixes vmnet doesn't need: constrained. only matters for
+			// choosing between boxing and a value type's own override at a
+			// following callvirt — vmnet's Value is already a tagged union
+			// carrying its real Kind, so a callvirt to e.g.
+			// System.Object::ToString/Equals/GetHashCode already dispatches
+			// on the actual value (see internal/bcl/system_object.go).
+			// volatile./readonly. are pure optimizer hints (memory
+			// ordering, "won't mutate through this address") that don't
+			// affect a single-goroutine-per-call interpreter with
+			// Value-based storage instead of raw memory.
+			out = append(out, Nop{})
 
 		case "ret":
 			out = append(out, Return{HasValue: !retVoid})
@@ -490,6 +515,33 @@ func resolveTypeSpecName(md *metadata.Metadata, rid uint32) (string, error) {
 		return "", fmt.Errorf("unsupported TypeSpec kind %d", t.Kind)
 	}
 	return resolveTypeToken(md, t.Token)
+}
+
+// resolveInitObjTarget resolves the inline TypeDefOrRefOrSpec token used
+// by initobj/ldobj/stobj (spec §III.4.10 et al.) to a type full name, or
+// "" if it names an unresolved generic type parameter (a TypeSpec whose
+// blob is VAR/MVAR — see InitObj's doc comment in ir.go).
+func resolveInitObjTarget(md *metadata.Metadata, token uint32) (string, error) {
+	tok := metadata.Token(token)
+	if tok.Table() != metadata.TableTypeSpec {
+		return resolveTypeToken(md, tok)
+	}
+	sig, err := md.TypeSpecSignature(tok.RID())
+	if err != nil {
+		return "", err
+	}
+	t, err := metadata.ParseTypeSpec(sig)
+	if err != nil {
+		return "", err
+	}
+	switch t.Kind {
+	case metadata.SigGenericParam:
+		return "", nil
+	case metadata.SigGenericInst, metadata.SigClass, metadata.SigValueType:
+		return resolveTypeToken(md, t.Token)
+	default:
+		return "", fmt.Errorf("unsupported initobj/ldobj/stobj TypeSpec kind %d", t.Kind)
+	}
 }
 
 func resolveTypeToken(md *metadata.Metadata, tok metadata.Token) (string, error) {

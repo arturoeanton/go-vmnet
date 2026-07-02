@@ -78,6 +78,11 @@ type SigType struct {
 	Kind  SigTypeKind
 	Token Token    // set for SigClass / SigValueType / SigGenericInst (the open generic type)
 	Elem  *SigType // set for SigSZArray
+
+	// GenericInstIsValueType is set only when Kind == SigGenericInst: true
+	// for a value-type instantiation (KeyValuePair<K,V>, Nullable<T>, a
+	// user struct<T>), false for a reference-type one (List<T>).
+	GenericInstIsValueType bool
 }
 
 // MethodSig is a parsed MethodDefSig/MethodRefSig (ECMA-335 §II.23.2.1/.2).
@@ -209,7 +214,8 @@ func parseType(b []byte) (SigType, int, error) {
 		if pos >= len(b) {
 			return SigType{}, 0, fmt.Errorf("metadata: truncated generic instantiation")
 		}
-		pos++ // CLASS or VALUETYPE marker byte
+		isValueType := b[pos] == elementValueType // CLASS or VALUETYPE marker byte
+		pos++
 		openType, sz, err := decodeTypeDefOrRefEncoded(b[pos:])
 		if err != nil {
 			return SigType{}, 0, err
@@ -229,7 +235,11 @@ func parseType(b []byte) (SigType, int, error) {
 		}
 		// Type arguments aren't retained: vmnet's native collection backing
 		// (internal/bcl) doesn't need to know T to store a runtime.Value.
-		return SigType{Kind: SigGenericInst, Token: openType}, pos, nil
+		// GenericInstIsValueType IS retained (Fase 3.7): a value-type
+		// generic instantiation (KeyValuePair<K,V>, Nullable<T>, ...) needs
+		// a real zeroed default(T) — see fieldOrLocalDefault in assembly.go
+		// — unlike a reference-type one (List<T>), which defaults to null.
+		return SigType{Kind: SigGenericInst, Token: openType, GenericInstIsValueType: isValueType}, pos, nil
 	default:
 		return SigType{}, 0, fmt.Errorf("metadata: unsupported signature element type %#x", et)
 	}

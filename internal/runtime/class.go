@@ -21,6 +21,13 @@ type Type struct {
 	Fields       []string // instance fields, declaration order, matches Object.Fields index
 	StaticFields []string // static fields, declaration order, matches statics index
 
+	// IsValueType marks a struct (extends System.ValueType/System.Enum in
+	// its TypeDef, or one of vmnet's synthetic BCL value types like
+	// Nullable`1) — Fase 3.7. Instances are runtime.Struct, copied by
+	// Value.Clone at every persistent-slot write, instead of runtime.Object
+	// (a shared heap reference).
+	IsValueType bool
+
 	// FieldDefaults/StaticFieldDefaults hold default(T) for each field
 	// (parallel to Fields/StaticFields) — a typed zero (Int32(0), Int64(0),
 	// ...) for value-typed fields, or Null() for reference-typed ones
@@ -51,6 +58,17 @@ func NewType(namespace, name string, fields, staticFields []string, fieldDefault
 		StaticFieldDefaults: staticFieldDefaults,
 		statics:             statics,
 	}
+}
+
+// NewValueType constructs a struct Type descriptor: no static fields (a
+// value type's own statics are exceedingly rare in practice and unneeded
+// by anything vmnet models today — user-defined structs with statics
+// would still resolve via NewType, this is only for the synthetic BCL
+// value types internal/bcl registers, like Nullable`1).
+func NewValueType(namespace, name string, fields []string, fieldDefaults []Value) *Type {
+	t := NewType(namespace, name, fields, nil, fieldDefaults, nil)
+	t.IsValueType = true
+	return t
 }
 
 // FieldIndex returns the slot for an instance field name, or -1 if Type

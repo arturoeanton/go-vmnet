@@ -172,6 +172,9 @@ func resolvableCtor(md *metadata.Metadata, typeFullName, ctorFullName string) bo
 	if _, ok := bcl.LookupCtor(typeFullName); ok {
 		return true
 	}
+	if _, ok := bcl.LookupValueTypeCtor(typeFullName); ok {
+		return true
+	}
 	return isLocalMethod(md, ctorFullName)
 }
 

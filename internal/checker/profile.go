@@ -53,6 +53,7 @@ func init() {
 		"System.Array::Empty",
 		"System.Globalization.CultureInfo::",
 		"System.Environment::get_CurrentManagedThreadId",
+		"System.Nullable`1::",
 		"System.Exception",
 		"System.InvalidOperationException",
 		"System.ArgumentException",
@@ -97,11 +98,15 @@ func inProfile(p Profile, fullName string) bool {
 // LoadArgAddr/LoadLocalAddr/LoadIndirect/StoreIndirect are deliberately
 // NOT included: a `ref`/`out` primitive parameter never touches the heap
 // or a type's field layout, so it stays within minimal's promised surface.
+// ir.InitObj (Fase 3.7) IS included: a value type's own field layout is
+// type-system machinery in the same sense classes are, even though its
+// instances aren't heap-allocated.
 func instrIsObjectModel(instr ir.Instr) bool {
 	switch v := instr.(type) {
 	case ir.NewObj, ir.LoadField, ir.StoreField, ir.Throw,
 		ir.NewArr, ir.LoadLen, ir.LoadElem, ir.StoreElem, ir.LoadElemAddr,
-		ir.LoadFieldAddr, ir.LoadStaticField, ir.StoreStaticField:
+		ir.LoadFieldAddr, ir.LoadStaticField, ir.StoreStaticField,
+		ir.InitObj:
 		return true
 	case ir.Call:
 		return v.Virtual

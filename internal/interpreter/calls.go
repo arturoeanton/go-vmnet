@@ -34,9 +34,18 @@ func (m *Machine) call(fullName string, args []runtime.Value, depth int, instrCo
 	return v, method.HasReturn, nil
 }
 
-// newObj implements the ir.NewObj instruction: allocate (native or plain)
-// and, for plain objects, run the constructor.
+// newObj implements the ir.NewObj instruction: allocate (native value
+// type, native reference type, or plain assembly type) and, for
+// non-fully-native cases, run the constructor.
 func (m *Machine) newObj(in newObjArgs, depth int, instrCount *int64) (runtime.Value, error) {
+	if vtCtor, ok := bcl.LookupValueTypeCtor(in.TypeFullName); ok {
+		s, err := vtCtor(in.Args)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		return runtime.StructVal(s), nil
+	}
+
 	if ctor, ok := bcl.LookupCtor(in.TypeFullName); ok {
 		obj, err := ctor(in.Args)
 		if err != nil {
@@ -52,6 +61,22 @@ func (m *Machine) newObj(in newObjArgs, depth int, instrCount *int64) (runtime.V
 	if err != nil {
 		return runtime.Value{}, err
 	}
+
+	// A value type's `newobj` allocates temp storage, calls its .ctor with
+	// `this` as a managed pointer to that storage (like any struct instance
+	// method — see fieldSlot in eval.go), then pushes the value itself
+	// rather than a heap reference (spec §III.4.21).
+	if typ.IsValueType {
+		objVal := runtime.StructVal(runtime.NewStruct(typ))
+		ctorArgs := make([]runtime.Value, 0, len(in.Args)+1)
+		ctorArgs = append(ctorArgs, runtime.RefTo(&objVal))
+		ctorArgs = append(ctorArgs, in.Args...)
+		if _, _, err := m.call(in.CtorFullName, ctorArgs, depth, instrCount); err != nil {
+			return runtime.Value{}, err
+		}
+		return objVal, nil
+	}
+
 	fields := make([]runtime.Value, len(typ.Fields))
 	copy(fields, typ.FieldDefaults)
 	obj := &runtime.Object{Type: typ, Fields: fields}

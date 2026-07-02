@@ -738,6 +738,114 @@ go test ./ -run TestSwitch -v
 go test ./ -run TestStringOps -v
 ```
 
+### Fase 3.7 — Value types: `initobj`/`ldobj`/`stobj`/`constrained.` + `Nullable<T>`
+
+**Tareas**
+
+- [x] `runtime.KindStruct`/`runtime.Struct` (Fields por posición, igual que un objeto, pero con
+      **semántica de copia** en vez de referencia compartida) y `runtime.Type.IsValueType`
+      (detectado por `Extends == System.ValueType`/`System.Enum`, o registrado directo para
+      tipos BCL sintéticos como `Nullable`1`)
+- [x] `Value.Clone()`: no-op para todo Kind salvo `KindStruct`, donde clona `Fields` (recursivo —
+      un struct anidado dentro de otro struct también copia bien). Cableado en **todo** punto
+      donde un `Value` entra a un slot persistente: `stloc`/`starg`/`stfld`/`stsfld`/`stelem`/
+      `stind`, y el setup inicial de `Locals` de cada invocación — sin esto, dos locals de tipo
+      struct terminan compartiendo el mismo `*Struct` por debajo y mutar uno muta el otro
+- [x] IR + intérprete: `initobj` (zero-init real vía dirección; `ldloca`/`ldflda`/etc. ya
+      existían), `ldobj`/`stobj` — resultan ser **exactamente** `ldind.*`/`stind.*` reusados sin
+      instrucción IR nueva, porque un puntero de vmnet ya es un `*runtime.Value` tipado, no
+      memoria cruda — y `constrained.`/`volatile.`/`readonly.` como no-ops explícitos (prefijos
+      que no aplican al modelo de `Value` de vmnet)
+- [x] `newobj` sobre un value type empuja el **valor**, no una referencia (spec §III.4.21): se
+      construye en un slot temporal, se llama al `.ctor` con `this` = puntero administrado a ese
+      slot (igual que cualquier método de instancia de un struct), y se empuja el valor
+- [x] `ldfld`/`stfld`/`ldflda` extendidos para aceptar un receptor `KindRef → KindStruct` además
+      de `KindObject` — así es como un struct recibe `this` en sus propios métodos de instancia
+- [x] `System.Nullable`1`: tipo sintético con dos campos (`hasValue`, `value`), ctor nativo,
+      `get_HasValue`/`get_Value`/`GetValueOrDefault`
+- [x] `System.Object::Equals`/`GetHashCode`: igualdad/hash por valor para primitivas y structs
+      (recursivo campo a campo), por referencia para clases/arrays — necesario porque
+      `constrained.` + `callvirt Object::Equals/GetHashCode` es el patrón real más común en
+      código de comparación genérico (`EqualityComparer<T>`, Fase 3.8)
+- [x] `metadata.SigType.GenericInstIsValueType`: el parser de firmas descartaba el byte marcador
+      CLASS/VALUETYPE de una instanciación genérica (`GENERICINST`) — necesario para distinguir
+      `List<T>` (referencia, default `null`) de `KeyValuePair<K,V>`/`Nullable<T>` (valor, default
+      un struct cero) en el mismo `SigGenericInst`
+- [x] **Bug real encontrado y arreglado — locals de struct sin inicializar**: `var p = new
+      Point(3, 4);` asignado directo a un local compila como `ldloca` + `call .ctor` **sin**
+      `initobj` previo — el compilador de C# confía en la garantía `InitLocals` de la CLI (todos
+      los locals arrancan en cero, no solo los que tienen `initobj` explícito). vmnet inicializaba
+      todos los locals al `Value{}` vacío de Go sin mirar su tipo declarado; para un local struct
+      eso significa `KindNull`, no un struct cero, así que el primer `stfld` a través del puntero
+      fallaba con `NullReferenceException`. Se agregó `runtime.Method.LocalDefaults` (paralelo a
+      `LocalCount`, resuelto una vez al construir el método, igual que ya existía para campos)
+      clonado en cada invocación.
+- [x] **Bug real encontrado y arreglado — deadlock de recursión en `resolveTypeByFullName`**: el
+      lock de Fase 3.5 (que cubre todo el ciclo "leer o construir y guardar" para evitar que dos
+      goroutines construyan `Type`s duplicados) asumía que construir un tipo nunca necesita
+      resolver OTRO tipo — cierto hasta que un campo o local de tipo struct necesitó resolver
+      recursivamente su propio tipo anidado, contra el mismo `sync.Mutex` no reentrante de Go.
+      Encontrado inmediatamente al correr el primer fixture con un struct. Se rediseñó a
+      "verificar caché → construir SIN el lock (puede recursar) → verificar de nuevo y guardar":
+      bajo una carrera genuina, ambas goroutines pueden construir un `Type` completo, pero solo
+      el ganador se guarda y todos los llamadores terminan viendo la misma instancia — la garantía
+      de Fase 3.5 se mantiene, solo se pierde trabajo redundante en la carrera, no correctitud.
+      Verificado con `TestStructsConcurrentResolve` (32 goroutines, `-race`, `-count=3`).
+
+**Fixtures y tests**
+
+- [x] `Structs.cs` (`Point`: struct con ctor propio y método propio) / `TestStructs` — construcción
+      in-place, `default`, semántica de copia (mutar una copia no afecta al original — el caso que
+      más falla en implementaciones ingenuas), `constrained.` despachando `ToString()` sobre un
+      parámetro de tipo genérico ligado a un struct, y `Nullable<int>` de punta a punta
+- [x] `TestStructsConcurrentResolve` — endurecimiento de concurrencia para el rediseño del lock
+
+### Lo que se dejó explícitamente afuera de esta fase
+
+```txt
+- `initobj` sobre un parámetro de tipo genérico sin instanciación cerrada conocida (`initobj
+  !!0` dentro del cuerpo de un método genérico en abstracto) cae a Null() — vmnet borra los
+  argumentos de tipo genérico al resolver MethodSpec (Fase 3, decisión ya documentada), así que
+  no hay forma de saber el T real en ese punto. Coincide con el patrón ya aceptado para otros
+  huecos de erasure de generics.
+- Un value type foráneo que vmnet no modela (DateTime, Guid, TimeSpan, KeyValuePair<K,V> más
+  allá de Nullable<T>, ...) también cae a Null() en vez de fallar la resolución del método
+  entero — mismo principio que un Call target no resoluble: el gap se reporta en el momento de
+  uso real, no al cargar el método.
+- `constrained.` solo garantiza el despacho correcto para ToString/Equals/GetHashCode (los tres
+  casos reales dominantes medidos). Otros overrides virtuales sobre un value type sin vtable
+  real siguen yendo a la implementación de base — el despacho virtual genuino es Fase 3.8.
+```
+
+### Re-certificación contra los mismos 8 targets (7 paquetes + Jint)
+
+| Paquete | % limpio Fase 3.6 | % limpio Fase 3.7 |
+|---|---|---|
+| `Ardalis.GuardClauses@5.0.0` | 86.7% | 87.4% |
+| `Semver@2.3.0` | 63.8% | **72.6%** |
+| `System.Text.Json@8.0.5` | 61.4% | **66.7%** |
+| `FluentValidation@11.9.2` | 62.8% | 63.5% |
+| `Newtonsoft.Json@13.0.3` | 55.6% | **60.6%** |
+| `Humanizer.Core@2.14.1` | 45.2% | 46.0% |
+| `SimpleBase@4.0.0` | 43.4% | 45.7% |
+| **Promedio (7 paquetes)** | **59.8%** | **63.2%** |
+| `Jint@3.1.3` | 63.7% | 66.1% |
+| **Promedio (7 paquetes + Jint)** | **60.3%** | **63.6%** |
+
+`Semver` y `System.Text.Json` son los saltos más grandes — ambos hacen parsing/comparación de
+bajo nivel apoyado en structs (rangos, spans lógicos, comparadores) de forma intensiva. Sigue
+faltando terreno considerable para el objetivo de 85%: jerarquía de tipos real (`isinst`/
+`castclass`, Fase 3.8) y delegates/closures (Fase 3.9) son los siguientes bloqueadores por
+volumen medido.
+
+### Cómo verificar Fase 3.7
+
+```bash
+go test ./... -race -count=3
+go test ./ -run TestStructs -v
+go test ./ -run TestStructsConcurrentResolve -race -count=3 -v
+```
+
 ---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")

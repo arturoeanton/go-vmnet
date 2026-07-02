@@ -198,8 +198,24 @@ type LoadFieldAddr struct {
 	FieldName    string
 }
 
-// LoadIndirect/StoreIndirect (ldind.*/stind.*) read/write through a
-// managed pointer. vmnet doesn't distinguish the ldind.i4 vs ldind.r8 vs
-// ... variants — the pointed-to Value already carries its own Kind.
+// LoadIndirect/StoreIndirect (ldind.*/stind.*, and also ldobj/stobj —
+// "load/store a value of any type through a pointer" is the exact same
+// operation once pointers are *runtime.Value rather than raw memory, so
+// builder.Build lowers all of them to these two instructions) read/write
+// through a managed pointer. vmnet doesn't distinguish the ldind.i4 vs
+// ldind.r8 vs ... variants — the pointed-to Value already carries its own
+// Kind.
 type LoadIndirect struct{}
 type StoreIndirect struct{}
+
+// InitObj implements `initobj T` (spec §III.4.10): pop a managed pointer
+// and overwrite the pointee with default(T) — zero fields for a value
+// type, null for a reference type. TypeFullName is "" when T is an
+// unresolved generic type parameter (a TypeSpec encoding VAR/MVAR):
+// vmnet erases method-generic type arguments at IR-build time (same
+// limitation MethodSpec resolution already has, see ir/builder.go), so
+// there's no way to know the real T — the interpreter falls back to
+// KindNull, which is only wrong if T is later bound to a value type, a
+// narrower gap than getting it right would be worth the complexity of
+// tracking generic instantiations (docs/ROADMAP.md Fase 3.7).
+type InitObj struct{ TypeFullName string }

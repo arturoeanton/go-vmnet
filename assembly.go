@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/arturoeanton/go-vmnet/internal/bcl"
 	"github.com/arturoeanton/go-vmnet/internal/il"
 	"github.com/arturoeanton/go-vmnet/internal/ir"
 	"github.com/arturoeanton/go-vmnet/internal/metadata"
@@ -123,6 +124,7 @@ func (asm *Assembly) buildMethod(methodRID uint32, row metadata.MethodDefRow) (*
 	}
 
 	localCount := 0
+	var localDefaults []runtime.Value
 	if header.Fat && header.LocalVarSigToken != 0 {
 		sigRID := metadata.Token(header.LocalVarSigToken).RID()
 		localSigRow, err := asm.md.StandAloneSig(sigRID)
@@ -134,16 +136,25 @@ func (asm *Assembly) buildMethod(methodRID uint32, row metadata.MethodDefRow) (*
 			return nil, fmt.Errorf("%s: %w", fullName, err)
 		}
 		localCount = len(locals)
+		localDefaults = make([]runtime.Value, localCount)
+		for i, l := range locals {
+			def, err := asm.fieldOrLocalDefault(l)
+			if err != nil {
+				return nil, fmt.Errorf("%s: local %d: %w", fullName, i, err)
+			}
+			localDefaults[i] = def
+		}
 	}
 
 	m := &runtime.Method{
-		FullName:   fullName,
-		HasThis:    sig.HasThis,
-		HasReturn:  !retVoid,
-		ParamCount: int(sig.ParamCount),
-		LocalCount: localCount,
-		MaxStack:   int(header.MaxStack),
-		IR:         irInstrs,
+		FullName:      fullName,
+		HasThis:       sig.HasThis,
+		HasReturn:     !retVoid,
+		ParamCount:    int(sig.ParamCount),
+		LocalCount:    localCount,
+		MaxStack:      int(header.MaxStack),
+		IR:            irInstrs,
+		LocalDefaults: localDefaults,
 	}
 	asm.storeMethod(fullName, m)
 	return m, nil
@@ -153,20 +164,45 @@ func (asm *Assembly) buildMethod(methodRID uint32, row metadata.MethodDefRow) (*
 // runtime.Type (field layout) for a plain class discovered while executing
 // newobj/ldfld/stfld.
 //
-// Unlike buildMethod, this holds cacheMu for the whole check-build-store
-// sequence instead of just the individual reads/writes: since Fase 3.5 a
-// Type carries real mutable state (static fields, a .cctor latch), so two
-// goroutines racing to resolve the same not-yet-cached type could each
-// build and use their own separate *runtime.Type — one goroutine's .cctor
-// writes would then be invisible to everyone using the other instance. A
-// duplicate *runtime.Method has no such state and stays harmless to build
-// twice, so buildMethod is left as check-then-build-then-store.
+// Since Fase 3.5 a Type carries real mutable state (static fields, a
+// .cctor latch), so two goroutines racing to resolve the same not-yet-
+// cached type must never end up with each using its own separate
+// *runtime.Type — one goroutine's .cctor writes would then be invisible
+// to the other. That's handled below by a check-build-check-store
+// sequence that only holds cacheMu for the cheap map operations, NOT
+// across buildType: a value-typed field or local's default (Fase 3.7)
+// requires recursively resolving that nested type, which — if cacheMu
+// were held across the whole build, like the very first version of this
+// fix was — would deadlock immediately on Go's non-reentrant sync.Mutex.
+// On a genuine concurrent-first-access race, both goroutines build a full
+// Type and the loser's is simply discarded (wasted work, not a
+// correctness problem: every caller still ends up with the one stored in
+// asm.types, so .cctor-once semantics hold).
 func (asm *Assembly) resolveTypeByFullName(fullName string) (*runtime.Type, error) {
-	asm.cacheMu.Lock()
-	defer asm.cacheMu.Unlock()
-	if t, ok := asm.types[fullName]; ok {
+	if t, ok := asm.cachedType(fullName); ok {
 		return t, nil
 	}
+	t, err := asm.buildType(fullName)
+	if err != nil {
+		return nil, err
+	}
+	asm.cacheMu.Lock()
+	defer asm.cacheMu.Unlock()
+	if existing, ok := asm.types[fullName]; ok {
+		return existing, nil
+	}
+	asm.types[fullName] = t
+	return t, nil
+}
+
+func (asm *Assembly) cachedType(fullName string) (*runtime.Type, bool) {
+	asm.cacheMu.Lock()
+	defer asm.cacheMu.Unlock()
+	t, ok := asm.types[fullName]
+	return t, ok
+}
+
+func (asm *Assembly) buildType(fullName string) (*runtime.Type, error) {
 	namespace, name := splitTypeName(fullName)
 	typeRID, typeDef, err := asm.md.FindTypeDef(namespace, name)
 	if err != nil {
@@ -186,7 +222,10 @@ func (asm *Assembly) resolveTypeByFullName(fullName string) (*runtime.Type, erro
 		}
 		def := runtime.Null()
 		if sig, err := metadata.ParseFieldSig(f.Signature); err == nil {
-			def = fieldDefaultValue(sig.Kind)
+			def, err = asm.fieldOrLocalDefault(sig)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if f.Flags&fieldAttrStatic != 0 {
 			staticFields = append(staticFields, f.Name)
@@ -198,34 +237,108 @@ func (asm *Assembly) resolveTypeByFullName(fullName string) (*runtime.Type, erro
 	}
 
 	t := runtime.NewType(typeDef.Namespace, typeDef.Name, fields, staticFields, fieldDefaults, staticFieldDefaults)
-	asm.types[fullName] = t
+	t.IsValueType, err = asm.isValueType(typeDef)
+	if err != nil {
+		return nil, err
+	}
 	return t, nil
+}
+
+// isValueType reports whether typeDef is a struct (extends
+// System.ValueType) or an enum (extends System.Enum, itself a
+// System.ValueType) rather than a plain class. Interfaces and
+// System.Object itself have no Extends entry at all.
+func (asm *Assembly) isValueType(typeDef metadata.TypeDefRow) (bool, error) {
+	if typeDef.Extends.IsNil() {
+		return false, nil
+	}
+	name, err := resolveTypeTokenName(asm.md, typeDef.Extends)
+	if err != nil {
+		// A base type vmnet can't resolve (e.g. a TypeSpec-encoded base,
+		// vanishingly rare) isn't a value type as far as we can tell —
+		// treat it as a class rather than failing type resolution outright.
+		return false, nil
+	}
+	return name == "System.ValueType" || name == "System.Enum", nil
+}
+
+// resolveTypeTokenName resolves a TypeDef/TypeRef token to "Namespace.Name".
+func resolveTypeTokenName(md *metadata.Metadata, tok metadata.Token) (string, error) {
+	switch tok.Table() {
+	case metadata.TableTypeRef:
+		row, err := md.TypeRef(tok.RID())
+		if err != nil {
+			return "", err
+		}
+		return qualify(row.Namespace, row.Name), nil
+	case metadata.TableTypeDef:
+		row, err := md.TypeDef(tok.RID())
+		if err != nil {
+			return "", err
+		}
+		return qualify(row.Namespace, row.Name), nil
+	default:
+		return "", fmt.Errorf("vmnet: unsupported base-type token table %#x", byte(tok.Table()))
+	}
 }
 
 // fieldAttrStatic is FieldAttributes.Static (ECMA-335 §II.23.1.5).
 const fieldAttrStatic = 0x0010
 
-// fieldDefaultValue maps a field's signature type to its CLR implicit
-// zero-init value: a typed numeric zero for value types (so arithmetic on
-// a never-explicitly-assigned field works, matching real `static int x;`
-// semantics), or Null() for anything reference-shaped (string/class/array/
-// pointer) or not modeled here (user-defined value types), which is
-// already vmnet's existing null-reference representation.
-func fieldDefaultValue(kind metadata.SigTypeKind) runtime.Value {
-	switch kind {
+// fieldOrLocalDefault maps a field's or local's signature type to its CLR
+// implicit zero-init value (spec: fields via beforefieldinit/allocation,
+// locals via the InitLocals flag C# always sets — see
+// runtime.Method.LocalDefaults): a typed numeric zero for numeric-kind
+// value types (so arithmetic on a never-explicitly-assigned field/local
+// works, matching real `static int x;`/`int x;` semantics), a real
+// zero-valued struct for a value type with fields (Fase 3.7), or Null()
+// for anything reference-shaped or unresolvable.
+func (asm *Assembly) fieldOrLocalDefault(sig metadata.SigType) (runtime.Value, error) {
+	switch sig.Kind {
 	case metadata.SigBoolean, metadata.SigChar,
 		metadata.SigI1, metadata.SigU1, metadata.SigI2, metadata.SigU2,
 		metadata.SigI4, metadata.SigU4, metadata.SigI, metadata.SigU:
-		return runtime.Int32(0)
+		return runtime.Int32(0), nil
 	case metadata.SigI8, metadata.SigU8:
-		return runtime.Int64(0)
+		return runtime.Int64(0), nil
 	case metadata.SigR4:
-		return runtime.Float32(0)
+		return runtime.Float32(0), nil
 	case metadata.SigR8:
-		return runtime.Float64(0)
+		return runtime.Float64(0), nil
+	case metadata.SigValueType:
+		return asm.valueTypeDefault(sig.Token), nil
+	case metadata.SigGenericInst:
+		if sig.GenericInstIsValueType {
+			return asm.valueTypeDefault(sig.Token), nil
+		}
+		return runtime.Null(), nil
 	default:
+		return runtime.Null(), nil
+	}
+}
+
+// valueTypeDefault resolves tok (a TypeDef/TypeRef naming a value type) to
+// a zero-valued runtime.Struct: a native BCL value type (Nullable`1, ...)
+// via bcl.LookupValueType, else a plugin's own struct via
+// resolveTypeByFullName (which may recurse here again for a nested
+// struct field — safe, see resolveTypeByFullName's doc comment). A type
+// vmnet can't resolve at all (a foreign BCL struct it doesn't model, e.g.
+// DateTime) falls back to Null() rather than failing the whole field/
+// local's type resolution over it — consistent with how an unresolvable
+// Call target only errors when actually invoked, not at load time.
+func (asm *Assembly) valueTypeDefault(tok metadata.Token) runtime.Value {
+	name, err := resolveTypeTokenName(asm.md, tok)
+	if err != nil {
 		return runtime.Null()
 	}
+	if t, ok := bcl.LookupValueType(name); ok {
+		return runtime.StructVal(runtime.NewStruct(t))
+	}
+	t, err := asm.resolveTypeByFullName(name)
+	if err != nil || !t.IsValueType {
+		return runtime.Null()
+	}
+	return runtime.StructVal(runtime.NewStruct(t))
 }
 
 func splitTypeName(typeName string) (namespace, name string) {

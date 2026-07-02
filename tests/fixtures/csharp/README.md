@@ -28,3 +28,4 @@ Output: `tests/fixtures/csharp/bin/Release/netstandard2.0/Vmnet.Fixtures.dll`
 | `Statics.cs` | `Statics` | static fields (`ldsfld`/`stsfld`), lazy `.cctor` | Fase 3.5 |
 | `SwitchTest.cs` | `SwitchTest` | `switch` opcode (jump table) | Fase 3.6 |
 | `StringOps.cs` | `StringOps` | `StringBuilder`, `String.Format`/`Substring`/indexer/`Equals` | Fase 3.6 |
+| `Structs.cs` | `Structs`, `Point` | value types (`initobj`/`constrained.`, copy semantics), `Nullable<T>` | Fase 3.7 |

@@ -50,9 +50,19 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 		return runtime.Value{}, ErrCallDepthExceeded
 	}
 
+	// Each call needs its own independent locals, not shared aliases into
+	// method.LocalDefaults (cached once on the Method) — Clone() is a
+	// no-op for every kind except KindStruct, where it allocates a fresh
+	// Fields backing slice per call (see runtime.Value.Clone's doc
+	// comment).
+	locals := make([]runtime.Value, method.LocalCount)
+	for i, def := range method.LocalDefaults {
+		locals[i] = def.Clone()
+	}
+
 	frame := &Frame{
 		Args:   args,
-		Locals: make([]runtime.Value, method.LocalCount),
+		Locals: locals,
 		Stack:  make([]runtime.Value, 0, method.MaxStack+8),
 	}
 
@@ -89,7 +99,7 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 			if in.Index < 0 || in.Index >= len(frame.Args) {
 				return runtime.Value{}, fmt.Errorf("interpreter: starg index %d out of range", in.Index)
 			}
-			frame.Args[in.Index] = frame.pop()
+			frame.Args[in.Index] = frame.pop().Clone()
 
 		case ir.LoadArgAddr:
 			if in.Index < 0 || in.Index >= len(frame.Args) {
@@ -107,7 +117,7 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 			if in.Index < 0 || in.Index >= len(frame.Locals) {
 				return runtime.Value{}, fmt.Errorf("interpreter: stloc index %d out of range", in.Index)
 			}
-			frame.Locals[in.Index] = frame.pop()
+			frame.Locals[in.Index] = frame.pop().Clone()
 
 		case ir.LoadLocalAddr:
 			if in.Index < 0 || in.Index >= len(frame.Locals) {
@@ -233,46 +243,28 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 
 		case ir.LoadField:
 			obj := frame.pop()
-			if obj.Kind != runtime.KindObject || obj.Obj == nil {
-				return runtime.Value{}, &runtime.ManagedException{
-					TypeName: "System.NullReferenceException",
-					Message:  fmt.Sprintf("Object reference not set to an instance of an object (reading %s.%s)", in.TypeFullName, in.FieldName),
-				}
+			slot, err := fieldSlot(obj, in.TypeFullName, in.FieldName)
+			if err != nil {
+				return runtime.Value{}, err
 			}
-			idx := fieldIndex(obj.Obj, in.FieldName)
-			if idx < 0 {
-				return runtime.Value{}, fmt.Errorf("interpreter: %s has no field %q", in.TypeFullName, in.FieldName)
-			}
-			frame.push(obj.Obj.Fields[idx])
+			frame.push(*slot)
 
 		case ir.StoreField:
 			val := frame.pop()
 			obj := frame.pop()
-			if obj.Kind != runtime.KindObject || obj.Obj == nil {
-				return runtime.Value{}, &runtime.ManagedException{
-					TypeName: "System.NullReferenceException",
-					Message:  fmt.Sprintf("Object reference not set to an instance of an object (writing %s.%s)", in.TypeFullName, in.FieldName),
-				}
+			slot, err := fieldSlot(obj, in.TypeFullName, in.FieldName)
+			if err != nil {
+				return runtime.Value{}, err
 			}
-			idx := fieldIndex(obj.Obj, in.FieldName)
-			if idx < 0 {
-				return runtime.Value{}, fmt.Errorf("interpreter: %s has no field %q", in.TypeFullName, in.FieldName)
-			}
-			obj.Obj.Fields[idx] = val
+			*slot = val.Clone()
 
 		case ir.LoadFieldAddr:
 			obj := frame.pop()
-			if obj.Kind != runtime.KindObject || obj.Obj == nil {
-				return runtime.Value{}, &runtime.ManagedException{
-					TypeName: "System.NullReferenceException",
-					Message:  fmt.Sprintf("Object reference not set to an instance of an object (reading &%s.%s)", in.TypeFullName, in.FieldName),
-				}
+			slot, err := fieldSlot(obj, in.TypeFullName, in.FieldName)
+			if err != nil {
+				return runtime.Value{}, err
 			}
-			idx := fieldIndex(obj.Obj, in.FieldName)
-			if idx < 0 {
-				return runtime.Value{}, fmt.Errorf("interpreter: %s has no field %q", in.TypeFullName, in.FieldName)
-			}
-			frame.push(runtime.RefTo(&obj.Obj.Fields[idx]))
+			frame.push(runtime.RefTo(slot))
 
 		case ir.LoadStaticField:
 			t, err := m.staticType(in.TypeFullName, depth, instrCount)
@@ -295,7 +287,7 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 			if idx < 0 {
 				return runtime.Value{}, fmt.Errorf("interpreter: %s has no static field %q", in.TypeFullName, in.FieldName)
 			}
-			t.SetStaticField(idx, val)
+			t.SetStaticField(idx, val.Clone())
 
 		case ir.Throw:
 			v := frame.pop()
@@ -343,7 +335,7 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 			if err != nil {
 				return runtime.Value{}, err
 			}
-			arrVal.Arr.Elems[idx] = val
+			arrVal.Arr.Elems[idx] = val.Clone()
 
 		case ir.LoadElemAddr:
 			idxVal := frame.pop()
@@ -367,7 +359,14 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 			if ref.Kind != runtime.KindRef || ref.Ref == nil {
 				return runtime.Value{}, &runtime.ManagedException{TypeName: "System.NullReferenceException", Message: "dereferencing a null managed pointer (stind)"}
 			}
-			*ref.Ref = val
+			*ref.Ref = val.Clone()
+
+		case ir.InitObj:
+			addr := frame.pop()
+			if addr.Kind != runtime.KindRef || addr.Ref == nil {
+				return runtime.Value{}, &runtime.ManagedException{TypeName: "System.NullReferenceException", Message: "dereferencing a null managed pointer (initobj)"}
+			}
+			*addr.Ref = m.defaultValueFor(in.TypeFullName)
 
 		case ir.Return:
 			if in.HasValue {
@@ -390,6 +389,48 @@ func fieldIndex(obj *runtime.Object, name string) int {
 		return -1
 	}
 	return obj.Type.FieldIndex(name)
+}
+
+// fieldSlot resolves ldfld/stfld/ldflda's receiver to the addressable
+// Value slot backing fieldName: a class instance (receiver is
+// KindObject), or a value type reached through a managed pointer
+// (receiver is KindRef to a KindStruct — this is how a struct's own
+// instance methods receive `this`, and how ldflda's own result chains
+// into a nested struct field access). Spec §III.4.10/4.28: ldfld/stfld
+// accept either shape uniformly.
+func fieldSlot(receiver runtime.Value, typeFullName, fieldName string) (*runtime.Value, error) {
+	switch receiver.Kind {
+	case runtime.KindObject:
+		if receiver.Obj == nil {
+			return nil, &runtime.ManagedException{
+				TypeName: "System.NullReferenceException",
+				Message:  fmt.Sprintf("Object reference not set to an instance of an object (%s.%s)", typeFullName, fieldName),
+			}
+		}
+		idx := fieldIndex(receiver.Obj, fieldName)
+		if idx < 0 {
+			return nil, fmt.Errorf("interpreter: %s has no field %q", typeFullName, fieldName)
+		}
+		return &receiver.Obj.Fields[idx], nil
+	case runtime.KindRef:
+		if receiver.Ref == nil || receiver.Ref.Kind != runtime.KindStruct || receiver.Ref.Struct == nil {
+			return nil, &runtime.ManagedException{
+				TypeName: "System.NullReferenceException",
+				Message:  fmt.Sprintf("dereferencing a null managed pointer (%s.%s)", typeFullName, fieldName),
+			}
+		}
+		s := receiver.Ref.Struct
+		idx := s.Type.FieldIndex(fieldName)
+		if idx < 0 {
+			return nil, fmt.Errorf("interpreter: %s has no field %q", typeFullName, fieldName)
+		}
+		return &s.Fields[idx], nil
+	default:
+		return nil, &runtime.ManagedException{
+			TypeName: "System.NullReferenceException",
+			Message:  fmt.Sprintf("Object reference not set to an instance of an object (%s.%s)", typeFullName, fieldName),
+		}
+	}
 }
 
 // arrayIndex validates an ldelem/stelem array+index pair, returning a

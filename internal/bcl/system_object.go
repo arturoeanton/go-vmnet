@@ -1,12 +1,20 @@
 package bcl
 
-import "github.com/arturoeanton/go-vmnet/internal/runtime"
+import (
+	"fmt"
+	"hash/fnv"
+	"math"
+
+	"github.com/arturoeanton/go-vmnet/internal/runtime"
+)
 
 func init() {
 	// Every class the C# compiler emits chains up to Object::.ctor(), even
 	// when the source has no explicit base-class call.
 	register("System.Object::.ctor", false, objectCtorNoop)
 	register("System.Object::ToString", true, objectToString)
+	register("System.Object::Equals", true, objectEquals)
+	register("System.Object::GetHashCode", true, objectGetHashCode)
 	// Attribute::.ctor: modern C# compilers emit attribute classes of
 	// their own (e.g. EmbeddedAttribute, RefSafetyRulesAttribute) into
 	// every assembly for certain language features, regardless of
@@ -39,6 +47,11 @@ func objectToString(args []runtime.Value) (runtime.Value, error) {
 }
 
 func displayString(v runtime.Value) string {
+	// A value type's `this` (e.g. `item.ToString()` inside a generic
+	// method over T, compiled as `constrained. !!0` + `callvirt
+	// Object::ToString`) always arrives as a managed pointer, never the
+	// struct value directly — same reasoning as derefReceiver below.
+	v = derefReceiver(v)
 	if v.Kind == runtime.KindObject && v.Obj != nil {
 		if s, ok := nativeToString(v.Obj.Native); ok {
 			return s
@@ -60,4 +73,121 @@ func nativeToString(native any) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// objectEquals/objectGetHashCode back Object::Equals/GetHashCode — the
+// other pair of virtual methods (besides ToString) the `constrained.`
+// prefix commonly precedes on a generic type parameter or value type
+// (EqualityComparer<T>-style comparison code). A struct instance-method
+// receiver arrives as a managed pointer (see fieldSlot in
+// internal/interpreter/eval.go), hence the deref.
+func objectEquals(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Object.Equals expects 2 arguments")
+	}
+	return runtime.Bool(valuesEqual(derefReceiver(args[0]), derefReceiver(args[1]))), nil
+}
+
+func objectGetHashCode(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Object.GetHashCode expects a receiver")
+	}
+	return runtime.Int32(valueHash(derefReceiver(args[0]))), nil
+}
+
+func derefReceiver(v runtime.Value) runtime.Value {
+	if v.Kind == runtime.KindRef && v.Ref != nil {
+		return *v.Ref
+	}
+	return v
+}
+
+// valuesEqual implements Object.Equals' default value-equality semantics:
+// same bits for primitives, same content for strings, field-wise
+// (recursive) equality for structs, reference identity for
+// classes/arrays — matching how the CLR's default Equals behaves absent a
+// type-specific override, which is the common case for generic comparison
+// code (EqualityComparer<T>.Default and friends, Fase 3.8).
+func valuesEqual(a, b runtime.Value) bool {
+	if a.Kind != b.Kind {
+		return false
+	}
+	switch a.Kind {
+	case runtime.KindNull:
+		return true
+	case runtime.KindI4:
+		return a.I4 == b.I4
+	case runtime.KindI8:
+		return a.I8 == b.I8
+	case runtime.KindR4:
+		return a.R4 == b.R4
+	case runtime.KindR8:
+		return a.R8 == b.R8
+	case runtime.KindString:
+		return a.Str == b.Str
+	case runtime.KindObject:
+		return a.Obj == b.Obj
+	case runtime.KindArray:
+		return a.Arr == b.Arr
+	case runtime.KindStruct:
+		if a.Struct == nil || b.Struct == nil {
+			return a.Struct == b.Struct
+		}
+		if a.Struct.Type != b.Struct.Type || len(a.Struct.Fields) != len(b.Struct.Fields) {
+			return false
+		}
+		for i := range a.Struct.Fields {
+			if !valuesEqual(a.Struct.Fields[i], b.Struct.Fields[i]) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+func valueHash(v runtime.Value) int32 {
+	switch v.Kind {
+	case runtime.KindNull:
+		return 0
+	case runtime.KindI4:
+		return v.I4
+	case runtime.KindI8:
+		return int32(v.I8 ^ (v.I8 >> 32))
+	case runtime.KindR4:
+		return int32(math.Float32bits(v.R4))
+	case runtime.KindR8:
+		bits := math.Float64bits(v.R8)
+		return int32(bits ^ (bits >> 32))
+	case runtime.KindString:
+		h := fnv.New32a()
+		h.Write([]byte(v.Str))
+		return int32(h.Sum32())
+	case runtime.KindObject:
+		return hashPointer(v.Obj)
+	case runtime.KindArray:
+		return hashPointer(v.Arr)
+	case runtime.KindStruct:
+		if v.Struct == nil {
+			return 0
+		}
+		h := int32(17)
+		for _, f := range v.Struct.Fields {
+			h = h*31 + valueHash(f)
+		}
+		return h
+	default:
+		return 0
+	}
+}
+
+// hashPointer gives a stable, if not identity-strong, hash for a
+// reference-typed Value backed by a Go pointer, without resorting to the
+// unsafe package (out of step with vmnet's pure-Go, no-tricks philosophy —
+// see docs/adr/0001-pure-go-core.md) to read the pointer bits directly.
+func hashPointer(p any) int32 {
+	h := fnv.New32a()
+	fmt.Fprintf(h, "%p", p)
+	return int32(h.Sum32())
 }
