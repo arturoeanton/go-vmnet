@@ -385,6 +385,80 @@ func TestStructs(t *testing.T) {
 	})
 }
 
+// TestDateTimeSpan exercises System.DateTime and Span<T>/ReadOnlySpan<T>
+// (Fase 3.12): DateTime construction directly on a local (`ldloca`+
+// `call .ctor`, no newobj — the same shape confirmed for plugin structs
+// in Fase 3.7, needing its own native entry point here), calendar
+// arithmetic crossing a month boundary, CompareTo, a Span<T> over an
+// array (Slice, indexed read *and* write-through — Span's indexer
+// returns `ref T`, not T, confirmed against real IL), and a
+// ReadOnlySpan<char> over a string including ToString() (which — like
+// StringBuilder in Fase 3.6 — dispatches through Object::ToString, not
+// a direct callvirt).
+func TestDateTimeSpan(t *testing.T) {
+	asm := loadFixture(t)
+
+	t.Run("DateTime construction and fields", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.DateTimeSpanTest", "YearMonthDay")
+		if err != nil {
+			t.Fatalf("YearMonthDay() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 20240315 {
+			t.Errorf("YearMonthDay() = %d, want 20240315", got)
+		}
+	})
+
+	t.Run("AddDays crosses a month boundary", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.DateTimeSpanTest", "AddDaysAcrossMonth")
+		if err != nil {
+			t.Fatalf("AddDaysAcrossMonth() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 20240201 {
+			t.Errorf("AddDaysAcrossMonth() = %d, want 20240201", got)
+		}
+	})
+
+	t.Run("CompareTo", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.DateTimeSpanTest", "CompareDates")
+		if err != nil {
+			t.Fatalf("CompareDates() error = %v", err)
+		}
+		if got := out.Native().(int32); got != -1 {
+			t.Errorf("CompareDates() = %d, want -1", got)
+		}
+	})
+
+	t.Run("Span<int> over an array", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.DateTimeSpanTest", "SpanSum")
+		if err != nil {
+			t.Fatalf("SpanSum() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 90 {
+			t.Errorf("SpanSum() = %d, want 90", got)
+		}
+	})
+
+	t.Run("ReadOnlySpan<char> over a string", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.DateTimeSpanTest", "ReadOnlySpanSubstring")
+		if err != nil {
+			t.Fatalf("ReadOnlySpanSubstring() error = %v", err)
+		}
+		if got := out.Native().(string); got != "World" {
+			t.Errorf("ReadOnlySpanSubstring() = %q, want %q", got, "World")
+		}
+	})
+
+	t.Run("Span<int> write-through", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.DateTimeSpanTest", "SpanWriteThrough")
+		if err != nil {
+			t.Fatalf("SpanWriteThrough() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 600 {
+			t.Errorf("SpanWriteThrough() = %d, want 600", got)
+		}
+	})
+}
+
 // TestForeach exercises `foreach` over List<T>/Dictionary<K,V> (Fase
 // 3.11): the compiler-generated struct enumerator (GetEnumerator/
 // MoveNext/get_Current/Dispose, confirmed against real IL — List<T>'s

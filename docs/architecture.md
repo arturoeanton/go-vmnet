@@ -221,3 +221,28 @@ Default` (reusa `valuesEqual`/`valueHash` de Fase 3.7), `Math.Min`/`Max`
 y `String.Join`. Certificación: promedio de los 7 paquetes sube de
 ~67.7% a ~68.8% (~69.0% a ~70.3% con Jint). DateTime/Span/Memory quedan
 documentados como Fase 3.12, no descartados.
+
+Fase 3.12 (`System.DateTime`, `Span<T>`/`ReadOnlySpan<T>`/`Memory<T>`/
+`ReadOnlyMemory<T>`) completa — el plan pospuesto desde 3.11.
+`DateTime` se modela como un value type sintético de un campo (`ticks
+int64`, la misma representación que usa la CLR); los cuatro tipos Span
+comparten un solo shape de 3 campos (`backing`, `start`, `length`), una
+vista defensiva sobre un `runtime.Array` o los caracteres de un string
+— vmnet no tiene punteros sin gestionar para modelar la semántica real.
+Tres bugs reales encontrados y arreglados: el indexador de `Span<T>`
+está declarado `ref T`, no `T` — tanto la lectura como la escritura
+compilan al mismo `call get_Item` seguido de `ldind`/`stind` (no existe
+un `set_Item` separado), así que devolver el valor en vez de una
+referencia rompía todo escritor; `ReadOnlySpan<char>.ToString()`
+despacha vía `constrained.`+`callvirt Object::ToString` (mismo patrón
+que `StringBuilder` en Fase 3.6), no una llamada directa; y la
+conversión ticks↔`time.Time` desbordaba silenciosamente `time.Duration`
+(un `int64` de nanosegundos, válido solo ~292 años) al puentear el
+epoch de .NET (año 1) con una fecha moderna — arreglado anclando en
+aritmética de segundos Unix en vez de una duración. Certificación:
+promedio de los 7 paquetes sube de ~68.8% a ~76.3% (~70.3% a ~76.9% con
+Jint) — el salto más grande de toda la secuencia 3.6-3.12, dominado casi
+por completo por `Humanizer.Core` (+34.4 puntos: es una librería de
+"humanizar" fechas, DateTime era su único bloqueador real). Con 76.9%
+el criterio de cierre firme de 85% todavía no se alcanza; queda al
+menos una Fase 3.x más antes de Fase 4.

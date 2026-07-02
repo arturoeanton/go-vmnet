@@ -50,11 +50,23 @@ func displayString(v runtime.Value) string {
 	// A value type's `this` (e.g. `item.ToString()` inside a generic
 	// method over T, compiled as `constrained. !!0` + `callvirt
 	// Object::ToString`) always arrives as a managed pointer, never the
-	// struct value directly — same reasoning as derefReceiver below.
+	// struct value directly — same reasoning as derefReceiver below. This
+	// is also why ReadOnlySpan<char>.ToString() needs the same treatment
+	// as StringBuilder below: `constrained.`+`callvirt Object::ToString`
+	// again, confirmed against real IL (Fase 3.12).
 	v = derefReceiver(v)
-	if v.Kind == runtime.KindObject && v.Obj != nil {
-		if s, ok := nativeToString(v.Obj.Native); ok {
-			return s
+	switch v.Kind {
+	case runtime.KindObject:
+		if v.Obj != nil {
+			if s, ok := nativeToString(v.Obj.Native); ok {
+				return s
+			}
+		}
+	case runtime.KindStruct:
+		if v.Struct != nil {
+			if s, ok := spanToStringValue(v.Struct); ok {
+				return s
+			}
 		}
 	}
 	return v.String()

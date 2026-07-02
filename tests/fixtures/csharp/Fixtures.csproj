@@ -10,4 +10,13 @@
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- netstandard2.0 has no Span<T>/ReadOnlySpan<T>/MemoryExtensions.AsSpan
+         built in (added in netstandard2.1+) — System.Memory is the exact
+         polyfill real netstandard2.0-targeting packages use to get it, so
+         this fixture exercises the same shape real packages compile to
+         (Fase 3.12). Dev-only dependency, same as the SDK itself. -->
+    <PackageReference Include="System.Memory" Version="4.5.5" />
+  </ItemGroup>
+
 </Project>

@@ -666,7 +666,8 @@ corrió el mismo probe de findings-por-opcode/BCL, ahora incluyendo Jint, contra
 | **3.8** | Jerarquía de tipos real + `isinst`/`castclass` | 8/8 y 6/8 paquetes; `runtime.Type` es plano hoy (sin herencia/interfaces); desbloquea `EqualityComparer<T>` |
 | **3.9** | Delegates/closures (`ldftn`, `Action<T>`/`Func<T>`, `Invoke`) | Necesario para el demo de Jint literal (`SetValue(new Action<string>(...))` es la primera línea) |
 | **3.10** | `try`/`catch`/`finally` (`leave`/`leave.s`/`endfinally`) | 8/8 paquetes; hoy solo existe throw no manejado |
-| **3.11** | `DateTime`, `Span<T>`/`ReadOnlySpan<T>`/`Memory<T>` | Impacto grande pero concentrado (principalmente System.Text.Json/Semver) |
+| **3.11** | `foreach`/enumeradores + wins baratos (re-priorizado con datos — ver sección) | El probe mostró `IDisposable::Dispose`/`IEnumerator`1`/`EqualityComparer`1` en 7-8/8 paquetes, más ancho que DateTime/Span (2-5/8) |
+| **3.12** | `DateTime`, `Span<T>`/`ReadOnlySpan<T>`/`Memory<T>`/`ReadOnlyMemory<T>` | Impacto grande pero concentrado (principalmente Humanizer.Core/SimpleBase/System.Text.Json) |
 | **3.x** | Re-medición final, cierre de brecha restante hacia 85%, validación literal del demo Jint | Confirma el número Y que el escenario concreto corre, no solo el promedio |
 
 ### Fase 3.6 — `switch` + BCL barata de alto alcance
@@ -1206,6 +1207,134 @@ Fase 3.12 (ver abajo), no descartados.
 ```bash
 go test ./... -race -count=3
 go test ./ -run TestForeach -v
+```
+
+### Fase 3.12 — `DateTime`, `Span<T>`/`ReadOnlySpan<T>`/`Memory<T>`/`ReadOnlyMemory<T>`
+
+El plan original pospuesto desde Fase 3.11 (ver arriba): dos superficies de BCL con impacto
+grande pero concentrado en unos pocos paquetes, en vez de anchas en los 8 targets — por eso
+quedaron después de `foreach`, no antes.
+
+**Tareas**
+
+- [x] `System.DateTime` como value type sintético de un solo campo (`ticks int64`, misma
+      representación interna que la CLR usa: intervalos de 100ns desde el año 1) —
+      `get_Year`/`Month`/`Day`/`Hour`/`Minute`/`Second`/`Millisecond`/`DayOfYear`/`DayOfWeek`
+      (todos vía una sola factory `dateTimeField(func(time.Time) int32)`), `get_Now`/`get_UtcNow`/
+      `get_Today`, `get_Ticks`, `get_Date`, `AddDays`/`AddHours`/`AddMinutes`/`AddSeconds`/
+      `AddMilliseconds` (vía `dateTimeAdd`), `AddYears`/`AddMonths` (vía `dateTimeAddCalendar`,
+      aritmética de calendario real de `time.Time.AddDate`, no solo sumar una duración fija),
+      `ToString` (formato fijo invariant — vmnet no modela cultura, igual que `CultureInfo` desde
+      Fase 3.6), `CompareTo`, `Equals`.
+- [x] `Span<T>`/`ReadOnlySpan<T>`/`Memory<T>`/`ReadOnlyMemory<T>` como un solo shape de 3 campos
+      (`backing`, `start`, `length`) reusado por los 4 — una vista defensiva sobre un
+      `runtime.Array` o los caracteres de un string, no semántica real de puntero sin gestionar
+      (vmnet no tiene punteros crudos). `MemoryExtensions.AsSpan`/`AsMemory`, `get_Length`,
+      `get_Item`, `Slice`, `ToString`, `ToArray`, `Memory<T>.get_Span`.
+- [x] `tests/fixtures/csharp/Fixtures.csproj`: agregado `System.Memory@4.5.5` como dependencia
+      NuGet dev-only — `netstandard2.0` no trae `Span<T>`/`ReadOnlySpan<T>`/`AsSpan` de fábrica
+      (llegan recién en `netstandard2.1`), y `System.Memory` es exactamente el polyfill que
+      paquetes reales que targetean `netstandard2.0` (incluido `System.Text.Json` en versiones
+      viejas) usan para tener Span — mismo shape de IL real, no un atajo de test.
+- [x] **Bug real encontrado y arreglado — indexador de `Span<T>` devolvía el valor, no una
+      referencia**: `Span<T>.this[int]` está declarado `ref T` (`ref readonly T` en
+      `ReadOnlySpan<T>`) — confirmado contra IL real antes de arreglar: tanto `span[i]` como
+      `span[i] = v` compilan al **mismo** `call get_Item` seguido de `ldind.i4`/`stind.i4`; no
+      existe un `set_Item` separado en los metadatos para un indexador que devuelve `ref`. La
+      primera versión devolvía el elemento directo, lo que hacía fallar el `ldind.i4` siguiente
+      con "dereferencing a null managed pointer" (recibía un valor, no un `KindRef`). Arreglado
+      devolviendo `runtime.RefTo(&backing.Arr.Elems[start+idx])` para el caso array, o un puntero
+      a un `Int32` recién boxeado para el caso string (los strings de Go no tienen almacenamiento
+      direccionable por rune — seguro solo porque ese puntero se usa de forma transitoria, deref'd
+      de inmediato por el `ldind` que sigue). Se eliminó el `set_Item` que se había registrado al
+      principio — código muerto, nunca hay un sitio de llamada real que lo use.
+- [x] **Bug real encontrado y arreglado — `ReadOnlySpan<char>.ToString()` no despachaba**:
+      devolvía el placeholder genérico `<ReadOnlySpan``1>` en vez del substring real. Mismo patrón
+      que `StringBuilder.ToString()` en Fase 3.6: el sitio de llamada compila a `constrained.` +
+      `callvirt Object::ToString`, no una llamada directa al método declarado en `Span`1`.
+      Arreglado extendiendo `displayString` (`system_object.go`) para reconocer también
+      `KindStruct` y despachar vía un nuevo helper compartido `spanToStringValue`.
+- [x] **Bug real encontrado y arreglado — overflow de `time.Duration` en la conversión de ticks
+      (el más serio de la fase)**: la primera versión de `timeToTicks`/`ticksToTime` usaba
+      `t.Sub(dotnetEpoch)` / `dotnetEpoch.Add(time.Duration(secs)*time.Second)`. `time.Duration`
+      es un `int64` de *nanosegundos*, válido solo para spans de ~292 años — la brecha de ~2000
+      años entre el epoch de .NET (año 1) y cualquier fecha real del siglo XXI desborda
+      silenciosamente (`time.Time.Sub` no da error, clampea a `math.MaxInt64`/`MinInt64`), y todas
+      las fechas de prueba colapsaban al mismo resultado incorrecto sin importar el input. No se
+      encontró por inspección de código — el razonamiento sobre la aritmética parecía correcto en
+      el papel — sino agregando prints de depuración temporales que mostraron argumentos de
+      entrada correctos (2024, 3, 15) contra ticks de salida sin sentido, aislando el bug a la
+      conversión en sí. Arreglado reescribiendo ambas funciones sobre aritmética de segundos Unix
+      (`time.Unix`/`t.Unix()`, que no comparte el límite de `Duration`), anclada al constante
+      conocido `unixEpochTicks = 621355968000000000`.
+- [x] **Bug real encontrado y arreglado — `System.DateTime::.ctor` no resolvía para construcción
+      directa sobre un local**: `new DateTime(2024,3,15)` asignado directo a un local compila
+      `ldloca.s`+argumentos+`call .ctor` (confirmado contra IL real), **no** `newobj` — el mismo
+      patrón que ya había obligado a un fix en Fase 3.7 para structs de plugin, pero nunca se
+      había replicado para un value type nativo. Sin el fix, esa forma de llamada caía en el
+      registro regular de `bcl.Lookup` (que solo tenía la entrada de `newobj` vía
+      `registerValueTypeCtor`) y fallaba como método no resuelto. Arreglado registrando también
+      `"System.DateTime::.ctor"` en el registro regular, con una función (`dateTimeCtorInPlace`)
+      que muta `*args[0].Ref` en el lugar en vez de devolver un valor nuevo.
+
+**Fixtures y tests**
+
+- [x] `DateTimeSpan.cs` / `TestDateTimeSpan` — `DateTimeSpanTest`: `YearMonthDay` (construcción +
+      lectura de campos), `AddDaysAcrossMonth` (aritmética de calendario cruzando un límite de
+      mes), `CompareDates` (`CompareTo`), `SpanSum` (`Span<int>` sobre un array vía `AsSpan`,
+      suma por índice), `ReadOnlySpanSubstring` (`ReadOnlySpan<char>` sobre un string, `Slice` +
+      `ToString`), `SpanWriteThrough` (escritura por índice a través del indexador `ref`,
+      confirmando que el valor persiste en el array de respaldo).
+
+### Lo que se dejó explícitamente afuera de esta fase
+
+```txt
+- Formato/parseo cultural real de DateTime (ToString con format string, culturas no invariant,
+  DateTime.Parse/TryParse): vmnet no modela CultureInfo más allá del stub de Fase 3.6; ToString
+  usa un formato fijo. Ningún paquete de los 8 targets lo necesitaba para pasar el checker.
+- TimeSpan como tipo propio: se ve en varios de los 8 targets (Humanizer especialmente), pero
+  DateTime.Add* ya cubre la aritmética que los casos reales medidos necesitaban; TimeSpan como
+  value type de primera clase queda para una fase futura si el probe lo justifica.
+- Span<T>/Memory<T> sobre memoria no administrada (punteros crudos, `stackalloc`, `fixed`):
+  fuera de alcance permanente, no solo de esta fase — vmnet no tiene memoria sin gestionar (spec
+  §3, "qué no es").
+- DateTimeOffset, TimeZoneInfo: no aparecieron en el probe de los 8 targets con volumen
+  suficiente para justificar la superficie extra.
+```
+
+### Re-certificación contra los mismos 8 targets (7 paquetes + Jint)
+
+| Paquete | % limpio Fase 3.11 | % limpio Fase 3.12 |
+|---|---|---|
+| `Ardalis.GuardClauses@5.0.0` | 90.9% | 91.2% |
+| `FluentValidation@11.9.2` | 78.9% | 78.9% |
+| `System.Text.Json@8.0.5` | 71.1% | 77.1% |
+| `Newtonsoft.Json@13.0.3` | 65.7% | 65.8% |
+| `Semver@2.3.0` | 78.0% | 78.0% |
+| `SimpleBase@4.0.0` | 49.2% | 60.5% |
+| `Humanizer.Core@2.14.1` | 48.0% | 82.4% |
+| **Promedio (7 paquetes)** | **68.8%** | **76.3%** |
+| `Jint@3.1.3` | 80.6% | 81.0% |
+| **Promedio (7 paquetes + Jint)** | **70.3%** | **76.9%** |
+
+El salto más grande de toda la secuencia 3.6-3.12: +7.5 puntos en los 7 paquetes (+6.6 con Jint).
+`Humanizer.Core` solo (+34.4 puntos) explica la mayor parte — es literalmente una librería de
+"humanizar" fechas/tiempos ("hace 3 días", "en 2 horas"), así que `DateTime` era su bloqueador
+dominante, no uno más entre varios. `SimpleBase` (+11.3) y `System.Text.Json` (+6.0) confirman la
+hipótesis original del probe: ambos usan `Span<byte>`/`ReadOnlySpan<char>` en sus rutas de
+codificación/parseo de bajo nivel. `Ardalis.GuardClauses`/`FluentValidation`/`Newtonsoft.Json`/
+`Semver`/`Jint` se mueven poco o nada — ya tenían menos DateTime/Span relativo a su tamaño que los
+tres que sí saltaron, confirmando que la priorización basada en datos (impacto concentrado, no
+ancho) fue la lectura correcta del probe.
+
+Con 76.9% (7 paquetes + Jint), el criterio de cierre firme de 85% **todavía no se alcanza** —
+queda una Fase 3.x adicional antes de poder cerrar Fase 3.6+ y pasar a Fase 4.
+
+### Cómo verificar Fase 3.12
+
+```bash
+go test ./... -race -count=3
+go test ./ -run TestDateTimeSpan -v
 ```
 
 ---
