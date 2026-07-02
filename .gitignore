@@ -27,6 +27,11 @@ go.work.sum
 # env file
 .env
 
+# .NET build output for the C# test fixtures (dev-only dependency, see
+# tests/fixtures/csharp/README.md) — never a runtime dependency of vmnet
+tests/fixtures/csharp/bin/
+tests/fixtures/csharp/obj/
+
 # Editor/IDE
 # .idea/
 # .vscode/
