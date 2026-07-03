@@ -1,0 +1,118 @@
+package metadata
+
+import (
+	"encoding/binary"
+	"fmt"
+)
+
+// fieldAttrLiteral is FieldAttributes.Literal (ECMA-335 §II.23.1.5) — set
+// on every enum member and any other C# `const` field. Duplicated from
+// the root package's own fieldAttrLiteral (assembly.go): this package
+// can't import it (internal/ dependency direction goes the other way),
+// same reasoning as every other small constant duplicated across the
+// package boundary in this project.
+const fieldAttrLiteral = 0x0040
+
+// constantForField finds the Constant table row backing fieldRID's
+// compile-time value (ECMA-335 §II.22.9) — every enum member and C#
+// `const` field has exactly one, found by a linear scan over the (usually
+// small) Constant table matching Parent against this field's own token.
+// There's no index from Field RID to Constant RID in the metadata format
+// itself (System.Reflection.Metadata computes one lazily too), and vmnet
+// only calls this per-enum, not per-field-access, so a scan is fine.
+func (md *Metadata) constantForField(fieldRID uint32) (ConstantRow, bool, error) {
+	n := md.RowCount(TableConstant)
+	for rid := uint32(1); rid <= n; rid++ {
+		row, err := md.Constant(rid)
+		if err != nil {
+			return ConstantRow{}, false, err
+		}
+		if row.Parent.Table() == TableField && row.Parent.RID() == fieldRID {
+			return row, true, nil
+		}
+	}
+	return ConstantRow{}, false, nil
+}
+
+// decodeConstantInt64 decodes a Constant blob (ECMA-335 §II.23.2.16) whose
+// Type tag is one of the fixed-width integer/boolean/char element types —
+// the only shapes an enum member's value ever takes (its underlying type
+// is always an integral primitive, spec §I.8.5.2).
+func decodeConstantInt64(tag byte, blob []byte) (int64, error) {
+	switch tag {
+	case elementBoolean, elementI1:
+		if len(blob) < 1 {
+			return 0, fmt.Errorf("metadata: truncated constant (i1)")
+		}
+		return int64(int8(blob[0])), nil
+	case elementU1:
+		if len(blob) < 1 {
+			return 0, fmt.Errorf("metadata: truncated constant (u1)")
+		}
+		return int64(blob[0]), nil
+	case elementChar, elementI2:
+		if len(blob) < 2 {
+			return 0, fmt.Errorf("metadata: truncated constant (i2)")
+		}
+		return int64(int16(binary.LittleEndian.Uint16(blob))), nil
+	case elementU2:
+		if len(blob) < 2 {
+			return 0, fmt.Errorf("metadata: truncated constant (u2)")
+		}
+		return int64(binary.LittleEndian.Uint16(blob)), nil
+	case elementI4:
+		if len(blob) < 4 {
+			return 0, fmt.Errorf("metadata: truncated constant (i4)")
+		}
+		return int64(int32(binary.LittleEndian.Uint32(blob))), nil
+	case elementU4:
+		if len(blob) < 4 {
+			return 0, fmt.Errorf("metadata: truncated constant (u4)")
+		}
+		return int64(binary.LittleEndian.Uint32(blob)), nil
+	case elementI8, elementU8:
+		if len(blob) < 8 {
+			return 0, fmt.Errorf("metadata: truncated constant (i8)")
+		}
+		return int64(binary.LittleEndian.Uint64(blob)), nil
+	default:
+		return 0, fmt.Errorf("metadata: unsupported enum constant type tag %#x", tag)
+	}
+}
+
+// EnumMembers reads a TypeDef's literal static fields (its enum members,
+// e.g. Red/Yellow/Green on `enum TrafficLight`) in declaration order,
+// resolving each one's real value from the Constant table — the
+// TrafficLight fixture's own `value__` field is skipped (not literal, no
+// Constant row); only Fase 3.25's fieldAttrLiteral check protected against
+// recursing into it as a value-typed field, this is the other half: doing
+// something useful with what that check skips.
+func (md *Metadata) EnumMembers(typeRID uint32) (names []string, values []int64, err error) {
+	start, end, err := md.TypeDefFieldRange(typeRID)
+	if err != nil {
+		return nil, nil, err
+	}
+	for rid := start; rid < end; rid++ {
+		f, err := md.Field(rid)
+		if err != nil {
+			return nil, nil, err
+		}
+		if f.Flags&fieldAttrLiteral == 0 {
+			continue
+		}
+		row, ok, err := md.constantForField(rid)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !ok {
+			continue
+		}
+		v, err := decodeConstantInt64(row.Type, row.Value)
+		if err != nil {
+			return nil, nil, err
+		}
+		names = append(names, f.Name)
+		values = append(values, v)
+	}
+	return names, values, nil
+}

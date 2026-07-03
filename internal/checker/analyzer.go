@@ -216,6 +216,10 @@ var reflectionMachineTargets = map[string]bool{
 	"System.Type::get_BaseType":    true,
 	"System.Type::GetInterfaces":   true,
 	"System.Type::GetType":         true,
+	"System.Enum::GetValues":       true,
+	"System.Enum::GetNames":        true,
+	"System.Enum::IsDefined":       true,
+	"System.Enum::ToObject":        true,
 }
 
 // asyncMachineTargets lists the async-related methods resolved through

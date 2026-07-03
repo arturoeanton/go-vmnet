@@ -10,7 +10,8 @@ import (
 
 func (asm *Assembly) machine() *interpreter.Machine {
 	return interpreter.New(asm.resolveByFullName, asm.resolveTypeByFullName, interpreter.DefaultLimits()).
-		WithExplicitImplResolver(asm.resolveExplicitImpl)
+		WithExplicitImplResolver(asm.resolveExplicitImpl).
+		WithEnumResolver(asm.resolveEnumMembers)
 }
 
 // Call resolves typeName.methodName (e.g. "Rules.Engine", "Eval") and

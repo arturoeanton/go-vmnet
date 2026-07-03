@@ -15,6 +15,115 @@ func init() {
 	machineRegistry["System.Type::get_BaseType"] = typeGetBaseType
 	machineRegistry["System.Type::GetInterfaces"] = typeGetInterfaces
 	machineRegistry["System.Type::GetType"] = typeStaticGetType
+	machineRegistry["System.Enum::GetValues"] = enumGetValues
+	machineRegistry["System.Enum::GetNames"] = enumGetNames
+	machineRegistry["System.Enum::IsDefined"] = enumIsDefined
+	machineRegistry["System.Enum::ToObject"] = enumToObject
+}
+
+// enumTypeMembers resolves a System.Type argument's real enum members via
+// Machine.ResolveEnum (Fase 3.26) — only ever succeeds for a plugin-
+// declared enum (a real TypeDef in the loaded assembly's own metadata);
+// a BCL-only enum like System.DayOfWeek fails here, since vmnet has no
+// BCL enum member database at all (documented limitation, same reasoning
+// as every other "no real BCL metadata" gap in this project).
+func enumTypeMembers(m *Machine, typeArg runtime.Value) (names []string, values []int64, err error) {
+	fullName, ok := bcl.TypeFullNameOf(typeArg)
+	if !ok {
+		return nil, nil, fmt.Errorf("interpreter: Enum method expects a Type argument")
+	}
+	if m.ResolveEnum == nil {
+		return nil, nil, fmt.Errorf("interpreter: no enum member data available for %s", fullName)
+	}
+	names, values, ok = m.ResolveEnum(bcl.GenericOpenName(fullName))
+	if !ok {
+		return nil, nil, fmt.Errorf("interpreter: %s is not a resolvable plugin enum (vmnet has no BCL enum member database)", fullName)
+	}
+	return names, values, nil
+}
+
+func enumGetValues(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enum.GetValues expects 1 argument")
+	}
+	_, values, err := enumTypeMembers(m, args[0])
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	elems := make([]runtime.Value, len(values))
+	for i, v := range values {
+		elems[i] = runtime.Int32(int32(v))
+	}
+	return runtime.ArrRef(&runtime.Array{Elems: elems}), nil
+}
+
+func enumGetNames(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enum.GetNames expects 1 argument")
+	}
+	names, _, err := enumTypeMembers(m, args[0])
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	elems := make([]runtime.Value, len(names))
+	for i, n := range names {
+		elems[i] = runtime.String(n)
+	}
+	return runtime.ArrRef(&runtime.Array{Elems: elems}), nil
+}
+
+// enumIsDefined accepts either the underlying integer value or the
+// member's name (both real overload shapes of Enum.IsDefined(Type,
+// object) — vmnet's call dispatch doesn't distinguish overloads, so the
+// argument's own Kind picks the comparison, same approach every other
+// multi-overload native in this project uses).
+func enumIsDefined(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enum.IsDefined expects 2 arguments")
+	}
+	names, values, err := enumTypeMembers(m, args[0])
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	switch args[1].Kind {
+	case runtime.KindString:
+		for _, n := range names {
+			if n == args[1].Str {
+				return runtime.Bool(true), nil
+			}
+		}
+	default:
+		target, err := toInt64(args[1])
+		if err != nil {
+			return runtime.Value{}, fmt.Errorf("interpreter: Enum.IsDefined: %w", err)
+		}
+		for _, v := range values {
+			if v == target {
+				return runtime.Bool(true), nil
+			}
+		}
+	}
+	return runtime.Bool(false), nil
+}
+
+// enumToObject constructs a boxed enum instance from its underlying
+// value — a no-op in vmnet's Value model, where an enum instance is
+// already just its underlying integer Kind (boxing never changes
+// representation here, see objectToString's doc comment,
+// internal/bcl/system_object.go). Doesn't validate the value is actually
+// a defined member — real Enum.ToObject doesn't either.
+func enumToObject(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enum.ToObject expects 2 arguments")
+	}
+	switch args[1].Kind {
+	case runtime.KindI4:
+		return args[1], nil
+	case runtime.KindI8:
+		return runtime.Int32(int32(args[1].I8)), nil
+	default:
+		return runtime.Value{}, fmt.Errorf("interpreter: Enum.ToObject: unsupported value kind %v", args[1].Kind)
+	}
 }
 
 // bclPrimitiveValueTypes/bclKnownInterfaces are hand-maintained, mirroring

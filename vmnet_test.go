@@ -1703,3 +1703,47 @@ func TestReflection2(t *testing.T) {
 	boolCase("Type.GetType(unknown) is null", "GetTypeUnknownIsNullTest", true)
 	boolCase("Type.Assembly.ToString() is non-empty", "AssemblyToStringNotEmptyTest", true)
 }
+
+func TestReflection3(t *testing.T) {
+	asm := loadFixture(t)
+
+	call := func(method string) Value {
+		t.Helper()
+		out, err := asm.Call("Vmnet.Fixtures.Reflection3", method)
+		if err != nil {
+			t.Fatalf("%s() error = %v", method, err)
+		}
+		return out
+	}
+
+	t.Run("Enum.GetValues", func(t *testing.T) {
+		if got := call("EnumGetValuesTest").Native().(string); got != "012" {
+			t.Errorf("EnumGetValuesTest() = %q, want %q", got, "012")
+		}
+	})
+	t.Run("Enum.GetNames", func(t *testing.T) {
+		if got := call("EnumGetNamesTest").Native().(string); got != "Red;Yellow;Green;" {
+			t.Errorf("EnumGetNamesTest() = %q, want %q", got, "Red;Yellow;Green;")
+		}
+	})
+	t.Run("Enum.IsDefined by value", func(t *testing.T) {
+		if got := call("EnumIsDefinedByValueTest").Native().(int32); got == 0 {
+			t.Errorf("EnumIsDefinedByValueTest() = %d, want nonzero", got)
+		}
+	})
+	t.Run("Enum.IsDefined by value (false)", func(t *testing.T) {
+		if got := call("EnumIsDefinedByValueFalseTest").Native().(int32); got != 0 {
+			t.Errorf("EnumIsDefinedByValueFalseTest() = %d, want 0", got)
+		}
+	})
+	t.Run("Enum.IsDefined by name", func(t *testing.T) {
+		if got := call("EnumIsDefinedByNameTest").Native().(int32); got == 0 {
+			t.Errorf("EnumIsDefinedByNameTest() = %d, want nonzero", got)
+		}
+	})
+	t.Run("Enum.ToObject", func(t *testing.T) {
+		if got := call("EnumToObjectTest").Native().(int32); got != 2 {
+			t.Errorf("EnumToObjectTest() = %d, want 2", got)
+		}
+	})
+}

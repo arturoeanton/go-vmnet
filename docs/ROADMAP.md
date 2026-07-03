@@ -2607,6 +2607,102 @@ go test ./... -race -count=5
 go test ./ -run TestReflection2 -v
 ```
 
+### Fase 3.26 — System.Enum.GetValues/GetNames/IsDefined/ToObject
+
+El hallazgo de mayor ancho tras Fase 3.25 (`System.Enum::IsDefined`, 5/8 paquetes). A diferencia de
+la introspección de `Type` (Fase 3.25, pura manipulación de nombres), esto necesita un dato que
+vmnet nunca había leído: el valor real de cada miembro de un enum, que vive en la tabla `Constant`
+de metadata (spec §II.22.9) — sin parser hasta esta fase.
+
+**Tareas**
+
+- [x] **`internal/metadata/constant.go`** (archivo nuevo): `constantForField` (búsqueda lineal
+      sobre la tabla `Constant`, que no tiene índice directo desde un RID de campo — igual que
+      System.Reflection.Metadata de .NET real la calcula perezosamente también; la tabla es
+      pequeña y esto solo se llama por-enum, no por-acceso-a-campo), `decodeConstantInt64`
+      (decodifica el blob según su tag de tipo: booleano/char/i1/u1/i2/u2/i4/u4/i8/u8 — el único
+      conjunto de formas que el valor subyacente de un miembro de enum puede tomar), y
+      `EnumMembers(typeRID)` (nombres + valores reales, en orden de declaración, saltando el
+      campo `value__` no-literal que Fase 3.25 ya identificó). `ConstantRow`/`md.Constant(rid)`
+      ya existían en `internal/metadata/resolver.go` (aparentemente de una fase anterior, nunca
+      conectados a nada) — esta fase es lo que finalmente los usa.
+- [x] **Nuevo resolver en la cadena `Machine`**: `EnumResolver` (`internal/interpreter/calls.go`)
+      + `Machine.ResolveEnum` + `WithEnumResolver` (`eval.go`), mismo patrón que
+      `ExplicitImplResolver` (Fase 3.13) — conectado en `call.go` vía `asm.resolveEnumMembers`
+      (`assembly.go`: `FindTypeDef` + `md.EnumMembers`). Solo resuelve un enum declarado por el
+      propio plugin (un `TypeDef` real); un enum solo-BCL como `System.DayOfWeek` no tiene
+      metadata en absoluto en el ensamblado del plugin, así que falla ahí — vmnet no tiene (ni
+      tendrá pronto) una base de datos de miembros de enums de la BCL real.
+- [x] `Enum.GetValues(Type)`/`GetNames(Type)` (Machine-aware, `internal/interpreter/
+      reflection.go`): arrays de `Int32`/`String` en orden de declaración. `GetValues` no
+      necesitó ningún cambio en el intérprete — el array resultante ya fluye a través de
+      `System.Array::GetEnumerator` (Fase 3.24) para el `foreach` que casi siempre lo consume.
+- [x] `Enum.IsDefined(Type, object)`: acepta tanto el valor entero subyacente como el nombre del
+      miembro (dos formas reales del mismo overload) — el `Kind` del segundo argumento elige la
+      comparación, mismo patrón que cada otro native multi-overload de este proyecto.
+- [x] `Enum.ToObject(Type, object)`: no-op sobre el valor subyacente — boxear un enum no cambia su
+      representación en el modelo de `Value` de vmnet (mismo razonamiento que el comentario de
+      `objectToString`), y — igual que la implementación real — no valida que el valor sea
+      realmente un miembro definido.
+
+**Fixtures y tests**
+
+- [x] `Reflection3.cs` / `TestReflection3` (6 casos) — reusa el `enum TrafficLight` de
+      `Reflection2.cs` (Fase 3.25).
+
+**Lo que se dejó explícitamente afuera**
+
+- Un enum solo-BCL (`System.DayOfWeek`, `System.ConsoleColor`, ...) sigue sin funcionar: ninguno
+  tiene `TypeDef` en el ensamblado del plugin. Cubrir esto necesitaría una base de datos completa
+  hardcodeada de miembros de enums BCL conocidos — alto mantenimiento, bajo valor frente al bloque
+  de reflexión real que sigue (ver abajo).
+- El bloque grande de reflexión sigue intacto: `System.Reflection.MethodInfo`/`PropertyInfo`/
+  `ConstructorInfo`/`ParameterInfo`/`MemberInfo` como objetos reales, `MethodBase.Invoke`/
+  `Activator.CreateInstance` (invocación dinámica genuina), `Type.GetMethod(s)`/`GetProperties`/
+  `GetConstructors`/`GetFields`/`GetElementType`/`get_IsArray`/`get_IsAbstract` — confirmado por el
+  probe post-3.26 como, con claridad, el bloque de mayor volumen restante (4/8 de ancho:
+  `MethodBase.Invoke`, `MethodInfo::op_Inequality`, `PropertyInfo::get_PropertyType`,
+  `CustomAttributeExtensions::GetCustomAttribute`).
+- `System.Linq.Expressions` (`Expression.Parameter`/`Lambda`, 3/8), `Span\`1::op_Implicit`/
+  `CopyTo`/`Fill` (3/8), `ldsflda`/`localloc` (opcodes, 3/8), `Convert.ChangeType`,
+  `Array.IndexOf`, `List\`1::Remove`, `System.Numerics.BigInteger`, `RuntimeHelpers.GetHashCode`,
+  `Math.Sign`: superficie dispersa sin relación con reflexión — candidatos para un futuro paquete
+  de wins baratos.
+
+### Re-certificación contra los mismos 8 targets (7 paquetes + Jint)
+
+| Paquete | % limpio Fase 3.25 | % limpio Fase 3.26 |
+|---|---|---|
+| `Ardalis.GuardClauses@5.0.0` | 96.8% | 96.8% |
+| `FluentValidation@11.9.2` | 93.7% | 93.9% |
+| `System.Text.Json@8.0.5` | 83.7% | 83.8% |
+| `Newtonsoft.Json@13.0.3` | 80.4% | 80.4% |
+| `Semver@2.3.0` | 91.0% | 91.0% |
+| `SimpleBase@4.0.0` | 85.3% | 85.3% |
+| `Humanizer.Core@2.14.1` | 93.4% | 93.4% |
+| **Promedio (7 paquetes)** | **89.2%** | **89.2%** |
+| `Jint@3.1.3` | 87.6% | 87.6% |
+| **Promedio (7 paquetes + Jint)** | **89.0%** | **89.0%** |
+
+Movimiento nulo al nivel de precisión de la tabla (89.2%/89.0% en ambas), pero real bajo el
+capó: el conteo total de *findings* individuales bajó en cada paquete tocado (`System.Text.Json`
+1306→1301, `Newtonsoft.Json` 1581→1572, `Humanizer.Core` 215→209, `Jint` 1733→1730,
+`FluentValidation` 188→185, `Ardalis.GuardClauses` 16→14) — las cuatro llamadas de `Enum` dejaron
+de aparecer como *finding* en absoluto. La certificación no se mueve porque es una métrica *por
+método*: los métodos que llaman `Enum.GetValues`/`IsDefined` en estos paquetes casi siempre
+llaman TAMBIÉN algo del bloque grande de reflexión (`MethodInfo`, `Expression`, ...) en el mismo
+método, así que siguen contando como "método con hallazgos" de todos modos. Esto confirma con
+más fuerza todavía la lectura de Fase 3.25: el único camino real hacia ~97% pasa ahora por el
+bloque de `MethodInfo`/`PropertyInfo`/invocación dinámica — cualquier superficie más chica,
+aislada, seguirá sin mover el número agregado mientras ese bloque siga intacto.
+
+### Cómo verificar Fase 3.26
+
+```bash
+go test ./... -race -count=5
+go test ./ -run TestReflection3 -v
+```
+
 ---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")

@@ -118,6 +118,25 @@ func (asm *Assembly) resolveExplicitImpl(concreteTypeFullName, interfaceFullName
 	return "", false
 }
 
+// resolveEnumMembers backs the interpreter's EnumResolver (Fase 3.26,
+// System.Enum.GetValues/GetNames/IsDefined/ToObject) — only resolves a
+// plugin-declared enum (a real TypeDef in this assembly's own metadata);
+// a BCL-only enum like System.DayOfWeek has none, so ok=false there
+// (vmnet has no BCL enum member database, same documented limitation as
+// every other "no real BCL metadata" gap in this project).
+func (asm *Assembly) resolveEnumMembers(fullName string) ([]string, []int64, bool) {
+	namespace, name := splitTypeName(fullName)
+	typeRID, _, err := asm.md.FindTypeDef(namespace, name)
+	if err != nil {
+		return nil, nil, false
+	}
+	names, values, err := asm.md.EnumMembers(typeRID)
+	if err != nil {
+		return nil, nil, false
+	}
+	return names, values, true
+}
+
 // resolveMethodDefOrRefName resolves a MethodDefOrRef-coded token (spec
 // §II.24.2.6) to its owning type's full name and its own method name —
 // used only by resolveExplicitImpl above, which needs both halves of a

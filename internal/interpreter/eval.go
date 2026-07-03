@@ -15,6 +15,7 @@ type Machine struct {
 	Resolve             Resolver
 	ResolveType         TypeResolver
 	ResolveExplicitImpl ExplicitImplResolver
+	ResolveEnum         EnumResolver
 	Limits              Limits
 
 	// cctorsRunning tracks static constructors currently executing on
@@ -38,6 +39,15 @@ func New(resolve Resolver, resolveType TypeResolver, limits Limits) *Machine {
 // match" (not an error) when unset.
 func (m *Machine) WithExplicitImplResolver(r ExplicitImplResolver) *Machine {
 	m.ResolveExplicitImpl = r
+	return m
+}
+
+// WithEnumResolver attaches an EnumResolver (Fase 3.26) — same rationale
+// as WithExplicitImplResolver: a separate setter so existing callers keep
+// compiling unchanged, degrading to "no plugin enum data available"
+// rather than an error when unset.
+func (m *Machine) WithEnumResolver(r EnumResolver) *Machine {
+	m.ResolveEnum = r
 	return m
 }
 

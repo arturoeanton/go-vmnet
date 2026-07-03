@@ -587,3 +587,27 @@ queda confirmado como la superficie de mayor volumen restante — un
 diseño más grande (jerarquía de objetos respaldada por metadata real más
 invocación dinámica genuina), candidato para Fase 3.26. Con 89.0% el
 objetivo de ~97% todavía no se alcanza.
+
+Fase 3.26 (`System.Enum.GetValues`/`GetNames`/`IsDefined`/`ToObject`)
+completa. Necesitaba un dato que vmnet nunca había leído: el valor real
+de cada miembro de un enum vive en la tabla `Constant` de metadata,
+sin parser hasta ahora. `internal/metadata/constant.go` (nuevo):
+`constantForField` (búsqueda lineal — sin índice directo de RID de campo
+a fila `Constant` en el formato mismo), `decodeConstantInt64`,
+`EnumMembers(typeRID)`. `ConstantRow`/`md.Constant(rid)` ya existían en
+`resolver.go` de una fase anterior, nunca conectados a nada — esta fase
+los usa por primera vez. Nuevo `EnumResolver` en la cadena `Machine`
+(mismo patrón que `ExplicitImplResolver`, Fase 3.13), conectado vía
+`asm.resolveEnumMembers` — solo resuelve un enum declarado por el propio
+plugin (un `TypeDef` real); un enum solo-BCL como `System.DayOfWeek`
+sigue sin funcionar (vmnet no tiene base de datos de miembros de enums
+BCL). `Enum.GetValues`/`GetNames` no necesitaron ningún cambio en el
+intérprete — el array resultante fluye directo a través de
+`System.Array::GetEnumerator` (Fase 3.24). Certificación: 89.2%/89.0%
+sin cambio a nivel de tabla, pero real bajo el capó — el conteo de
+*findings* individuales bajó en cada paquete tocado (`Enum.*` dejó de
+aparecer como hallazgo), pero la métrica es por-método y esos mismos
+métodos casi siempre llaman también algo del bloque grande de reflexión
+todavía pendiente, así que siguen contando como "método con hallazgos".
+Confirma con más fuerza que el único camino real hacia ~97% pasa ahora
+por `MethodInfo`/`PropertyInfo`/invocación dinámica.

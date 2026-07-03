@@ -27,6 +27,15 @@ type TypeResolver func(fullName string) (*runtime.Type, error)
 // in Machine.call already covers that case.
 type ExplicitImplResolver func(concreteTypeFullName, interfaceFullName, methodName string) (implMethodName string, ok bool)
 
+// EnumResolver reads a plugin-declared enum's members (name, real
+// constant value) in declaration order — e.g. ["Red","Yellow","Green"],
+// [0,1,2] for `enum TrafficLight` (Fase 3.26, System.Enum.GetValues/
+// GetNames/IsDefined/ToObject). ok=false when fullName doesn't name a
+// resolvable plugin enum (a BCL-only enum like System.DayOfWeek, or any
+// other unresolvable name) — vmnet has no metadata at all for BCL enums
+// it doesn't declare itself.
+type EnumResolver func(fullName string) (names []string, values []int64, ok bool)
+
 // call dispatches fullName as either a BCL native or an interpreted
 // method. virtual must be true only for an actual `callvirt` site — the
 // interface/virtual-dispatch fallback below must never apply to a plain

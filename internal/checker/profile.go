@@ -146,6 +146,10 @@ func init() {
 		"System.Delegate::",
 		"System.Nullable::GetUnderlyingType",
 		"System.Reflection.Assembly::",
+		"System.Enum::GetValues",
+		"System.Enum::GetNames",
+		"System.Enum::IsDefined",
+		"System.Enum::ToObject",
 	)
 	// netstandard-lite currently promises exactly the same BCL surface as
 	// rules (System.Type moved into `rules` in Fase 3.14, System.Convert
