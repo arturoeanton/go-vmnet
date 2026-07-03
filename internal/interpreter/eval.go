@@ -52,6 +52,19 @@ func (m *Machine) WithEnumResolver(r EnumResolver) *Machine {
 	return m
 }
 
+// WithFieldBytesResolver attaches a FieldBytesResolver (Fase 3.27,
+// RuntimeHelpers.InitializeArray) — same rationale as
+// WithExplicitImplResolver: a separate setter so existing callers keep
+// compiling unchanged. Redundant for any method actually invoked through
+// Invoke (Machine.invoke swaps in method.Resolvers.ResolveFieldBytes
+// before running its body regardless), but leaving this field nil until
+// that first swap is needless asymmetry with the other four resolvers,
+// which every constructor call site already sets up front.
+func (m *Machine) WithFieldBytesResolver(r FieldBytesResolver) *Machine {
+	m.ResolveFieldBytes = r
+	return m
+}
+
 // Invoke runs method with args and returns its result (the zero Value if
 // method is void).
 //

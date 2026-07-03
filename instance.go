@@ -101,36 +101,23 @@ func wrapResult(asm *Assembly, v runtime.Value) Value {
 		if v.Struct == nil || v.Struct.Type == nil {
 			return nil
 		}
-		return &Instance{asm: asm, typeName: qualifiedOrPlain(v.Struct.Type), value: v}
+		return &Instance{asm: asm, typeName: qualifiedOrPlainName(v.Struct.Type), value: v}
 	default:
 		return nil
 	}
 }
 
 // objectTypeName names obj's real type — a plugin/dependency class
-// (obj.Type, a real TypeDef) or a BCL-native-backed one (obj.Native,
-// e.g. List<T>/Dictionary<K,V> — the same hand-maintained name table
-// their own register() calls use, bcl.NativeTypeName).
+// (obj.Type, a real TypeDef, named via assembly.go's qualifiedOrPlainName)
+// or a BCL-native-backed one (obj.Native, e.g. List<T>/Dictionary<K,V> —
+// the same hand-maintained name table their own register() calls use,
+// bcl.NativeTypeName).
 func objectTypeName(obj *runtime.Object) string {
 	if obj.Type != nil {
-		return qualifiedOrPlain(obj.Type)
+		return qualifiedOrPlainName(obj.Type)
 	}
 	if name, ok := bcl.NativeTypeName(obj.Native); ok {
 		return name
 	}
 	return ""
-}
-
-// qualifiedOrPlain mirrors assembly.go's qualifiedOrPlainName: prefers
-// t.QualifiedName (the real "+"-nested full name — needed since two
-// different nested types can share the same bare Name/Namespace, Fase
-// 3.17) and falls back to Namespace+"."+Name.
-func qualifiedOrPlain(t *runtime.Type) string {
-	if t.QualifiedName != "" {
-		return t.QualifiedName
-	}
-	if t.Namespace == "" {
-		return t.Name
-	}
-	return t.Namespace + "." + t.Name
 }

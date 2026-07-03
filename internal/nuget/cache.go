@@ -23,12 +23,6 @@ func (c *Cache) path(id, version string) string {
 	return filepath.Join(c.Dir, idl, vl, idl+"."+vl+".nupkg")
 }
 
-// Has reports whether id@version is already cached.
-func (c *Cache) Has(id, version string) bool {
-	_, err := os.Stat(c.path(id, version))
-	return err == nil
-}
-
 // Load reads a cached .nupkg's bytes.
 func (c *Cache) Load(id, version string) ([]byte, error) {
 	return os.ReadFile(c.path(id, version))
