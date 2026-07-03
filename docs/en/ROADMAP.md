@@ -3255,6 +3255,40 @@ go test ./... -race -count=5
 /tmp/vmnet-cli check package ClosedXML@0.105.0 --profile=netstandard-lite # no System.Xml.XmlWriter findings
 ```
 
+### Fase 3.34 — 6 more `System.Linq.Enumerable` methods
+
+Quick, mechanical follow-up clearing out the rest of ClosedXML's small LINQ tail before moving to
+the bigger `System.Xml.Linq` blocker: `Single`/`SingleOrDefault` (like `First`/`FirstOrDefault` but
+also throwing `InvalidOperationException` on more than one match), `OrderByDescending` (built by
+reversing `OrderBy`'s ascending result rather than duplicating the sort), `ElementAt`, `Skip`,
+`Union` (`Concat` + `Distinct`'s dedup, preserving first-occurrence order across both sequences).
+Every one reuses `enumerateAll`/`linqInvoke`/`linqCompare` from Fase 3.14/3.32 — no new machinery.
+
+- [x] `internal/interpreter/linq.go`: the 6 methods above.
+- [x] `internal/checker/analyzer.go`'s `linqTargets` updated to match — same two-step registration
+      every Machine-registry addition needs.
+
+**Result**
+
+| Package | Fase 3.33 clean % | Fase 3.34 clean % |
+|---|---|---|
+| `ClosedXML@0.105.0` | 92.9% (`MethodsFlagged` 741) | 93.3% (`MethodsFlagged` 703) |
+
+Remaining top blockers: `System.Xml.Linq` (`XName`/`XElement`/`XAttribute`/`XContainer` — reading
+existing XML parts, e.g. template worksheets), `System.Collections.Generic.IReadOnlyDictionary`2::
+get_Item` (45, an interface-typed call the Fase 3.13 interface-dispatch fallback doesn't cover
+yet), and a long tail of smaller items (`System.Drawing.Color`/`Point`, `DateTime.ToOADate`/
+`FromOADate`, `System.Reflection.CustomAttributeData`).
+
+### How to verify Fase 3.34
+
+```bash
+go build ./...
+go vet ./...
+go test ./... -race -count=5
+/tmp/vmnet-cli check package ClosedXML@0.105.0 --profile=netstandard-lite
+```
+
 ---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 

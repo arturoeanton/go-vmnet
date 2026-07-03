@@ -3280,6 +3280,42 @@ go test ./... -race -count=5
 /tmp/vmnet-cli check package ClosedXML@0.105.0 --profile=netstandard-lite # sin findings de System.Xml.XmlWriter
 ```
 
+### Fase 3.34 — 6 métodos más de `System.Linq.Enumerable`
+
+Seguimiento rápido y mecánico limpiando el resto de la cola chica de LINQ de ClosedXML antes de
+pasar al bloqueador más grande de `System.Xml.Linq`: `Single`/`SingleOrDefault` (como
+`First`/`FirstOrDefault` pero también lanzando `InvalidOperationException` con más de un match),
+`OrderByDescending` (construido invirtiendo el resultado ascendente de `OrderBy` en vez de duplicar
+el sort), `ElementAt`, `Skip`, `Union` (`Concat` + el dedup de `Distinct`, preservando el orden de
+primera-aparición a través de ambas secuencias). Cada uno reutiliza
+`enumerateAll`/`linqInvoke`/`linqCompare` de Fase 3.14/3.32 — sin maquinaria nueva.
+
+- [x] `internal/interpreter/linq.go`: los 6 métodos de arriba.
+- [x] `linqTargets` de `internal/checker/analyzer.go` actualizado para que coincida — el mismo
+      registro en dos pasos que necesita cualquier agregado al Machine-registry.
+
+**Resultado**
+
+| Paquete | % limpio Fase 3.33 | % limpio Fase 3.34 |
+|---|---|---|
+| `ClosedXML@0.105.0` | 92.9% (`MethodsFlagged` 741) | 93.3% (`MethodsFlagged` 703) |
+
+Bloqueadores principales restantes: `System.Xml.Linq` (`XName`/`XElement`/`XAttribute`/
+`XContainer` — lectura de partes XML existentes, ej. hojas de cálculo plantilla),
+`System.Collections.Generic.IReadOnlyDictionary`2::get_Item` (45, una llamada tipada por interfaz
+que el fallback de despacho por interfaz de Fase 3.13 todavía no cubre), y una cola larga de ítems
+más chicos (`System.Drawing.Color`/`Point`, `DateTime.ToOADate`/`FromOADate`,
+`System.Reflection.CustomAttributeData`).
+
+### Cómo verificar Fase 3.34
+
+```bash
+go build ./...
+go vet ./...
+go test ./... -race -count=5
+/tmp/vmnet-cli check package ClosedXML@0.105.0 --profile=netstandard-lite
+```
+
 ---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")

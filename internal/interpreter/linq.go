@@ -57,6 +57,12 @@ func init() {
 	machineRegistry["System.Linq.Enumerable::ToDictionary"] = linqToDictionary
 	machineRegistry["System.Linq.Enumerable::Max"] = linqMax
 	machineRegistry["System.Collections.Generic.List`1::ForEach"] = listForEach
+	machineRegistry["System.Linq.Enumerable::Single"] = linqSingle
+	machineRegistry["System.Linq.Enumerable::SingleOrDefault"] = linqSingleOrDefault
+	machineRegistry["System.Linq.Enumerable::OrderByDescending"] = linqOrderByDescending
+	machineRegistry["System.Linq.Enumerable::ElementAt"] = linqElementAt
+	machineRegistry["System.Linq.Enumerable::Skip"] = linqSkip
+	machineRegistry["System.Linq.Enumerable::Union"] = linqUnion
 }
 
 // enumerateAll drives an arbitrary IEnumerable<T>'s real iteration
@@ -635,6 +641,152 @@ func linqToDictionary(m *Machine, args []runtime.Value, depth int, instrCount *i
 		pairs[k.String()] = v
 	}
 	return bcl.NewDictValue(pairs), nil
+}
+
+// linqSingle covers Single(source) and Single(source, predicate) — like
+// First but also throws InvalidOperationException on more than one
+// match, matching real Enumerable.Single.
+func linqSingle(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.Single expects a source")
+	}
+	elems, err := m.enumerateAll(args[0], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	var matches []runtime.Value
+	if len(args) == 1 {
+		matches = elems
+	} else {
+		for _, e := range elems {
+			v, err := m.linqInvoke(args[1], e, depth, instrCount)
+			if err != nil {
+				return runtime.Value{}, err
+			}
+			if v.Truthy() {
+				matches = append(matches, e)
+			}
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return runtime.Value{}, &runtime.ManagedException{TypeName: "System.InvalidOperationException", Message: "Sequence contains no elements"}
+	case 1:
+		return matches[0], nil
+	default:
+		return runtime.Value{}, &runtime.ManagedException{TypeName: "System.InvalidOperationException", Message: "Sequence contains more than one element"}
+	}
+}
+
+func linqSingleOrDefault(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.SingleOrDefault expects a source")
+	}
+	elems, err := m.enumerateAll(args[0], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	var matches []runtime.Value
+	if len(args) == 1 {
+		matches = elems
+	} else {
+		for _, e := range elems {
+			v, err := m.linqInvoke(args[1], e, depth, instrCount)
+			if err != nil {
+				return runtime.Value{}, err
+			}
+			if v.Truthy() {
+				matches = append(matches, e)
+			}
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return runtime.Null(), nil
+	case 1:
+		return matches[0], nil
+	default:
+		return runtime.Value{}, &runtime.ManagedException{TypeName: "System.InvalidOperationException", Message: "Sequence contains more than one element"}
+	}
+}
+
+func linqOrderByDescending(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	asc, err := linqOrderBy(m, args, depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	items, _ := bcl.NativeListItems(asc.Obj.Native)
+	out := make([]runtime.Value, len(items))
+	for i, v := range items {
+		out[len(items)-1-i] = v
+	}
+	return bcl.NewListValue(out), nil
+}
+
+func linqElementAt(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 2 || args[1].Kind != runtime.KindI4 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.ElementAt expects (source, index)")
+	}
+	elems, err := m.enumerateAll(args[0], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	idx := int(args[1].I4)
+	if idx < 0 || idx >= len(elems) {
+		return runtime.Value{}, &runtime.ManagedException{TypeName: "System.ArgumentOutOfRangeException", Message: "index"}
+	}
+	return elems[idx], nil
+}
+
+func linqSkip(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 2 || args[1].Kind != runtime.KindI4 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.Skip expects (source, count)")
+	}
+	elems, err := m.enumerateAll(args[0], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	n := int(args[1].I4)
+	if n < 0 {
+		n = 0
+	}
+	if n > len(elems) {
+		n = len(elems)
+	}
+	out := make([]runtime.Value, len(elems)-n)
+	copy(out, elems[n:])
+	return bcl.NewListValue(out), nil
+}
+
+// linqUnion concatenates both sources like Concat but deduplicates the
+// result (valuesDeepEqual, same posture as Distinct), preserving
+// first-occurrence order across both sequences.
+func linqUnion(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.Union expects (first, second)")
+	}
+	a, err := m.enumerateAll(args[0], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	b, err := m.enumerateAll(args[1], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	var out []runtime.Value
+	for _, e := range append(a, b...) {
+		dup := false
+		for _, o := range out {
+			if valuesDeepEqual(e, o) {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			out = append(out, e)
+		}
+	}
+	return bcl.NewListValue(out), nil
 }
 
 // listForEach backs List<T>.ForEach — a machine-aware native (needs to
