@@ -43,7 +43,7 @@ func (asm *Assembly) Call(typeName, methodName string, args ...Value) (Value, er
 	if !method.HasReturn {
 		return nil, nil
 	}
-	return fromRuntime(result), nil
+	return wrapResult(asm, result), nil
 }
 
 // CallBytes resolves typeName.methodName as a static `byte[] X(byte[])`

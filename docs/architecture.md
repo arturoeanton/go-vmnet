@@ -642,3 +642,19 @@ Resultado: `examples/jint-demo/` corre JavaScript real de punta a punta
 (`Engine.Evaluate("1 + 2")` → `"3"`, `Engine.SetValue` + variables → `7`)
 a través del motor Jint 3.1.3 sin modificar — ver `docs/ROADMAP.md` para
 el desglose completo bug por bug.
+
+Fase 3.28 (API de instancias: `Assembly.New`/`Instance.Call`) completa.
+`Call`/`CallBytes`/`CallJSON` solo invocan métodos estáticos; `New`/`Call`
+exponen al host Go el mismo mecanismo interno de `newobj`/`callvirt` que
+Fase 3.27 hizo real de punta a punta — `Machine.New`/`Machine.CallInstance`
+(`internal/interpreter/eval.go`) son wrappers exportados finos sobre
+`Machine.newObj`/`Machine.call`, y `*Instance` (`instance.go`) implementa
+`Value` para poder encadenar (`engine.Call("Evaluate", ...)` → `*Instance`
+→ `.Call("ToString")`). Resultado: `examples/jint-nowrapper/` corre el
+mismo `Engine.Evaluate`/`SetValue` que `examples/jint-demo` sin ningún
+ensamblado glue en C# — solo dos límites reales (no bugs) quedaron
+documentados: parámetros opcionales con valor por defecto y métodos de
+extensión son azúcar sintáctico que el compilador de C# resuelve en
+tiempo de compilación, no algo que el CLR/CIL modele en runtime, así que
+`Instance.Call` no puede reconstruirlos automáticamente (ver
+`examples/jint-nowrapper/README.md`).

@@ -34,3 +34,11 @@ AddNumbers(3, 4) = 7
 `JintWrapper.cs`/`JintWrapper.csproj` are committed (they're the actual
 source being demonstrated); `bin/`, `obj/`, and the `dotnet restore`/
 `vm.NuGet().Restore()` caches they produce are not.
+
+See `examples/jint-nowrapper` for the same demo driven directly from Go
+(`Assembly.New`/`Instance.Call`, Fase 3.28) with no C# wrapper and no
+`dotnet` SDK dependency at all. A compiled wrapper like this one is still
+the better choice when the real C# API leans on compile-time-only sugar
+(optional parameters, extension methods, implicit conversions) that
+`Instance.Call` can't reconstruct — see that example's README for the
+concrete cases Jint hits.

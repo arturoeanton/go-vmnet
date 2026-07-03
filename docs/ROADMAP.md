@@ -2860,6 +2860,86 @@ cd examples/jint-demo && go run .
 
 ---
 
+### Fase 3.28 — API de instancias (`Assembly.New`/`Instance.Call`)
+
+Pregunta directa tras Fase 3.27: ¿se puede correr Jint sin el wrapper de C#? La API pública
+(`Call`/`CallBytes`/`CallJSON`) solo invoca métodos **estáticos** — Jint necesita `new Engine()` +
+`engine.Evaluate(...)`, ambos de instancia. Esta fase expone el mecanismo interno de `newobj`/
+`callvirt` que el intérprete ya usaba (Fase 3.27 lo hizo real de punta a punta) directamente al
+host Go.
+
+**API nueva**
+
+- [x] `Machine.New(typeFullName string, args []runtime.Value) (runtime.Value, error)`
+      (`internal/interpreter/eval.go`) — wrapper exportado sobre `Machine.newObj` (la misma
+      máquina que `ir.NewObj` dispara internamente), con recuperación de panic + contador de
+      instrucciones fresco, mismo patrón que `Invoke`.
+- [x] `Machine.CallInstance(fullName string, args []runtime.Value) (runtime.Value, bool, error)`
+      — wrapper exportado sobre `Machine.call` con `virtual=true` siempre: el receptor real
+      (`args[0]`) se prueba primero por su tipo concreto, subiendo toda la cadena de herencia si
+      hace falta (el despacho virtual real de Fase 3.27) — seguro incluso para un método
+      genuinamente no-virtual, ya que el tipo concreto del receptor coincide con el tipo
+      declarado en ese caso.
+- [x] `Assembly.New(typeName string, args ...Value) (*Instance, error)` y
+      `(*Instance).Call(methodName string, args ...Value) (Value, error)` (`instance.go`, nuevo)
+      — la fachada pública. El `.ctor`/método se resuelve por aridad + Kind de `args`, igual que
+      cualquier overload estático (`pickMethodOverload`).
+- [x] `*Instance` implementa `Value` (puede pasarse como argumento a otro `Call`/`New`, o
+      encadenarse: `engine.Call("Evaluate", ...)` → `*Instance` de `JsValue` →
+      `.Call("ToString")`). `wrapResult` reemplaza el uso directo de `fromRuntime` en `Call` y
+      `Instance.Call`: un resultado `KindObject`/`KindStruct` ahora se envuelve en un `*Instance`
+      en vez de perderse silenciosamente como `nil` — una mejora real en `Call` también, no solo
+      la superficie nueva.
+
+**El bug de aliasing que confirmó el diseño de structs**
+
+- [x] `Instance.Call` sobre un value type (ej. `Point` con `Scale(int factor)` mutando
+      `X`/`Y`) muta correctamente la instancia mantenida por el host — verificado con el fixture
+      `Point` existente (`Structs.cs`, Fase 3.7). Funciona porque `runtime.Struct` siempre se
+      referencia vía puntero: pasar `in.value` (una copia superficial del `runtime.Value`) igual
+      comparte el mismo `*runtime.Struct` subyacente, así que una mutación de campo a través del
+      método se ve reflejada de vuelta en el `Instance` que el host sigue sosteniendo — el mismo
+      mecanismo de puntero compartido que causó el bug real de Fase 3.27 (`newObj`/`NewStruct`
+      copiando defaults con `copy()`), aquí funcionando a favor en vez de en contra porque es
+      exactamente UNA instancia, no N instancias compartiendo un default.
+
+**Límite real, no un bug: azúcar sintáctico de C# que el compilador resuelve, no el CLR**
+
+- [x] `examples/jint-nowrapper/` (nuevo, sin necesidad de `dotnet build` — solo Go + red):
+      corre `Engine.Evaluate("1 + 2")` → `"3"` y `SetValue` + `a + b` → `"7"` sin ningún wrapper
+      compilado. Encontró en el camino los dos límites reales de esta API:
+    - **Parámetros opcionales con valor por defecto** son un mecanismo de tiempo de compilación
+      (el compilador inserta el argumento omitido en el sitio de la llamada) — `Engine.Evaluate`
+      real es `Evaluate(string code, string source = null)`; `Instance.Call` necesita ambos
+      argumentos explícitos, ya que no hay información de "parámetro opcional" en runtime para
+      recuperar automáticamente.
+    - **Métodos de extensión** son azúcar sobre una llamada estática a un tipo *distinto* —
+      `JsValue.AsNumber()` está declarado en `Jint.JsValueExtensions`, no en `JsValue`/`JsNumber`;
+      `Instance.Call` siempre apunta al tipo concreto propio del receptor, así que no puede
+      alcanzarlo. `ToString()` (un método de instancia real) sirve como alternativa en el demo.
+    - Conversiones implícitas definidas por el usuario (`operator implicit`) tendrían la misma
+      limitación, aunque no se encontró un caso real que la disparara en este demo específico.
+      Documentado en `examples/jint-nowrapper/README.md`.
+
+**Tests**
+
+- [x] `TestInstanceAPI` (`vmnet_test.go`) — clase con ctor sin argumentos + getter/setter de
+      propiedad (`Customer`, Fase 2), struct con ctor parametrizado + método mutante (`Point`,
+      Fase 3.7), y el caso de error (tipo inexistente).
+- [x] `TestJintNoWrapperE2E` (raíz, gateado tras `VMNET_NETWORK_TESTS=1`) — mismos dos casos que
+      `TestJintDemoE2E` pero sin wrapper.
+
+### Cómo verificar Fase 3.28
+
+```bash
+go test ./... -race -count=5
+go test ./ -run TestInstanceAPI -v
+VMNET_NETWORK_TESTS=1 go test ./ -run TestJintNoWrapperE2E -v
+cd examples/jint-nowrapper && go run .
+```
+
+---
+
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
 
 **Objetivo:** convertir el motor funcional en un producto adoptable, confiable, documentado y

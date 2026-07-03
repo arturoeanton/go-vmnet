@@ -1747,3 +1747,71 @@ func TestReflection3(t *testing.T) {
 		}
 	})
 }
+
+// TestInstanceAPI exercises Assembly.New/Instance.Call (Fase 3.28) — the
+// public API for constructing and driving an object directly from Go,
+// without a compiled glue assembly (see examples/jint-demo's README for
+// the alternative that predates this).
+func TestInstanceAPI(t *testing.T) {
+	asm := loadFixture(t)
+
+	t.Run("class: parameterless ctor + property getter/setter", func(t *testing.T) {
+		customer, err := asm.New("Vmnet.Fixtures.Customer")
+		if err != nil {
+			t.Fatalf("New(Customer) error = %v", err)
+		}
+		if got := customer.TypeName(); got != "Vmnet.Fixtures.Customer" {
+			t.Errorf("TypeName() = %q, want %q", got, "Vmnet.Fixtures.Customer")
+		}
+		if _, err := customer.Call("set_Name", String("Ada")); err != nil {
+			t.Fatalf("set_Name error = %v", err)
+		}
+		if _, err := customer.Call("set_Age", Int32(30)); err != nil {
+			t.Fatalf("set_Age error = %v", err)
+		}
+		name, err := customer.Call("get_Name")
+		if err != nil {
+			t.Fatalf("get_Name error = %v", err)
+		}
+		if got := name.Native().(string); got != "Ada" {
+			t.Errorf("get_Name() = %q, want %q", got, "Ada")
+		}
+		age, err := customer.Call("get_Age")
+		if err != nil {
+			t.Fatalf("get_Age error = %v", err)
+		}
+		if got := age.Native().(int32); got != 30 {
+			t.Errorf("get_Age() = %d, want 30", got)
+		}
+	})
+
+	t.Run("struct: parameterized ctor + mutating instance method", func(t *testing.T) {
+		p, err := asm.New("Vmnet.Fixtures.Point", Int32(3), Int32(4))
+		if err != nil {
+			t.Fatalf("New(Point) error = %v", err)
+		}
+		sum, err := p.Call("SumCoords")
+		if err != nil {
+			t.Fatalf("SumCoords error = %v", err)
+		}
+		if got := sum.Native().(int32); got != 7 {
+			t.Errorf("SumCoords() = %d, want 7", got)
+		}
+		if _, err := p.Call("Scale", Int32(2)); err != nil {
+			t.Fatalf("Scale error = %v", err)
+		}
+		sum2, err := p.Call("SumCoords")
+		if err != nil {
+			t.Fatalf("SumCoords (post-Scale) error = %v", err)
+		}
+		if got := sum2.Native().(int32); got != 14 {
+			t.Errorf("SumCoords() after Scale(2) = %d, want 14", got)
+		}
+	})
+
+	t.Run("New error for unknown type", func(t *testing.T) {
+		if _, err := asm.New("Vmnet.Fixtures.DoesNotExist"); err == nil {
+			t.Error("New(DoesNotExist) succeeded, want error")
+		}
+	})
+}

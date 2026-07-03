@@ -69,6 +69,44 @@ func (m *Machine) Invoke(method *runtime.Method, args []runtime.Value) (result r
 	return m.invoke(method, args, 0, instrCount)
 }
 
+// New constructs an instance of typeFullName via a real newobj + its
+// resolved .ctor overload — the exact same machinery ir.NewObj drives
+// when a newobj instruction executes inside another method's IR (see
+// Machine.newObj), just entered fresh from the host instead. Exported
+// for vmnet's public Assembly.New API (Fase 3.28): the piece that lets
+// host code construct an instance of a plugin/dependency type (e.g.
+// Jint's `new Engine()`) without a compiled glue assembly. The .ctor
+// overload is picked by arity/Kind against args exactly like any other
+// call — see assembly.go's pickMethodOverload.
+func (m *Machine) New(typeFullName string, args []runtime.Value) (result runtime.Value, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("interpreter: internal error (recovered panic): %v", r)
+		}
+	}()
+	instrCount := new(int64)
+	return m.newObj(newObjArgs{TypeFullName: typeFullName, CtorFullName: typeFullName + "::.ctor", Args: args}, 0, instrCount)
+}
+
+// CallInstance invokes fullName ("Namespace.Type::Method") as an
+// instance method, with args[0] as the receiver (this) and args[1:] the
+// real call arguments — exported for vmnet's public Instance.Call API
+// (Fase 3.28). Always dispatches as a virtual call (Machine.call's
+// concrete-type-first, full-inheritance-chain-walk behavior, Fase
+// 3.27): safe even for a genuinely non-virtual method, since the
+// receiver's own concrete type is tried first regardless and a
+// non-virtual method is always declared directly on it.
+func (m *Machine) CallInstance(fullName string, args []runtime.Value) (result runtime.Value, hasReturn bool, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("interpreter: internal error (recovered panic): %v", r)
+		}
+	}()
+	instrCount := new(int64)
+	result, hasReturn, err = m.call(fullName, args, true, 0, instrCount)
+	return
+}
+
 func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
 	if m.Limits.MaxCallDepth > 0 && depth > m.Limits.MaxCallDepth {
 		return runtime.Value{}, ErrCallDepthExceeded

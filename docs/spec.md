@@ -309,6 +309,45 @@ vm := vmnet.New(vmnet.Options{
 })
 ```
 
+### 6.6 API de instancias (Fase 3.28)
+
+`Call`/`CallBytes`/`CallJSON` (§6.1) solo invocan métodos **estáticos**.
+Una API real orientada a objetos (`new Engine()`, `engine.Evaluate(...)`,
+encadenar sobre el resultado) necesita construir instancias y llamar
+métodos de instancia directamente desde Go — sin un ensamblado glue en
+C# intermedio (ver `examples/jint-nowrapper` para el caso real).
+
+```go
+type Instance struct{}
+
+func (in *Instance) Native() any
+func (in *Instance) TypeName() string
+func (in *Instance) Call(methodName string, args ...Value) (Value, error)
+
+func (asm *Assembly) New(typeName string, args ...Value) (*Instance, error)
+```
+
+`New` construye una instancia vía su `.ctor` real, resuelto por
+aridad/Kind de `args` (mismo mecanismo que `Call` para overloads
+estáticos). `Instance.Call` invoca un método de instancia por nombre,
+despachado como una llamada virtual real: primero el tipo concreto del
+receptor, subiendo por toda su cadena de herencia si hace falta (ver
+`internal/interpreter/calls.go`, `Machine.call`). Cualquier `Call`/
+`Instance.Call` cuyo resultado sea un objeto o un value type ahora
+devuelve un `*Instance` (antes: `nil` en silencio) para poder seguir
+encadenando.
+
+**Límite explícito:** esta API refleja el modelo de objetos real de CIL
+(`newobj`/`callvirt`/campos), no el AZÚCAR SINTÁCTICO de C# que el
+compilador resuelve en tiempo de compilación — parámetros opcionales
+con valor por defecto, métodos de extensión, conversiones implícitas
+definidas por el usuario. Código C# real que dependa de esas
+conveniencias necesita el argumento explícito (parámetros opcionales) o
+seguir usando un wrapper compilado (extensiones/conversiones implícitas)
+— ver `examples/jint-nowrapper/README.md` para el caso concreto
+encontrado con Jint (`Evaluate(string, string = null)`,
+`JsValueExtensions.AsNumber`).
+
 Backends:
 
 ```go
