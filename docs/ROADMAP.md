@@ -2938,6 +2938,37 @@ VMNET_NETWORK_TESTS=1 go test ./ -run TestJintNoWrapperE2E -v
 cd examples/jint-nowrapper && go run .
 ```
 
+### Re-certificación contra los mismos 8 targets (7 paquetes + Jint) tras Fase 3.27/3.28
+
+Fase 3.27 dejó pendiente esta re-medición explícitamente (el objetivo era el demo funcional, no
+mover el número agregado). Con la resolución real de overloads, el despacho virtual completo y el
+fix de aliasing de structs ya en el árbol, esta es esa medición.
+
+| Paquete | % limpio Fase 3.26 | % limpio Fase 3.27/3.28 |
+|---|---|---|
+| `Ardalis.GuardClauses@5.0.0` | 96.8% | 96.8% |
+| `FluentValidation@11.9.2` | 93.9% | 93.9% |
+| `System.Text.Json@8.0.5` | 83.8% | 84.5% |
+| `Newtonsoft.Json@13.0.3` | 80.4% | 81.1% |
+| `Semver@2.3.0` | 91.0% | 91.0% |
+| `SimpleBase@4.0.0` | 85.3% | 85.3% |
+| `Humanizer.Core@2.14.1` | 93.4% | 93.6% |
+| **Promedio (7 paquetes)** | **89.2%** | **89.5%** |
+| `Jint@3.1.3` | 87.6% | 88.7% |
+| **Promedio (7 paquetes + Jint)** | **89.0%** | **89.4%** |
+
+Esta vez sí hay movimiento real a nivel de tabla, no solo bajo el capó: `System.Text.Json`
+(83.8%→84.5%), `Newtonsoft.Json` (80.4%→81.1%), `Humanizer.Core` (93.4%→93.6%) y sobre todo
+`Jint` (87.6%→88.7%, +1.1pp) — el paquete que motivó cada fix de esta fase, coherente con que la
+mayoría de los bugs reales encontrados (resolución de overloads con subtipos, despacho virtual
+completo, `newarr` tipado, el aliasing de structs) fueron encontrados corriendo código de Jint
+específicamente. `Ardalis.GuardClauses`/`FluentValidation`/`Semver`/`SimpleBase` no se movieron:
+ninguno ejercita las formas de código (jerarquías de clases profundas, structs compartiendo
+metadata de tipo, overloads ambiguos por Kind) que estos fixes corrigen. El promedio agregado
+sigue sin acercarse a 97% por la misma razón documentada desde Fase 3.25/3.26: el bloque grande de
+`MethodInfo`/`PropertyInfo`/invocación dinámica sigue siendo, con claridad, la superficie de mayor
+volumen restante.
+
 ---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
