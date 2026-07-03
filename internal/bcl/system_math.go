@@ -16,6 +16,123 @@ func init() {
 	register("System.Double::IsPositiveInfinity", true, doubleInfinityPredicate(func(f float64) bool { return math.IsInf(f, 1) }))
 	register("System.Double::IsNegativeInfinity", true, doubleInfinityPredicate(func(f float64) bool { return math.IsInf(f, -1) }))
 	register("System.Math::Floor", true, mathFloor)
+	register("System.Math::Ceiling", true, mathCeiling)
+	register("System.Math::Truncate", true, mathTruncate)
+	register("System.Math::Pow", true, mathPow)
+	register("System.Math::Sqrt", true, mathUnary(math.Sqrt))
+	register("System.Math::Log", true, mathLog)
+	register("System.Math::Log10", true, mathUnary(math.Log10))
+	register("System.Math::Log2", true, mathUnary(math.Log2))
+	register("System.Math::Exp", true, mathUnary(math.Exp))
+	register("System.Math::Sign", true, mathSign)
+	register("System.Math::Round", true, mathRound)
+	register("System.Math::Sin", true, mathUnary(math.Sin))
+	register("System.Math::Cos", true, mathUnary(math.Cos))
+	register("System.Math::Tan", true, mathUnary(math.Tan))
+	register("System.Math::Atan", true, mathUnary(math.Atan))
+	register("System.Math::Atan2", true, mathAtan2)
+}
+
+// mathUnary adapts a plain float64->float64 Go math function into a
+// Native taking (and returning) a single System.Double argument — the
+// shape most of Math's trig/log/root functions share.
+func mathUnary(fn func(float64) float64) Native {
+	return func(args []runtime.Value) (runtime.Value, error) {
+		if len(args) != 1 || args[0].Kind != runtime.KindR8 {
+			return runtime.Value{}, fmt.Errorf("bcl: System.Math method expects a double argument")
+		}
+		return runtime.Float64(fn(args[0].R8)), nil
+	}
+}
+
+func mathCeiling(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 1 || args[0].Kind != runtime.KindR8 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Math.Ceiling expects a double argument")
+	}
+	return runtime.Float64(math.Ceil(args[0].R8)), nil
+}
+
+func mathTruncate(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 1 || args[0].Kind != runtime.KindR8 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Math.Truncate expects a double argument")
+	}
+	return runtime.Float64(math.Trunc(args[0].R8)), nil
+}
+
+func mathPow(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 2 || args[0].Kind != runtime.KindR8 || args[1].Kind != runtime.KindR8 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Math.Pow expects two double arguments")
+	}
+	return runtime.Float64(math.Pow(args[0].R8, args[1].R8)), nil
+}
+
+// mathLog backs both Math.Log(double) (natural log) and Math.Log(double,
+// newBase) — the same call target either way (resolveCallTarget doesn't
+// disambiguate overloads by signature), disambiguated here by arg count.
+func mathLog(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 || args[0].Kind != runtime.KindR8 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Math.Log expects a double argument")
+	}
+	if len(args) >= 2 && args[1].Kind == runtime.KindR8 {
+		return runtime.Float64(math.Log(args[0].R8) / math.Log(args[1].R8)), nil
+	}
+	return runtime.Float64(math.Log(args[0].R8)), nil
+}
+
+func mathSign(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Math.Sign expects 1 argument")
+	}
+	var f float64
+	switch args[0].Kind {
+	case runtime.KindR8:
+		f = args[0].R8
+	case runtime.KindR4:
+		f = float64(args[0].R4)
+	case runtime.KindI4:
+		f = float64(args[0].I4)
+	case runtime.KindI8:
+		f = float64(args[0].I8)
+	default:
+		return runtime.Value{}, fmt.Errorf("bcl: System.Math.Sign: unsupported argument kind")
+	}
+	switch {
+	case f > 0:
+		return runtime.Int32(1), nil
+	case f < 0:
+		return runtime.Int32(-1), nil
+	default:
+		return runtime.Int32(0), nil
+	}
+}
+
+func mathAtan2(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 2 || args[0].Kind != runtime.KindR8 || args[1].Kind != runtime.KindR8 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Math.Atan2 expects two double arguments")
+	}
+	return runtime.Float64(math.Atan2(args[0].R8, args[1].R8)), nil
+}
+
+// mathRound backs Math.Round(double), Math.Round(double, digits),
+// Math.Round(double, MidpointRounding) and Math.Round(double, digits,
+// MidpointRounding) — all the same call target, disambiguated by arg
+// count/kind. Real .NET's parameterless overload defaults to
+// MidpointRounding.ToEven ("banker's rounding"), matched here via Go's
+// math.RoundToEven regardless of whether a MidpointRounding argument is
+// present: distinguishing ToEven from AwayFromZero would need decoding
+// the enum's raw int value, not yet worth the complexity since no target
+// package in this loop's IL was found relying on AwayFromZero
+// specifically.
+func mathRound(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 || args[0].Kind != runtime.KindR8 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Math.Round expects a double argument")
+	}
+	digits := 0
+	if len(args) >= 2 && args[1].Kind == runtime.KindI4 {
+		digits = int(args[1].I4)
+	}
+	scale := math.Pow(10, float64(digits))
+	return runtime.Float64(math.RoundToEven(args[0].R8*scale) / scale), nil
 }
 
 func doubleInfinityPredicate(pred func(float64) bool) Native {

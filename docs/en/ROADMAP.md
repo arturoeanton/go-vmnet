@@ -3102,6 +3102,47 @@ go test ./... -race -count=5
 /tmp/vmnet-cli check package ClosedXML@0.105.0 --profile=netstandard-lite # Dependencies resolved: 12 (was a hard error before)
 ```
 
+### Fase 3.31 — `System.Math` gaps (`Pow`/`Round`/`Log`/trig/`Ceiling`/`Truncate`/...)
+
+Second-highest cross-package blocker after Fase 3.30: `System.Math` had only `Abs`/`Min`/`Max`/
+`Floor` natively implemented — `Pow` (53 findings in NPOI, 19 in ClosedXML) and `Round` (40 + 24)
+alone accounted for real formula/formatting code paths in both packages, plus `Log`/`Ceiling`/
+`Truncate`/`Sqrt`/the trig functions individually smaller but part of the same easily-fixed gap
+class. `"System.Math::"` was already a wildcard prefix in every profile including `minimal` (it
+predates this loop) — the earlier findings were pure `unsupported-bcl-method` (nothing registered
+in `bcl.Lookup`), not an `out-of-profile` allowlist gap, so no `profile.go` change was needed this
+time.
+
+- [x] `internal/bcl/system_math.go`: added `Ceiling`/`Truncate`/`Pow`/`Sqrt`/`Log`/`Log10`/`Log2`/
+      `Exp`/`Sign`/`Round`/`Sin`/`Cos`/`Tan`/`Atan`/`Atan2`. `Round(double)`/`Round(double, digits)`
+      share one native disambiguated by arg count (the same shape `Log(double)`/`Log(double,
+      newBase)` needs — `resolveCallTarget` never disambiguates overloads by signature, only by
+      the call target's bare name). Matches real .NET's default `MidpointRounding.ToEven`
+      ("banker's rounding") via Go's `math.RoundToEven`, not naive round-half-away-from-zero —
+      correctness matters here since spreadsheet formula results are exactly the kind of value a
+      demo would display and compare against a known-correct answer. A `MidpointRounding` enum
+      argument, when present, is accepted but not distinguished (no target package's real IL in
+      this loop was found relying on `AwayFromZero` specifically); `System.Decimal`-typed
+      `Math.Round` overloads are out of scope until `System.Decimal` itself has a real native
+      (`System.Decimal::op_Explicit`, 17 findings, remains a separate open gap).
+
+**Result**
+
+| Package | Fase 3.30 clean % | Fase 3.31 clean % |
+|---|---|---|
+| `NPOI@2.8.0` | 94.2% (`MethodsFlagged` 825) | 94.7% (`MethodsFlagged` 748) |
+| `ClosedXML@0.105.0` | 90.2% (`MethodsFlagged` 1029) | 90.9% (`MethodsFlagged` 947) |
+
+### How to verify Fase 3.31
+
+```bash
+go build ./...
+go vet ./...
+go test ./... -race -count=5
+/tmp/vmnet-cli check package NPOI@2.8.0 --profile=netstandard-lite       # no System.Math findings
+/tmp/vmnet-cli check package ClosedXML@0.105.0 --profile=netstandard-lite # no System.Math findings
+```
+
 ---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 

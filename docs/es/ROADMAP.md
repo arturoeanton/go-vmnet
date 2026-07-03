@@ -3117,6 +3117,49 @@ go test ./... -race -count=5
 /tmp/vmnet-cli check package ClosedXML@0.105.0 --profile=netstandard-lite # Dependencies resolved: 12 (antes era un error duro)
 ```
 
+### Fase 3.31 — huecos de `System.Math` (`Pow`/`Round`/`Log`/trig/`Ceiling`/`Truncate`/...)
+
+Segundo bloqueador de mayor apalancamiento cruzado después de Fase 3.30: `System.Math` solo tenía
+`Abs`/`Min`/`Max`/`Floor` implementados nativamente — `Pow` (53 findings en NPOI, 19 en ClosedXML)
+y `Round` (40 + 24) solos representaban rutas de código real de fórmulas/formateo en ambos
+paquetes, más `Log`/`Ceiling`/`Truncate`/`Sqrt`/las funciones trigonométricas individualmente más
+chicas pero parte de la misma clase de hueco fácil de arreglar. `"System.Math::"` ya era un prefijo
+wildcard en todos los profiles incluido `minimal` (es anterior a este loop) — los findings previos
+eran puro `unsupported-bcl-method` (nada registrado en `bcl.Lookup`), no un hueco de allowlist
+out-of-profile, así que no hizo falta ningún cambio en `profile.go` esta vez.
+
+- [x] `internal/bcl/system_math.go`: se agregaron `Ceiling`/`Truncate`/`Pow`/`Sqrt`/`Log`/`Log10`/
+      `Log2`/`Exp`/`Sign`/`Round`/`Sin`/`Cos`/`Tan`/`Atan`/`Atan2`. `Round(double)`/`Round(double,
+      digits)` comparten un solo nativo desambiguado por cantidad de argumentos (la misma forma
+      que necesita `Log(double)`/`Log(double, newBase)` — `resolveCallTarget` nunca desambigua
+      overloads por firma, solo por el nombre desnudo del target). Coincide con el
+      `MidpointRounding.ToEven` ("banker's rounding") por defecto de .NET real vía el
+      `math.RoundToEven` de Go, no el redondeo ingenuo half-away-from-zero — la correctitud importa
+      acá porque los resultados de fórmulas de hoja de cálculo son exactamente el tipo de valor que
+      un demo mostraría y compararía contra una respuesta conocida-correcta. Un argumento enum
+      `MidpointRounding`, cuando está presente, se acepta pero no se distingue (ningún IL real de
+      paquete objetivo en este loop se encontró dependiendo específicamente de `AwayFromZero`); los
+      overloads de `Math.Round` tipados `System.Decimal` quedan fuera de alcance hasta que
+      `System.Decimal` mismo tenga un nativo real (`System.Decimal::op_Explicit`, 17 findings,
+      sigue siendo un hueco abierto separado).
+
+**Resultado**
+
+| Paquete | % limpio Fase 3.30 | % limpio Fase 3.31 |
+|---|---|---|
+| `NPOI@2.8.0` | 94.2% (`MethodsFlagged` 825) | 94.7% (`MethodsFlagged` 748) |
+| `ClosedXML@0.105.0` | 90.2% (`MethodsFlagged` 1029) | 90.9% (`MethodsFlagged` 947) |
+
+### Cómo verificar Fase 3.31
+
+```bash
+go build ./...
+go vet ./...
+go test ./... -race -count=5
+/tmp/vmnet-cli check package NPOI@2.8.0 --profile=netstandard-lite       # sin findings de System.Math
+/tmp/vmnet-cli check package ClosedXML@0.105.0 --profile=netstandard-lite # sin findings de System.Math
+```
+
 ---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
