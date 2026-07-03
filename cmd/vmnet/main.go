@@ -302,7 +302,6 @@ func runCheckPackage(args []string) error {
 	if asset.ReferenceOnly {
 		fmt.Println("Note: reference-only asset (ref/) — inspected, but cannot be executed")
 	}
-	fmt.Println()
 
 	f, err := pe.Parse(asset.Data)
 	if err != nil {
@@ -312,7 +311,46 @@ func runCheckPackage(args []string) error {
 	if err != nil {
 		return fmt.Errorf("parsing selected assembly metadata: %w", err)
 	}
-	report := checker.Analyze(f, md, profile)
+
+	// Resolve id's full transitive dependency graph the same way
+	// vm.LoadPackage does at runtime (Fase 3.29), so a call into a real
+	// dependency's own types (e.g. NPOI -> ZString) isn't misreported as
+	// unsupported just because the checker only decoded id's own DLL.
+	var deps []*metadata.Metadata
+	resolver := nuget.NewResolver(client, cache, nuget.SelectOptions{})
+	resolved, err := resolver.Resolve([]nuget.Dependency{{ID: id, Version: version}})
+	if err != nil {
+		return fmt.Errorf("resolving dependency graph: %w", err)
+	}
+	for key, rp := range resolved {
+		if key == strings.ToLower(id) || rp.SelectedAsset == "" {
+			continue
+		}
+		depData, err := cache.Fetch(client, rp.ID, rp.Version)
+		if err != nil {
+			return fmt.Errorf("fetching dependency %s@%s: %w", rp.ID, rp.Version, err)
+		}
+		depPkg, err := nuget.OpenPackage(depData)
+		if err != nil {
+			return fmt.Errorf("opening dependency %s@%s: %w", rp.ID, rp.Version, err)
+		}
+		depAssetData, ok := depPkg.Entry(rp.SelectedAsset)
+		if !ok {
+			continue
+		}
+		depF, err := pe.Parse(depAssetData)
+		if err != nil {
+			continue
+		}
+		depMD, err := metadata.Parse(depF.Metadata)
+		if err != nil {
+			continue
+		}
+		deps = append(deps, depMD)
+	}
+	fmt.Printf("Dependencies resolved: %d\n\n", len(deps))
+
+	report := checker.AnalyzeWithDeps(f, md, deps, profile)
 	printReport(report)
 
 	if report.Status != checker.StatusCompatible {

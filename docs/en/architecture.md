@@ -634,3 +634,22 @@ methods are syntactic sugar the C# compiler resolves at compile time, not
 something the CLR/CIL models at runtime, so `Instance.Call` cannot
 reconstruct them automatically (see
 `examples/jint-nowrapper/README.md`).
+
+Fase 3.29 (checker: dependency-aware resolution) complete. `checker.Analyze`
+only ever decoded the one DLL it was handed, with no notion of "this call
+resolves against a *different* real assembly's IL" — a real gap once
+`vm.LoadPackage`'s dependency-graph loading (Fase 3.27) is the actual
+runtime behavior being certified against. `checker.AnalyzeWithDeps(f, md,
+deps []*metadata.Metadata, profile)` — `Analyze` is now a thin wrapper
+calling it with `deps=nil` — retries a target that fails against `md`
+against each dependency's own metadata before flagging it, treating a
+dependency-resolved target as compatible outright (same posture
+`isLocalMethod` already takes for a call within `md` itself: the callee's
+own body is what runs, not the call site). `vmnet check package` resolves
+the target's full transitive graph via `nuget.NewResolver` (same resolver
+`NuGetManager.Restore` uses) and passes it through. First real-world case:
+`NPOI@2.8.0`'s `.nuspec` lists genuine NuGet dependencies (`ZString`,
+`SkiaSharp`, `BouncyCastle.Cryptography`, `ExtendedNumerics.BigDecimal`) —
+without `AnalyzeWithDeps`, ~400 findings were false negatives for calls
+that already run correctly at runtime through the existing multi-assembly
+machinery.

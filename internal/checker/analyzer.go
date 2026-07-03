@@ -21,6 +21,22 @@ import (
 // purpose (spec §23: "the checker is mandatory, without it the user
 // suffers").
 func Analyze(f *pe.File, md *metadata.Metadata, profile Profile) *Report {
+	return AnalyzeWithDeps(f, md, nil, profile)
+}
+
+// AnalyzeWithDeps is Analyze, but a call/constructor target that isn't
+// resolvable against md's own metadata is also tried against each of deps'
+// metadata before being flagged (Fase 3.29) — mirroring
+// Assembly.WithDependencies (Fase 3.27): a real package's IL frequently
+// calls straight into another real package's own types (Jint -> Esprima,
+// NPOI -> ZString/SkiaSharp/BouncyCastle.Cryptography), and those calls
+// genuinely run at runtime once vm.LoadPackage attaches the resolved
+// dependency chain — the callee's own method body gets decoded and
+// interpreted on its own terms, exactly like a call within md itself, so
+// flagging it as "unsupported" would be a false negative. deps should be
+// the package's full transitive dependency graph (e.g. via
+// internal/nuget.Resolver), not just its direct dependencies.
+func AnalyzeWithDeps(f *pe.File, md *metadata.Metadata, deps []*metadata.Metadata, profile Profile) *Report {
 	report := &Report{Profile: profile}
 	if asm, err := md.Assembly(1); err == nil {
 		report.AssemblyName = asm.Name
@@ -64,7 +80,7 @@ func Analyze(f *pe.File, md *metadata.Metadata, profile Profile) *Report {
 			fullName := typeName + "::" + row.Name
 			report.MethodsAnalyzed++
 
-			findings := analyzeMethod(f, md, fullName, row, profile)
+			findings := analyzeMethod(f, md, deps, fullName, row, profile)
 			if len(findings) > 0 {
 				report.MethodsFlagged++
 				report.Findings = append(report.Findings, findings...)
@@ -76,7 +92,7 @@ func Analyze(f *pe.File, md *metadata.Metadata, profile Profile) *Report {
 	return report
 }
 
-func analyzeMethod(f *pe.File, md *metadata.Metadata, fullName string, row metadata.MethodDefRow, profile Profile) []Finding {
+func analyzeMethod(f *pe.File, md *metadata.Metadata, deps []*metadata.Metadata, fullName string, row metadata.MethodDefRow, profile Profile) []Finding {
 	sig, err := metadata.ParseMethodSig(row.Signature)
 	if err != nil {
 		return []Finding{{
@@ -143,9 +159,9 @@ func analyzeMethod(f *pe.File, md *metadata.Metadata, fullName string, row metad
 	for _, instr := range irInstrs {
 		switch in := instr.(type) {
 		case ir.Call:
-			findings = append(findings, checkTarget(md, fullName, in.FullName, profile, resolvableMethod)...)
+			findings = append(findings, checkTarget(md, deps, fullName, in.FullName, profile, resolvableMethod)...)
 		case ir.NewObj:
-			findings = append(findings, checkTarget(md, fullName, in.CtorFullName, profile, func(md *metadata.Metadata, name string) bool {
+			findings = append(findings, checkTarget(md, deps, fullName, in.CtorFullName, profile, func(md *metadata.Metadata, name string) bool {
 				return resolvableCtor(md, in.TypeFullName, name)
 			})...)
 		}
@@ -153,23 +169,32 @@ func analyzeMethod(f *pe.File, md *metadata.Metadata, fullName string, row metad
 	return findings
 }
 
-func checkTarget(md *metadata.Metadata, enclosing, target string, profile Profile, resolvable func(*metadata.Metadata, string) bool) []Finding {
-	if !resolvable(md, target) {
-		return []Finding{{
-			Kind:       categorize(target),
-			Method:     enclosing,
-			Detail:     target,
-			Suggestion: suggestionForTarget(target),
-		}}
+func checkTarget(md *metadata.Metadata, deps []*metadata.Metadata, enclosing, target string, profile Profile, resolvable func(*metadata.Metadata, string) bool) []Finding {
+	if resolvable(md, target) {
+		if !inProfile(profile, target) && !isLocalMethod(md, target) {
+			return []Finding{{
+				Kind:   KindOutOfProfile,
+				Method: enclosing,
+				Detail: target,
+			}}
+		}
+		return nil
 	}
-	if !inProfile(profile, target) && !isLocalMethod(md, target) {
-		return []Finding{{
-			Kind:   KindOutOfProfile,
-			Method: enclosing,
-			Detail: target,
-		}}
+	for _, dep := range deps {
+		if resolvable(dep, target) {
+			// Resolves against a loaded dependency's own real IL/native —
+			// not subject to the current profile's allowlist, same as a
+			// call within md itself: the callee's own body (or its own
+			// bcl.Lookup native) is what actually runs, not this call site.
+			return nil
+		}
 	}
-	return nil
+	return []Finding{{
+		Kind:       categorize(target),
+		Method:     enclosing,
+		Detail:     target,
+		Suggestion: suggestionForTarget(target),
+	}}
 }
 
 func resolvableMethod(md *metadata.Metadata, fullName string) bool {

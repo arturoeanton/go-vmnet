@@ -2969,6 +2969,73 @@ sigue sin acercarse a 97% por la misma razón documentada desde Fase 3.25/3.26: 
 `MethodInfo`/`PropertyInfo`/invocación dinámica sigue siendo, con claridad, la superficie de mayor
 volumen restante.
 
+### Fase 3.29 — Checker: resolución consciente de dependencias (`AnalyzeWithDeps`)
+
+Nueva iniciativa: llevar dos paquetes NuGet reales y populares más (`NPOI`, hojas de cálculo/`.xls`
+legacy; `ClosedXML`, `.xlsx`) lo más cerca posible de 100% limpio bajo `netstandard-lite`, cada uno
+terminando en un demo real y corrible — la misma vara que Jint (Fase 3.27/3.28), no solo "compila".
+`DocumentFormat.OpenXml` (Word/PPTX) queda explícitamente fuera de este loop: una primera medición
+lo dejó en 36.9% limpio, dominado por miles de findings de `ldtoken` dentro de constructores de
+clases de schema OOXML auto-generadas — un patrón estructural de reflection pesada, coherente con
+los no-objetivos ya declarados en spec.md §3 (`Reflection.Emit`, `dynamic` pesado), no un simple
+hueco de nativo faltante.
+
+Antes de implementar nada para NPOI, su medición base (`vmnet check package NPOI@2.8.0`) sacó a
+la luz un punto ciego del checker, no un hueco del intérprete: el `.nuspec` de NPOI lista
+dependencias transitivas reales — `ZString` (`Cysharp.Text.Utf16ValueStringBuilder`, 234 sitios de
+llamada), `SkiaSharp`, `BouncyCastle.Cryptography`, `ExtendedNumerics.BigDecimal` — exactamente la
+forma que `vm.LoadPackage` ya resuelve correctamente en runtime (Fase 3.27: `Jint` → `Esprima` →
+`System.Memory` → ...). `checker.Analyze`, sin embargo, solo decodificaba el único DLL que se le
+pasaba — no tenía ninguna noción de "esta llamada resuelve contra el IL real de OTRO ensamblado",
+así que marcaba los ~400 findings de ese tipo como `unsupported-bcl-method`, un falso negativo:
+esas llamadas corren de verdad una vez que `LoadPackage` adjunta la cadena de dependencias
+resuelta, igual que una llamada dentro del propio DLL del paquete.
+
+**Fix**
+
+- [x] `checker.AnalyzeWithDeps(f *pe.File, md *metadata.Metadata, deps []*metadata.Metadata,
+      profile Profile) *Report` (`internal/checker/analyzer.go`) — `Analyze` ahora es un wrapper
+      delgado que llama a esta con `deps=nil` (retrocompatible al 100%, ningún caller existente se
+      toca). `checkTarget` primero intenta `resolvable(md, target)` (comportamiento sin cambios);
+      si falla, reintenta `resolvable(dep, target)` contra la metadata de cada dependencia antes de
+      rendirse. Un target resuelto vía dependencia se trata como compatible directamente, sin pasar
+      por el allowlist del profile — igual que `isLocalMethod` ya trata una llamada dentro de `md`
+      mismo: lo que corre de verdad es el cuerpo del callee, no este call site, así que no está "en"
+      ni "fuera" del profile del que llama.
+- [x] `vmnet check package` (`cmd/vmnet/main.go`) ahora resuelve el grafo completo de dependencias
+      transitivas del paquete objetivo vía `nuget.NewResolver` (el mismo resolver que usa
+      `NuGetManager.Restore`, solo que sin necesitar manifest/lockfile en disco primero — `check
+      package` siempre fue un comando de "mirar antes de agregar"), descarga y parsea el asset
+      seleccionado de cada dependencia, y se los pasa todos a `AnalyzeWithDeps`. Imprime
+      `Dependencies resolved: N`.
+
+**Impacto en la medición, todavía no en capacidad**
+
+Esta fase hace que el número de NPOI sea *honesto*, no más alto por nueva capacidad — el
+intérprete/BCL subyacente no cambió. `NPOI@2.8.0`: 91.3% → 92.0% limpio (`MethodsFlagged` 1235 →
+1131), y los findings de dependencias de terceros (`Cysharp.Text`, `SkiaSharp.SKColor`,
+`Org.BouncyCastle`, `ExtendedNumerics.BigDecimal` — ~400 findings combinados) desaparecen por
+completo del reporte. Los ~1131 métodos marcados restantes son ahora, con mucha más confianza,
+huecos genuinos de cobertura de BCL u opcodes propios de vmnet — exactamente la señal que el resto
+de este loop necesita para priorizar correctamente.
+
+Límite de alcance conocido, dejado tal cual: `AnalyzeWithDeps` chequea si una llamada *resuelve*
+contra un método real de una dependencia, no si el cuerpo de ese método de la dependencia
+correría limpio a su vez (sin análisis recursivo de todo el grafo). Una llamada no soportada
+dentro de una dependencia saldría recién en runtime real, no como finding de `vmnet check package
+NPOI@2.8.0` hoy. Chequeo transitivo completo es un cambio más grande (atribución de reporte a
+través de N ensamblados, manejo de ciclos en el propio walk de chequeo) que no hace falta para el
+objetivo de este loop — se deja anotado acá en vez de quedar como hueco silencioso.
+
+### Cómo verificar Fase 3.29
+
+```bash
+go build ./...
+go vet ./...
+go test ./... -race -count=5
+/tmp/vmnet-cli check package NPOI@2.8.0 --profile=netstandard-lite   # Dependencies resolved: 21
+```
+
 ---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")

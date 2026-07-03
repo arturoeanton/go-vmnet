@@ -2961,6 +2961,70 @@ the same reason documented since Fase 3.25/3.26: the large block of
 `MethodInfo`/`PropertyInfo`/dynamic invocation remains, clearly, the largest-volume remaining
 surface.
 
+### Fase 3.29 — Checker: dependency-aware resolution (`AnalyzeWithDeps`)
+
+New initiative: push two more real, popular NuGet packages (`NPOI`, spreadsheets/legacy `.xls`;
+`ClosedXML`, `.xlsx`) toward 100% clean under `netstandard-lite`, each ending in a real runnable
+demo — same bar as Jint (Fase 3.27/3.28), not just "compiles". `DocumentFormat.OpenXml`
+(Word/PPTX) is explicitly out of this loop: a first pass measured it at 36.9% clean, dominated by
+thousands of `ldtoken` findings inside auto-generated OOXML schema class constructors — a
+reflection-heavy structural pattern, consistent with the non-goals already in spec.md §3
+(`Reflection.Emit`, heavy `dynamic`), not a simple missing-native gap.
+
+Before implementing anything for NPOI, its baseline measurement (`vmnet check package
+NPOI@2.8.0`) surfaced a checker blind spot, not an interpreter gap: NPOI's `.nuspec` lists real
+transitive dependencies — `ZString` (`Cysharp.Text.Utf16ValueStringBuilder`, 234 call sites),
+`SkiaSharp`, `BouncyCastle.Cryptography`, `ExtendedNumerics.BigDecimal` — exactly the shape
+`vm.LoadPackage` already resolves correctly at runtime (Fase 3.27: `Jint` → `Esprima` →
+`System.Memory` → ...). `checker.Analyze`, though, only ever decoded the one DLL it was handed —
+it had no notion of "this call resolves against a *different* real assembly's real IL", so it
+flagged all ~400 of those findings as `unsupported-bcl-method`, a false negative: those calls
+genuinely run once `LoadPackage` attaches the resolved dependency chain, the same way a call
+within the package's own DLL does.
+
+**Fix**
+
+- [x] `checker.AnalyzeWithDeps(f *pe.File, md *metadata.Metadata, deps []*metadata.Metadata,
+      profile Profile) *Report` (`internal/checker/analyzer.go`) — `Analyze` is now a thin
+      wrapper calling this with `deps=nil` (fully backward compatible, every existing caller
+      untouched). `checkTarget` tries `resolvable(md, target)` first (unchanged behavior); on
+      failure it retries `resolvable(dep, target)` against each dependency's own metadata before
+      giving up. A dependency-resolved target is treated as compatible outright, skipping the
+      profile allowlist check — matching `isLocalMethod`'s existing treatment of a call within
+      `md` itself: the callee's own body is what actually runs, not this call site, so it isn't
+      "in" or "out" of the caller's profile.
+- [x] `vmnet check package` (`cmd/vmnet/main.go`) now resolves the target package's full
+      transitive dependency graph via `nuget.NewResolver` (the same resolver `NuGetManager.
+      Restore` uses, just without needing a manifest/lockfile on disk first — `check package` has
+      always been a look-before-you-add command), fetches and parses each dependency's selected
+      asset, and passes them all to `AnalyzeWithDeps`. Prints `Dependencies resolved: N`.
+
+**Impact on measurement, not yet on capability**
+
+This phase makes NPOI's number *honest*, not higher through new capability — the underlying
+interpreter/BCL is unchanged. `NPOI@2.8.0`: 91.3% → 92.0% clean (`MethodsFlagged` 1235 → 1131),
+and the third-party-dependency findings (`Cysharp.Text`, `SkiaSharp.SKColor`,
+`Org.BouncyCastle`, `ExtendedNumerics.BigDecimal` — ~400 combined findings) are gone from the
+report entirely. The remaining ~1131 flagged methods are now, with much higher confidence, genuine
+gaps in vmnet's own BCL coverage or opcode support — exactly the signal the rest of this loop
+needs to prioritize correctly.
+
+Known scoping limit, left as-is: `AnalyzeWithDeps` checks whether a call *resolves* into a
+dependency's real method, not whether that dependency's own method body would itself run clean
+(no recursive whole-graph analysis). A dependency's own unsupported call would surface at actual
+runtime, not as a `vmnet check package NPOI@2.8.0` finding today. Full transitive checking is a
+larger change (report attribution across N assemblies, cycle handling in the check walk itself)
+that isn't needed for this loop's goal — flag it here rather than leave it a silent gap.
+
+### How to verify Fase 3.29
+
+```bash
+go build ./...
+go vet ./...
+go test ./... -race -count=5
+/tmp/vmnet-cli check package NPOI@2.8.0 --profile=netstandard-lite   # Dependencies resolved: 21
+```
+
 ---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 

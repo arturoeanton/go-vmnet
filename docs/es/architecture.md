@@ -658,3 +658,23 @@ extensión son azúcar sintáctico que el compilador de C# resuelve en
 tiempo de compilación, no algo que el CLR/CIL modele en runtime, así que
 `Instance.Call` no puede reconstruirlos automáticamente (ver
 `examples/jint-nowrapper/README.md`).
+
+Fase 3.29 (checker: resolución consciente de dependencias) completa.
+`checker.Analyze` solo decodificaba el único DLL que se le pasaba, sin
+ninguna noción de "esta llamada resuelve contra el IL de OTRO ensamblado
+real" — un hueco real una vez que la carga del grafo de dependencias de
+`vm.LoadPackage` (Fase 3.27) es el comportamiento real de runtime contra el
+que se está certificando. `checker.AnalyzeWithDeps(f, md, deps
+[]*metadata.Metadata, profile)` — `Analyze` ahora es un wrapper delgado que
+la llama con `deps=nil` — reintenta un target que falla contra `md` contra
+la metadata de cada dependencia antes de marcarlo, tratando un target
+resuelto vía dependencia como compatible directamente (misma postura que
+`isLocalMethod` ya toma para una llamada dentro de `md` mismo: lo que corre
+es el cuerpo del callee, no el call site). `vmnet check package` resuelve
+el grafo transitivo completo del target vía `nuget.NewResolver` (el mismo
+resolver que usa `NuGetManager.Restore`) y lo pasa. Primer caso real:
+el `.nuspec` de `NPOI@2.8.0` lista dependencias NuGet genuinas (`ZString`,
+`SkiaSharp`, `BouncyCastle.Cryptography`, `ExtendedNumerics.BigDecimal`) —
+sin `AnalyzeWithDeps`, ~400 findings eran falsos negativos de llamadas que
+ya corren correctamente en runtime a través del mecanismo multi-ensamblado
+existente.
