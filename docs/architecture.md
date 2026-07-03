@@ -418,3 +418,15 @@ Fase 3.14), así que `netstandard-lite` queda como copia explícita de
 el margen restante es chico — lo que queda con volumen real es async
 (fuera de alcance permanente), regex (decisión de diseño pendiente), y
 reflection más profunda sobre genéricos/enums.
+
+Fase 3.19 (`HashSet<T>`, `Stack<T>`, `TimeSpan`) completa — tres
+superficies nuevas con volumen moderado (4/8), no extensiones de algo
+existente. `HashSet<T>` deduplica/busca por barrido lineal con
+`valuesEqual`, no un `map` real de Go (`runtime.Value` no es
+intrínsecamente hasheable en el sentido de clave de mapa), misma
+simplificación pragmática que `List<T>.Contains`. `TimeSpan` repite el
+diseño de `DateTime` (Fase 3.12): value type de un campo `ticks int64`,
+registrado también como `call` plano para la asignación directa a un
+local — esta vez anticipado por el patrón ya conocido, no descubierto
+por sorpresa. Certificación: 83.3% a 83.5% (83.5% a 83.7% con Jint).
+Falta ~1.3-1.5 puntos para el 85%.

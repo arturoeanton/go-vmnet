@@ -108,6 +108,10 @@ func init() {
 		"System.Threading.Interlocked::CompareExchange",
 		"System.StringComparer::",
 		"System.Convert::",
+		"System.Collections.Generic.HashSet`1::",
+		"System.Collections.Generic.HashSet`1+Enumerator::",
+		"System.Collections.Generic.Stack`1::",
+		"System.TimeSpan::",
 	)
 	// netstandard-lite currently promises exactly the same BCL surface as
 	// rules (System.Type moved into `rules` in Fase 3.14, System.Convert

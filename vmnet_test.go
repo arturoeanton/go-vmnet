@@ -717,6 +717,33 @@ func TestCheapWins2(t *testing.T) {
 	}
 }
 
+// TestCollectionsExtra exercises HashSet<T>, Stack<T>, and TimeSpan
+// (Fase 3.19).
+func TestCollectionsExtra(t *testing.T) {
+	asm := loadFixture(t)
+
+	cases := []struct {
+		method string
+		want   int32
+	}{
+		{"HashSetTest", 31},
+		{"StackTest", 302},
+		{"TimeSpanFromSecondsTest", 130},
+		{"TimeSpanCtorTest", 10203},
+	}
+	for _, tc := range cases {
+		t.Run(tc.method, func(t *testing.T) {
+			out, err := asm.Call("Vmnet.Fixtures.CollectionsExtra", tc.method)
+			if err != nil {
+				t.Fatalf("%s() error = %v", tc.method, err)
+			}
+			if got := out.Native().(int32); got != tc.want {
+				t.Errorf("%s() = %d, want %d", tc.method, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestLinq exercises System.Linq.Enumerable (Fase 3.15): a chained
 // Where().Select().ToList() over a List<int>, Any/All predicates,
 // FirstOrDefault, and Select/ToArray over an int[] source — the eager,

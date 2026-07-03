@@ -1934,6 +1934,65 @@ go test ./... -race -count=3
 go test ./ -run TestCheapWins2 -v
 ```
 
+### Fase 3.19 — `HashSet<T>`, `Stack<T>`, `TimeSpan`
+
+Tres superficies nuevas del probe (33/29/11+6 casos respectivamente) con volumen moderado (4/8) —
+cada una una colección/value type nuevo, no una extensión de algo ya existente.
+
+**Tareas**
+
+- [x] `HashSet<T>` (`internal/bcl/system_hashset.go`, archivo nuevo): `Add`/`Contains`/`get_Count`/
+      `GetEnumerator` + `HashSet`1+Enumerator::MoveNext`/`get_Current` (struct value type, mismo
+      patrón que `List`1.Enumerator` de Fase 3.11, confirmado contra IL real antes de asumirlo).
+      Deduplicación/`Contains` por barrido lineal con `valuesEqual` (`system_object.go`), no un
+      `map` real de Go — `runtime.Value` no es intrínsecamente hasheable/comparable en el sentido
+      de clave de mapa de Go (un `KindStruct`/`KindObject` necesitaría canonicalizarse primero);
+      misma simplificación pragmática ya aceptada para `List<T>.Contains`. `Add` devuelve si el
+      elemento se agregó de verdad (semántica real de `HashSet<T>.Add`), no `void`.
+- [x] `Stack<T>` (`internal/bcl/system_stack.go`, archivo nuevo): `Push`/`Pop`/`Peek`/`get_Count`
+      sobre un slice de Go usado como LIFO directo (`append`/truncar).
+- [x] `System.TimeSpan` (`internal/bcl/system_timespan.go`, archivo nuevo): value type sintético
+      de un campo (`ticks int64`, misma representación de 100ns que `DateTime` desde Fase 3.12).
+      Cubre `(ticks)`, `(hours,minutes,seconds)`, `(days,hours,minutes,seconds[,milliseconds])`;
+      `FromDays`/`FromHours`/`FromMinutes`/`FromSeconds`/`FromMilliseconds`; propiedades de
+      componente (`Days`/`Hours`/`Minutes`/`Seconds`/`Milliseconds`, cada una el resto tras
+      dividir por la unidad de arriba, no el total) y de total (`TotalDays`/.../`TotalMilliseconds`,
+      `double`). Registrado también como `call` plano además de `newobj` (`timeSpanCtorInPlace`) —
+      mismo bug de "asignación directa a un local" que `DateTime`/`Nullable`1` ya necesitaron
+      arreglar, anticipado esta vez por el patrón ya conocido y confirmado contra IL real antes de
+      escribir el fixture, no descubierto por sorpresa.
+
+**Fixtures y tests**
+
+- [x] `CollectionsExtra.cs` / `TestCollectionsExtra` — `HashSet<int>` con duplicado (confirma
+      deduplicación real), `Stack<int>` (`Push`×3/`Pop`/`Count`), `TimeSpan.FromSeconds`,
+      `new TimeSpan(1,2,3)` directo a un local
+
+### Re-certificación contra los mismos 8 targets (7 paquetes + Jint)
+
+| Paquete | % limpio Fase 3.18 | % limpio Fase 3.19 |
+|---|---|---|
+| `Ardalis.GuardClauses@5.0.0` | 93.3% | 93.3% |
+| `FluentValidation@11.9.2` | 87.3% | 87.5% |
+| `System.Text.Json@8.0.5` | 81.7% | 81.8% |
+| `Newtonsoft.Json@13.0.3` | 71.6% | 71.7% |
+| `Semver@2.3.0` | 84.6% | 84.6% |
+| `SimpleBase@4.0.0` | 75.6% | 75.6% |
+| `Humanizer.Core@2.14.1` | 89.2% | 89.9% |
+| **Promedio (7 paquetes)** | **83.3%** | **83.5%** |
+| `Jint@3.1.3` | 84.4% | 84.8% |
+| **Promedio (7 paquetes + Jint)** | **83.5%** | **83.7%** |
+
+Movimiento chico (+0.2/+0.2) — esperado para superficies de volumen moderado y no tan anchas
+(4/8). Con 83.7% el criterio de cierre firme de 85% todavía no se alcanza; falta ~1.3-1.5 puntos.
+
+### Cómo verificar Fase 3.19
+
+```bash
+go test ./... -race -count=3
+go test ./ -run TestCollectionsExtra -v
+```
+
 ---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
