@@ -3199,6 +3199,62 @@ go test ./... -race -count=5
 /tmp/vmnet-cli check package ClosedXML@0.105.0 --profile=netstandard-lite
 ```
 
+### Fase 3.33 — `System.Xml.XmlWriter`
+
+The XML serialization machinery a `.xlsx`-writing demo will actually exercise:
+`WriteStartElement`/`WriteEndElement`/`WriteAttributeString`/`WriteStartAttribute`/
+`WriteEndAttribute` alone were ~205 combined findings in ClosedXML. Probing real ClosedXML IL
+(`ClosedXML.Excel.IO.CommentPartWriter::GenerateWorksheetCommentsPartContent`) confirmed the
+concrete shape: `XmlWriter.Create(Stream, XmlWriterSettings)` — the same `System.IO.Stream`
+Fase 3.30 already built, meaning `XmlWriter` can write incrementally straight into an existing
+`nativeMemoryStream`'s buffer rather than needing any new I/O primitive underneath it.
+
+- [x] `internal/bcl/system_xml.go` (new): `nativeXmlWriter{dest *nativeMemoryStream, stack
+      []xmlWriterFrame, ...}` — a small explicit element stack tracks, per open element, whether
+      its start tag's `'>'` has been emitted yet (`tagClosed`), so `WriteEndElement` can correctly
+      choose between self-closing `"/>"` (nothing written since the start tag) and a real
+      `"</name>"` — verified against a direct probe: `<root id="1"><child>hello &amp;
+      &lt;world&gt;</child><empty/><leaf>v</leaf></root>`, confirming self-closing, nesting, and
+      entity-escaping (`&`/`<`/`>`/`"`) all come out well-formed. `WriteStartElement`/
+      `WriteAttributeString`/`WriteElementString` each collapse several real overloads
+      (`(name)`/`(name, ns)`/`(prefix, name, ns)`) into one native disambiguated by argument count,
+      same pattern as every other multi-overload BCL native in this codebase; the namespace URI
+      argument itself is dropped (documented — ClosedXML emits its own explicit `xmlns:` attributes
+      where it needs them, so vmnet doesn't need to synthesize any). `WriteStartAttribute`/
+      `WriteString`/`WriteEndAttribute` share state via `inAttr`/`attrBuf`, matching how real
+      `WriteString` dispatches to either the open attribute's value or the element's text content
+      depending on writer state. `Close`/`Dispose` walk the remaining open-element stack to close
+      out any unbalanced sequence, matching real `XmlWriter`. `XmlWriterSettings` is a trivial
+      object with no-op property setters — none of them (`CloseOutput`/`Encoding`/`Indent`/...)
+      change the writer's actual output shape for any real IL found in this loop.
+- [x] `internal/checker/profile.go`: `System.Xml.XmlWriter::`/`System.Xml.XmlWriterSettings::`
+      added to the `netstandard-lite` allowlist (first `System.Xml.*` entry at all).
+
+**Result**
+
+| Package | Fase 3.32 clean % | Fase 3.33 clean % |
+|---|---|---|
+| `NPOI@2.8.0` | 95.1% (`MethodsFlagged` 694) | 95.1% (unchanged — no `System.Xml.XmlWriter` usage) |
+| `ClosedXML@0.105.0` | 92.8% (`MethodsFlagged` 757) | 92.9% (`MethodsFlagged` 741) |
+
+`XmlWriter` findings are gone from ClosedXML's top findings entirely; the modest method-count
+delta (757→741, smaller than the ~200 raw findings removed) is the same overlap effect Fase 3.29
+first documented — many of those methods were *already* flagged for a different reason too
+(`System.Xml.Linq`, LINQ methods still missing) and only drop off the flagged count once every
+finding on them clears. ClosedXML's remaining top blockers are now `System.Xml.Linq`
+(`XName`/`XElement`/`XAttribute`/`XContainer`, LINQ-to-XML — used for *reading* existing XML parts,
+a different concern from `XmlWriter`'s write path) and a handful more `System.Linq.Enumerable`
+methods (`Single`/`SingleOrDefault`/`OrderByDescending`/`ElementAt`/`Skip`/`Union`).
+
+### How to verify Fase 3.33
+
+```bash
+go build ./...
+go vet ./...
+go test ./... -race -count=5
+/tmp/vmnet-cli check package ClosedXML@0.105.0 --profile=netstandard-lite # no System.Xml.XmlWriter findings
+```
+
 ---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 

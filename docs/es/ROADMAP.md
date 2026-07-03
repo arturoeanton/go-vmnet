@@ -3220,6 +3220,66 @@ go test ./... -race -count=5
 /tmp/vmnet-cli check package ClosedXML@0.105.0 --profile=netstandard-lite
 ```
 
+### Fase 3.33 — `System.Xml.XmlWriter`
+
+La maquinaria de serialización XML que un demo que escribe `.xlsx` va a ejercitar de verdad:
+`WriteStartElement`/`WriteEndElement`/`WriteAttributeString`/`WriteStartAttribute`/
+`WriteEndAttribute` solos eran ~205 findings combinados en ClosedXML. Sondear IL real de ClosedXML
+(`ClosedXML.Excel.IO.CommentPartWriter::GenerateWorksheetCommentsPartContent`) confirmó la forma
+concreta: `XmlWriter.Create(Stream, XmlWriterSettings)` — el mismo `System.IO.Stream` que ya
+construyó Fase 3.30, lo que significa que `XmlWriter` puede escribir incrementalmente directo al
+buffer de un `nativeMemoryStream` existente en vez de necesitar ninguna primitiva de E/S nueva
+debajo.
+
+- [x] `internal/bcl/system_xml.go` (nuevo): `nativeXmlWriter{dest *nativeMemoryStream, stack
+      []xmlWriterFrame, ...}` — una pila explícita chica de elementos rastrea, por elemento
+      abierto, si ya se emitió el `'>'` de su tag de apertura (`tagClosed`), para que
+      `WriteEndElement` pueda elegir correctamente entre auto-cerrar con `"/>"` (nada escrito desde
+      el tag de apertura) o un `"</name>"` real — verificado con un probe directo:
+      `<root id="1"><child>hello &amp; &lt;world&gt;</child><empty/><leaf>v</leaf></root>`,
+      confirmando que auto-cierre, anidamiento, y escapado de entidades (`&`/`<`/`>`/`"`) salen
+      todos bien formados. `WriteStartElement`/`WriteAttributeString`/`WriteElementString` cada uno
+      colapsa varios overloads reales (`(name)`/`(name, ns)`/`(prefix, name, ns)`) en un solo
+      nativo desambiguado por cantidad de argumentos, el mismo patrón que cualquier otro nativo BCL
+      multi-overload en este codebase; el argumento de URI de namespace mismo se descarta
+      (documentado — ClosedXML emite sus propios atributos `xmlns:` explícitos donde los necesita,
+      así que vmnet no necesita sintetizar ninguno). `WriteStartAttribute`/`WriteString`/
+      `WriteEndAttribute` comparten estado vía `inAttr`/`attrBuf`, coincidiendo con cómo el
+      `WriteString` real despacha al valor del atributo abierto o al contenido de texto del
+      elemento según el estado del writer. `Close`/`Dispose` recorren la pila de elementos
+      todavía-abiertos para cerrar cualquier secuencia desbalanceada, coincidiendo con el
+      `XmlWriter` real. `XmlWriterSettings` es un objeto trivial con setters de propiedad no-op —
+      ninguno de ellos (`CloseOutput`/`Encoding`/`Indent`/...) cambia la forma real de salida del
+      writer para ningún IL real encontrado en este loop.
+- [x] `internal/checker/profile.go`: `System.Xml.XmlWriter::`/`System.Xml.XmlWriterSettings::`
+      agregados al allowlist de `netstandard-lite` (primera entrada `System.Xml.*` en absoluto).
+
+**Resultado**
+
+| Paquete | % limpio Fase 3.32 | % limpio Fase 3.33 |
+|---|---|---|
+| `NPOI@2.8.0` | 95.1% (`MethodsFlagged` 694) | 95.1% (sin cambios — sin uso de `System.Xml.XmlWriter`) |
+| `ClosedXML@0.105.0` | 92.8% (`MethodsFlagged` 757) | 92.9% (`MethodsFlagged` 741) |
+
+Los findings de `XmlWriter` desaparecen por completo de los findings principales de ClosedXML; el
+delta modesto en cantidad de métodos (757→741, más chico que los ~200 findings crudos eliminados)
+es el mismo efecto de solapamiento que Fase 3.29 documentó primero — muchos de esos métodos ya
+estaban marcados por otra razón también (`System.Xml.Linq`, métodos LINQ todavía faltantes) y solo
+salen del conteo de flagged una vez que se limpia cada finding sobre ellos. Los bloqueadores
+principales restantes de ClosedXML son ahora `System.Xml.Linq` (`XName`/`XElement`/`XAttribute`/
+`XContainer`, LINQ-to-XML — usado para *leer* partes XML existentes, una preocupación distinta del
+camino de escritura de `XmlWriter`) y un puñado más de métodos `System.Linq.Enumerable`
+(`Single`/`SingleOrDefault`/`OrderByDescending`/`ElementAt`/`Skip`/`Union`).
+
+### Cómo verificar Fase 3.33
+
+```bash
+go build ./...
+go vet ./...
+go test ./... -race -count=5
+/tmp/vmnet-cli check package ClosedXML@0.105.0 --profile=netstandard-lite # sin findings de System.Xml.XmlWriter
+```
+
 ---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
