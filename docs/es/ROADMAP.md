@@ -3433,6 +3433,51 @@ go test ./... -race -count=5
 /tmp/vmnet-cli check package NPOI@2.8.0 --profile=netstandard-lite # sin findings de ArrayList/Hashtable
 ```
 
+### Fase 3.37 — una barrida amplia de huecos chicos de primitivos/`Array`/`String`/`Console`
+
+Un lote de items individualmente chicos pero numerosos, cada uno un nativo de una o pocas líneas
+reutilizando un patrón ya establecido (sin subsistema nuevo, sin cambios en el intérprete) — el
+trabajo de mayor densidad restante ahora que cada bloqueador de cluster único grande está limpio:
+`Console.Write` (reutiliza `displayString`, el mismo formateo que cualquier otro camino de
+`ToString` implícito ya comparte), `Array.Clone`/`.get_Length`, `String.ToUpper`/
+`.ToUpperInvariant`/`.ToLower`/`.ToLowerInvariant`/`.Compare`/`.CompareTo`,
+`Int16.ToString`/`.GetHashCode` y `Byte.ToString`/`.GetHashCode` (reutilizados directamente de los
+propios nativos de `Int32` — Int16/Byte se almacenan igual que Int32, un `KindI4` plano en el stack
+de CIL, así que no hizo falta ninguna función nueva en absoluto), `Int32.GetHashCode`,
+`Boolean.ToString`/`.CompareTo`/`.GetHashCode`, `Double.CompareTo`/`.Parse`, `Convert.ToString`,
+`Char.ConvertFromUtf32`.
+
+- [x] `internal/bcl/system_array.go`, `system_console.go`, `system_string.go`, `system_numeric.go`,
+      `system_misc.go`: los nativos de arriba.
+- [x] `internal/checker/profile.go`: `System.Array::Clone`/`get_Length` (dos nombres explícitos —
+      `System.Array::` no tiene entrada wildcard, a diferencia de la mayoría de los tipos),
+      wildcards `System.Int16::`/`System.Byte::`/`System.Boolean::` agregados
+      (`System.Int32::`/`System.Char::`/`System.String::`/`System.Console::`/`System.Convert::` ya
+      existían como wildcards, así que esos no necesitaron ningún cambio de profile en absoluto).
+
+**Resultado**
+
+| Paquete | % limpio Fase 3.36 | % limpio Fase 3.37 |
+|---|---|---|
+| `NPOI@2.8.0` | 95.7% (`MethodsFlagged` 616) | **97.0%** (`MethodsFlagged` 422) |
+| `ClosedXML@0.105.0` | 93.5% (`MethodsFlagged` 684) | 93.9% (`MethodsFlagged` 635) |
+
+Los findings restantes de NPOI ahora están individualmente por debajo de 25 cada uno —
+`XmlDocument.CreateElement`/`Encoding.GetEncoding`/miembros borde de `StringBuilder`/
+`System.Decimal`/`Data.DataRow` lideran una cola larga y cada vez más difusa. Ambos paquetes están
+ahora sólidamente por encima del promedio ~89% que los 7 paquetes reales existentes + Jint
+alcanzaron antes de este loop (Fase 3.28).
+
+### Cómo verificar Fase 3.37
+
+```bash
+go build ./...
+go vet ./...
+go test ./... -race -count=5
+/tmp/vmnet-cli check package NPOI@2.8.0 --profile=netstandard-lite
+/tmp/vmnet-cli check package ClosedXML@0.105.0 --profile=netstandard-lite
+```
+
 ---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")

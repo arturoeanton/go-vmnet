@@ -35,6 +35,119 @@ func init() {
 	// ToLocalTime already has (Fase 3.23).
 	register("System.TimeZoneInfo::get_Local", true, cultureInfoInvariant)
 	register("System.TimeZoneInfo::get_Utc", true, cultureInfoInvariant)
+	register("System.Double::CompareTo", true, doubleCompareTo)
+	register("System.Double::Parse", true, doubleParse)
+	register("System.Boolean::ToString", true, boolToString)
+	register("System.Boolean::CompareTo", true, boolCompareTo)
+	register("System.Boolean::GetHashCode", true, boolGetHashCode)
+	register("System.Convert::ToString", true, convertToString)
+	register("System.Char::ConvertFromUtf32", true, charConvertFromUtf32)
+}
+
+func doubleCompareTo(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Double.CompareTo expects a receiver and an argument")
+	}
+	a, b := args[0], args[1]
+	if a.Kind == runtime.KindRef && a.Ref != nil {
+		a = *a.Ref
+	}
+	if a.Kind != runtime.KindR8 || b.Kind != runtime.KindR8 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Double.CompareTo expects double operands")
+	}
+	switch {
+	case a.R8 < b.R8:
+		return runtime.Int32(-1), nil
+	case a.R8 > b.R8:
+		return runtime.Int32(1), nil
+	default:
+		return runtime.Int32(0), nil
+	}
+}
+
+func doubleParse(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 || args[0].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Double.Parse expects a string argument")
+	}
+	f, err := strconv.ParseFloat(args[0].Str, 64)
+	if err != nil {
+		return runtime.Value{}, &runtime.ManagedException{TypeName: "System.FormatException", Message: fmt.Sprintf("Input string %q was not in a correct format.", args[0].Str)}
+	}
+	return runtime.Float64(f), nil
+}
+
+// boolToString capitalizes "True"/"False" — real Boolean.ToString's
+// exact casing, unlike Go's lowercase strconv.FormatBool.
+func boolToString(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Boolean.ToString expects a receiver")
+	}
+	v := args[0]
+	if v.Kind == runtime.KindRef && v.Ref != nil {
+		v = *v.Ref
+	}
+	if v.I4 != 0 {
+		return runtime.String("True"), nil
+	}
+	return runtime.String("False"), nil
+}
+
+func boolCompareTo(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Boolean.CompareTo expects a receiver and an argument")
+	}
+	a, b := args[0], args[1]
+	if a.Kind == runtime.KindRef && a.Ref != nil {
+		a = *a.Ref
+	}
+	switch {
+	case a.I4 == b.I4:
+		return runtime.Int32(0), nil
+	case a.I4 == 0:
+		return runtime.Int32(-1), nil
+	default:
+		return runtime.Int32(1), nil
+	}
+}
+
+func boolGetHashCode(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Boolean.GetHashCode expects a receiver")
+	}
+	v := args[0]
+	if v.Kind == runtime.KindRef && v.Ref != nil {
+		v = *v.Ref
+	}
+	if v.I4 != 0 {
+		return runtime.Int32(1), nil
+	}
+	return runtime.Int32(0), nil
+}
+
+// convertToString covers Convert.ToString(object)/(int)/(double)/... by
+// reusing displayString, the same formatting every other implicit
+// ToString/boxed-argument path in this package already shares — a
+// trailing IFormatProvider argument (culture) is accepted and ignored.
+func convertToString(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.String(""), nil
+	}
+	if args[0].Kind == runtime.KindNull {
+		return runtime.String(""), nil
+	}
+	return runtime.String(displayString(args[0])), nil
+}
+
+// charConvertFromUtf32 converts a Unicode code point to its string
+// representation — Go's string(rune) already produces the correct UTF-8
+// encoding for the full code point range, including values beyond
+// U+FFFF that real .NET represents as a UTF-16 surrogate pair
+// internally (an implementation detail invisible at this API boundary).
+func charConvertFromUtf32(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 || args[0].Kind != runtime.KindI4 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Char.ConvertFromUtf32 expects an int argument")
+	}
+	return runtime.String(string(rune(args[0].I4))), nil
 }
 
 func cultureInfoName(args []runtime.Value) (runtime.Value, error) {

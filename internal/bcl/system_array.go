@@ -14,6 +14,33 @@ func init() {
 	register("System.Array::Resize", false, arrayResize)
 	register("System.Array::IndexOf", true, arrayIndexOf)
 	register("System.Array::Copy", false, arrayCopy)
+	register("System.Array::Clone", true, arrayClone)
+	register("System.Array::get_Length", true, arrayGetLength)
+}
+
+// arrayClone backs Array.Clone() — a shallow copy: each element Value is
+// copied as-is (a reference-shaped element, e.g. another array or
+// object, still aliases the same backing storage the real CLR's shallow
+// clone would also share).
+func arrayClone(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 1 || args[0].Kind != runtime.KindArray || args[0].Arr == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: Array.Clone expects an array receiver")
+	}
+	elems := make([]runtime.Value, len(args[0].Arr.Elems))
+	copy(elems, args[0].Arr.Elems)
+	return runtime.ArrRef(&runtime.Array{Elems: elems}), nil
+}
+
+// arrayGetLength backs Array.Length accessed through a call site typed
+// against the System.Array base (real C# code holding an array in an
+// Array-typed local/parameter, or via reflection) — the far more common
+// case, a real array-typed local, compiles Length as the `ldlen` opcode
+// directly and never reaches this native at all.
+func arrayGetLength(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 1 || args[0].Kind != runtime.KindArray || args[0].Arr == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: Array.get_Length expects an array receiver")
+	}
+	return runtime.Int32(int32(len(args[0].Arr.Elems))), nil
 }
 
 // arrayResize backs the generic Array.Resize<T>(ref T[] array, int

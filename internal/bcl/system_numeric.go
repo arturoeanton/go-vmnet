@@ -21,6 +21,31 @@ func init() {
 	register("System.Int64::ToString", true, int64ToString)
 	register("System.Int64::Parse", true, int64Parse)
 	register("System.Int64::TryParse", true, int64TryParse)
+	register("System.Int32::GetHashCode", true, int32GetHashCode)
+	// Int16/Byte are stored the same way Int32 is (a plain KindI4 on the
+	// CIL stack — every integral type narrower than int32 widens to it,
+	// spec §III.1.1), so ToString/GetHashCode reuse Int32's natives
+	// directly rather than duplicating them.
+	register("System.Int16::ToString", true, int32ToString)
+	register("System.Int16::GetHashCode", true, int32GetHashCode)
+	register("System.Byte::ToString", true, int32ToString)
+	register("System.Byte::GetHashCode", true, int32GetHashCode)
+}
+
+// int32GetHashCode returns the value itself, matching real
+// Int32.GetHashCode's documented identity behavior.
+func int32GetHashCode(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: Int32.GetHashCode expects a receiver")
+	}
+	v := args[0]
+	if v.Kind == runtime.KindRef && v.Ref != nil {
+		v = *v.Ref
+	}
+	if v.Kind != runtime.KindI4 {
+		return runtime.Value{}, fmt.Errorf("bcl: Int32.GetHashCode expects an int32 receiver")
+	}
+	return runtime.Int32(v.I4), nil
 }
 
 func int64Parse(args []runtime.Value) (runtime.Value, error) {

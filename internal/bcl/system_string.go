@@ -36,6 +36,48 @@ func init() {
 	register("System.String::Trim", true, stringTrim)
 	register("System.String::Contains", true, stringContains)
 	register("System.String::EndsWith", true, stringEndsWith)
+	register("System.String::ToUpper", true, stringToUpper)
+	register("System.String::ToUpperInvariant", true, stringToUpper)
+	register("System.String::ToLower", true, stringToLower)
+	register("System.String::ToLowerInvariant", true, stringToLower)
+	register("System.String::Compare", true, stringCompare)
+	register("System.String::CompareTo", true, stringCompare)
+}
+
+// stringToUpper backs both ToUpper() and ToUpperInvariant() — vmnet has
+// no CultureInfo model to distinguish culture-sensitive casing from the
+// invariant culture's, so both collapse to Go's Unicode-aware
+// strings.ToUpper.
+func stringToUpper(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 || args[0].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.ToUpper expects a string receiver")
+	}
+	return runtime.String(strings.ToUpper(args[0].Str)), nil
+}
+
+func stringToLower(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 || args[0].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.ToLower expects a string receiver")
+	}
+	return runtime.String(strings.ToLower(args[0].Str)), nil
+}
+
+// stringCompare backs both the static String.Compare(a, b[, ignoreCase])
+// and the instance a.CompareTo(b) — ordinal comparison (Go's
+// strings.Compare), ignoring any StringComparison/ignoreCase/culture
+// argument beyond a literal `true` bool immediately following the two
+// strings (the common `Compare(a, b, true)` shape) — case-sensitivity
+// is honored, full culture-aware collation is not, matching every other
+// natively-implemented string operation in this file.
+func stringCompare(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 2 || args[0].Kind != runtime.KindString || args[1].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.Compare expects two string arguments")
+	}
+	a, b := args[0].Str, args[1].Str
+	if len(args) >= 3 && args[2].Kind == runtime.KindI4 && args[2].I4 != 0 {
+		a, b = strings.ToLower(a), strings.ToLower(b)
+	}
+	return runtime.Int32(int32(strings.Compare(a, b))), nil
 }
 
 func stringEndsWith(args []runtime.Value) (runtime.Value, error) {

@@ -3402,6 +3402,49 @@ go test ./... -race -count=5
 /tmp/vmnet-cli check package NPOI@2.8.0 --profile=netstandard-lite # no ArrayList/Hashtable findings
 ```
 
+### Fase 3.37 — a broad sweep of small primitive/`Array`/`String`/`Console` gaps
+
+A batch of individually small but numerous odds and ends, each a one- or few-line native reusing
+an existing established pattern (no new subsystem, no interpreter change) — the highest-density
+remaining work now that every large single-cluster blocker is cleared: `Console.Write` (reuses
+`displayString`, same formatting every other implicit-`ToString` path already shares),
+`Array.Clone`/`.get_Length`, `String.ToUpper`/`.ToUpperInvariant`/`.ToLower`/`.ToLowerInvariant`/
+`.Compare`/`.CompareTo`, `Int16.ToString`/`.GetHashCode` and `Byte.ToString`/`.GetHashCode` (reused
+directly from `Int32`'s own natives — Int16/Byte are stored the same way Int32 is, a plain `KindI4`
+on the CIL stack, so no new function was needed at all), `Int32.GetHashCode`, `Boolean.ToString`/
+`.CompareTo`/`.GetHashCode`, `Double.CompareTo`/`.Parse`, `Convert.ToString`, `Char.
+ConvertFromUtf32`.
+
+- [x] `internal/bcl/system_array.go`, `system_console.go`, `system_string.go`, `system_numeric.go`,
+      `system_misc.go`: the natives above.
+- [x] `internal/checker/profile.go`: `System.Array::Clone`/`get_Length` (two explicit names —
+      `System.Array::` has no wildcard entry, unlike most types), `System.Int16::`/`System.Byte::`/
+      `System.Boolean::` wildcards added (`System.Int32::`/`System.Char::`/`System.String::`/
+      `System.Console::`/`System.Convert::` already existed as wildcards, so those needed no
+      profile change at all).
+
+**Result**
+
+| Package | Fase 3.36 clean % | Fase 3.37 clean % |
+|---|---|---|
+| `NPOI@2.8.0` | 95.7% (`MethodsFlagged` 616) | **97.0%** (`MethodsFlagged` 422) |
+| `ClosedXML@0.105.0` | 93.5% (`MethodsFlagged` 684) | 93.9% (`MethodsFlagged` 635) |
+
+NPOI's remaining findings are now individually under 25 each — `XmlDocument.CreateElement`/
+`Encoding.GetEncoding`/`StringBuilder` edge members/`System.Decimal`/`Data.DataRow` lead a long,
+increasingly diffuse tail. Both packages are now solidly past the ~89% average the existing 7 real
+packages + Jint reached before this loop (Fase 3.28).
+
+### How to verify Fase 3.37
+
+```bash
+go build ./...
+go vet ./...
+go test ./... -race -count=5
+/tmp/vmnet-cli check package NPOI@2.8.0 --profile=netstandard-lite
+/tmp/vmnet-cli check package ClosedXML@0.105.0 --profile=netstandard-lite
+```
+
 ---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 
