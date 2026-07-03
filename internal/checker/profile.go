@@ -168,6 +168,11 @@ func init() {
 		"System.IO.EndOfStreamException",
 		"System.Xml.XmlWriter::",
 		"System.Xml.XmlWriterSettings::",
+		"System.Xml.Linq.XDocument::",
+		"System.Xml.Linq.XContainer::",
+		"System.Xml.Linq.XElement::",
+		"System.Xml.Linq.XAttribute::",
+		"System.Xml.Linq.XName::",
 	)
 	// netstandard-lite currently promises exactly the same BCL surface as
 	// rules (System.Type moved into `rules` in Fase 3.14, System.Convert

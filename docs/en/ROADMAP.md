@@ -3289,6 +3289,68 @@ go test ./... -race -count=5
 /tmp/vmnet-cli check package ClosedXML@0.105.0 --profile=netstandard-lite
 ```
 
+### Fase 3.35 — `System.Xml.Linq` (`XDocument`/`XElement`/`XAttribute`/`XName`)
+
+ClosedXML's LINQ-to-XML *reading* path (`System.Xml.Linq`) — a different concern from Fase 3.33's
+`XmlWriter` *writing* path, used by ClosedXML to read its own previously-written VML comment/shape
+XML parts back out during load (`XLWorkbook.GetCommentShapes`/`DeleteExistingCommentsShapes`,
+`XDocumentExtensions.Load`). Probing confirmed the entry point: `XDocument.Load(Stream)` — the same
+`System.IO.Stream`/`MemoryStream` Fase 3.30 built, so no new I/O primitive was needed here either.
+
+- [x] `internal/bcl/system_xmllinq.go` (new): `nativeXElement{name, attrs, children, text}` is a
+      small parsed tree built with Go's stdlib `encoding/xml.Decoder` (token-by-token — `xml.
+      StartElement`/`EndElement`/`CharData`), not a hand-rolled parser. `XDocument` just wraps a
+      root `XElement`, matching real `XDocument.Root`. Verified end to end against a real
+      round-trip: `XmlWriter` (Fase 3.33) writes `<shapes><shape id="42" /></shapes>` into a
+      `MemoryStream`, `XDocument.Load` parses it back, `.Root.Elements()` finds the one child,
+      `.Attribute("id").Value` reads `"42"` back out correctly.
+    - Namespace URIs are dropped throughout, matched only by local name — same simplification
+      `XmlWriter` already made for its own namespace arguments; reading back a package's own
+      previously-written XML never actually needs namespace disambiguation to find what it's
+      looking for by local name alone.
+    - `XName` is modeled as a plain `System.String`, not its own object type: every consumer here
+      only ever needs a local name to match against, so `op_Implicit`/`get_LocalName`/`Get` are all
+      the identity function on the string itself (`Get`'s namespace argument is dropped the same
+      way).
+    - `Elements()`/`Element(name)` are registered under both `XContainer::` (the real declared
+      base) and `XElement::` directly (real code sometimes calls it against a local already typed
+      as the concrete `XElement`) — confirmed both shapes appear in real ClosedXML IL.
+    - `XElement.Value` concatenates all descendant text recursively, matching real semantics for
+      the general case, even though the leaf-element-with-no-children shape is what ClosedXML's
+      own usage actually hits.
+    - Known gap, left undone: `System.Xml.Linq.Extensions::Remove` (an extension method removing
+      an element from its parent) would need `nativeXElement` to track a parent pointer, which the
+      current tree doesn't. Only used by `DeleteExistingCommentsShapes` — cleaning up existing VML
+      comment shapes before regenerating them when *loading* a file that already has comments, not
+      exercised by this loop's create-from-scratch demo scenario. Left as a documented gap rather
+      than built speculatively.
+- [x] `internal/checker/profile.go`: `System.Xml.Linq.XDocument::`/`XContainer::`/`XElement::`/
+      `XAttribute::`/`XName::` added to the `netstandard-lite` allowlist.
+
+**Result**
+
+| Package | Fase 3.34 clean % | Fase 3.35 clean % |
+|---|---|---|
+| `NPOI@2.8.0` | 95.1% (`MethodsFlagged` 694) | 95.1% (unchanged — no `System.Xml.Linq` usage) |
+| `ClosedXML@0.105.0` | 93.3% (`MethodsFlagged` 703) | 93.5% (`MethodsFlagged` 684) |
+
+`System.Xml.Linq` findings are gone from ClosedXML's top findings entirely. Remaining top
+blockers are now a long tail of smaller, unrelated items: `IReadOnlyDictionary`2::get_Item` (45,
+an interface-typed call), `DateTime.ToOADate`/`FromOADate` (Excel's serial-date conversion, 24
+combined), `System.Drawing.Color`/`Point`, `System.Reflection.CustomAttributeData`, and several
+more `System.Linq.Enumerable` methods (`GroupBy`/`Range`/`Min`/`SequenceEqual`) — none individually
+large enough to justify its own phase title the way `System.IO`/`System.Math`/`System.Linq`/
+`System.Xml.*` did.
+
+### How to verify Fase 3.35
+
+```bash
+go build ./...
+go vet ./...
+go test ./... -race -count=5
+/tmp/vmnet-cli check package ClosedXML@0.105.0 --profile=netstandard-lite # no System.Xml.Linq findings
+```
+
 ---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 

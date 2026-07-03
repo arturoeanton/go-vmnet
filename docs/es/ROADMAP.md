@@ -3316,6 +3316,71 @@ go test ./... -race -count=5
 /tmp/vmnet-cli check package ClosedXML@0.105.0 --profile=netstandard-lite
 ```
 
+### Fase 3.35 — `System.Xml.Linq` (`XDocument`/`XElement`/`XAttribute`/`XName`)
+
+El camino de *lectura* LINQ-to-XML de ClosedXML (`System.Xml.Linq`) — una preocupación distinta del
+camino de *escritura* `XmlWriter` de Fase 3.33, usado por ClosedXML para releer sus propias partes
+XML de comentarios/shapes VML ya escritas durante la carga (`XLWorkbook.GetCommentShapes`/
+`DeleteExistingCommentsShapes`, `XDocumentExtensions.Load`). Sondear confirmó el punto de entrada:
+`XDocument.Load(Stream)` — el mismo `System.IO.Stream`/`MemoryStream` que construyó Fase 3.30, así
+que tampoco hizo falta ninguna primitiva de E/S nueva acá.
+
+- [x] `internal/bcl/system_xmllinq.go` (nuevo): `nativeXElement{name, attrs, children, text}` es un
+      árbol chico parseado con el `encoding/xml.Decoder` de la stdlib de Go (token por token —
+      `xml.StartElement`/`EndElement`/`CharData`), no un parser hecho a mano. `XDocument` solo
+      envuelve un `XElement` raíz, coincidiendo con el `XDocument.Root` real. Verificado de punta a
+      punta contra un round-trip real: `XmlWriter` (Fase 3.33) escribe
+      `<shapes><shape id="42" /></shapes>` en un `MemoryStream`, `XDocument.Load` lo re-parsea,
+      `.Root.Elements()` encuentra el único hijo, `.Attribute("id").Value` lee `"42"` de vuelta
+      correctamente.
+    - Los URI de namespace se descartan en todo el archivo, matcheando solo por nombre local — la
+      misma simplificación que `XmlWriter` ya hizo para sus propios argumentos de namespace; releer
+      el XML ya escrito de un paquete nunca necesita de verdad desambiguar por namespace para
+      encontrar lo que busca por nombre local solo.
+    - `XName` se modela como un `System.String` plano, no su propio tipo de objeto: cada consumidor
+      acá solo necesita un nombre local contra el cual matchear, así que
+      `op_Implicit`/`get_LocalName`/`Get` son todos la función identidad sobre el string mismo (el
+      argumento de namespace de `Get` se descarta de la misma forma).
+    - `Elements()`/`Element(name)` se registran bajo `XContainer::` (la base real declarada) Y
+      `XElement::` directamente (código real a veces lo llama contra un local ya tipado como el
+      `XElement` concreto) — se confirmó que ambas formas aparecen en IL real de ClosedXML.
+    - `XElement.Value` concatena todo el texto descendiente recursivamente, coincidiendo con la
+      semántica real para el caso general, aunque la forma de elemento-hoja-sin-hijos es la que el
+      uso real de ClosedXML realmente toca.
+    - Hueco conocido, dejado sin hacer: `System.Xml.Linq.Extensions::Remove` (un método de
+      extensión que remueve un elemento de su padre) necesitaría que `nativeXElement` rastree un
+      puntero al padre, que el árbol actual no tiene. Solo lo usa `DeleteExistingCommentsShapes` —
+      limpiar shapes de comentarios VML existentes antes de regenerarlos al *cargar* un archivo que
+      ya tiene comentarios, no ejercitado por el escenario de demo crear-desde-cero de este loop.
+      Se deja documentado como hueco en vez de construirlo especulativamente.
+- [x] `internal/checker/profile.go`: `System.Xml.Linq.XDocument::`/`XContainer::`/`XElement::`/
+      `XAttribute::`/`XName::` agregados al allowlist de `netstandard-lite`.
+
+**Resultado**
+
+| Paquete | % limpio Fase 3.34 | % limpio Fase 3.35 |
+|---|---|---|
+| `NPOI@2.8.0` | 95.1% (`MethodsFlagged` 694) | 95.1% (sin cambios — sin uso de `System.Xml.Linq`) |
+| `ClosedXML@0.105.0` | 93.3% (`MethodsFlagged` 703) | 93.5% (`MethodsFlagged` 684) |
+
+Los findings de `System.Xml.Linq` desaparecen por completo de los findings principales de
+ClosedXML. Los bloqueadores principales restantes son ahora una cola larga de ítems más chicos y
+sin relación entre sí: `IReadOnlyDictionary`2::get_Item` (45, una llamada tipada por interfaz),
+`DateTime.ToOADate`/`FromOADate` (conversión de fecha serial de Excel, 24 combinados),
+`System.Drawing.Color`/`Point`, `System.Reflection.CustomAttributeData`, y varios métodos más de
+`System.Linq.Enumerable` (`GroupBy`/`Range`/`Min`/`SequenceEqual`) — ninguno individualmente lo
+bastante grande como para justificar su propio título de fase como sí lo hicieron
+`System.IO`/`System.Math`/`System.Linq`/`System.Xml.*`.
+
+### Cómo verificar Fase 3.35
+
+```bash
+go build ./...
+go vet ./...
+go test ./... -race -count=5
+/tmp/vmnet-cli check package ClosedXML@0.105.0 --profile=netstandard-lite # sin findings de System.Xml.Linq
+```
+
 ---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
