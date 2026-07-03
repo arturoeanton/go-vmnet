@@ -670,6 +670,7 @@ corrió el mismo probe de findings-por-opcode/BCL, ahora incluyendo Jint, contra
 | **3.12** | `DateTime`, `Span<T>`/`ReadOnlySpan<T>`/`Memory<T>`/`ReadOnlyMemory<T>` | Impacto grande pero concentrado (principalmente Humanizer.Core/SimpleBase/System.Text.Json) |
 | **3.13** | `foreach` sobre colección tipada como interfaz (despacho por tipo real del receptor) + paquete de wins baratos (`String`/`Char`/`List`/`Dictionary`) | `IEnumerable`1::GetEnumerator`/`IEnumerator`1::get_Current`/`IEnumerator::MoveNext` eran el hallazgo más ancho (7/8) tras Fase 3.12 |
 | **3.14** | Reflection-lite: `ldtoken`/`typeof(T)`, `Object.GetType()`, `System.Type` (igualdad/`Name`/`FullName`) | `ldtoken` (6/8), `Object::GetType` (5/8) y `MemberInfo::get_Name` (5/8) eran los tres hallazgos más anchos tras Fase 3.13 |
+| **3.15** | LINQ (`System.Linq.Enumerable`: `Select`/`Where`/`Any`/`All`/`ToList`/`ToArray`/`FirstOrDefault`) | ~174 casos en 4-5/8 tras Fase 3.14, viable desde que existen delegates (3.9), enumeradores reales (3.11) y despacho por interfaz (3.13) |
 | **3.x** | Re-medición final, cierre de brecha restante hacia 85%, validación literal del demo Jint | Confirma el número Y que el escenario concreto corre, no solo el promedio |
 
 ### Fase 3.6 — `switch` + BCL barata de alto alcance
@@ -1592,6 +1593,107 @@ el hallazgo más ancho no-async/no-regex restante, candidato natural para la sig
 ```bash
 go test ./... -race -count=3
 go test ./ -run TestReflection -v
+```
+
+### Fase 3.15 — LINQ (`System.Linq.Enumerable`)
+
+El probe post-3.14 confirmó lo ya anotado: LINQ (`Select`/`Any`/`ToList`/`Where`/`ToArray`,
+~174 casos en 4-5/8) era el hallazgo más ancho no-async/no-regex restante, y ya era viable —
+delegates (3.9), enumeradores reales (3.11) y despacho por interfaz (3.13) cubren todo lo que
+LINQ necesita para operar sobre cualquier fuente real.
+
+**Tareas**
+
+- [x] **Descubrimiento arquitectónico central**: los métodos de `Enumerable` no pueden ser
+      `bcl.Native` planos (`func(args) (Value, error)`, sin acceso a `Machine`) — cada uno
+      necesita invocar el delegate argumento (`m.invokeFunc`) y/o recorrer una fuente
+      `IEnumerable<T>` arbitraria vía el protocolo real `GetEnumerator`/`MoveNext`/`get_Current`
+      (`m.call`, reusando el fallback de despacho por interfaz de Fase 3.13). Se agregó un
+      registro paralelo `linqRegistry` (`internal/interpreter/linq.go`, nuevo) de
+      `linqNative func(m *Machine, args []runtime.Value, ...) (runtime.Value, error)`, consultado
+      en `Machine.tryCall` antes de cualquier resolución que no tenga `Machine`. Mismo tipo de
+      plumbing nuevo que `ExplicitImplResolver` necesitó en Fase 3.13, no una sorpresa.
+- [x] `enumerateAll` — un solo helper que drena cualquier fuente en un `[]runtime.Value`:
+      camino rápido para `KindArray` y un `List<T>` nativo (ya son un slice de Go), camino
+      general vía el protocolo real de iteración para cualquier otra cosa (`Dictionary<K,V>`,
+      una clase del plugin, un iterador `yield return`, otro resultado de LINQ) — el mismo
+      mecanismo que `foreach` ya usa, no una segunda implementación paralela de iteración.
+- [x] `Select`/`Where`/`Any`/`All`/`ToList`/`ToArray`/`FirstOrDefault` — **eager**
+      (materializan de inmediato en un `[]runtime.Value`), no los iteradores perezosos reales de
+      la CLR — simplificación deliberada: una llamada encadenada
+      (`xs.Where(...).Select(...).ToList()`) se comporta idéntico desde el punto de vista del
+      llamador, porque cada resultado de LINQ se envuelve como un `List<T>` real y
+      completamente enumerable (`bcl.NewListValue`, nuevo constructor exportado — mismo patrón
+      que `bcl.NewTypeValue` de Fase 3.14) en vez de una promesa perezosa.
+- [x] `bcl.NativeListItems` (nuevo, exportado) — acceso de solo lectura a los items de un
+      `List<T>` nativo desde `internal/interpreter`, ya que `nativeList` es un tipo no exportado
+      de `internal/bcl`; necesario para el camino rápido de `enumerateAll`.
+- [x] Checker: `linqTargets` (`internal/checker/analyzer.go`) — un allowlist separado de
+      `interfaceDispatchTargets`, no fusionado con él: la razón por la que el checker no puede
+      resolver estos nombres es distinta (no "no sabe el tipo concreto del receptor", sino
+      "no sabe que existe el registro `linqRegistry` de `internal/interpreter` en absoluto" — el
+      checker no puede importar ese paquete sin romper su límite de análisis puramente estático).
+      Prefijo `"System.Linq.Enumerable::"` agregado al perfil `rules`.
+- [x] **Endurecimiento verificado durante la fase**: `new int[] { 1, 2, 3 }` (inicializador de
+      array literal) compila `newarr` + `ldtoken <FieldDef>` + `call RuntimeHelpers.
+      InitializeArray` — la forma de `ldtoken` que Fase 3.14 dejó explícitamente sin soportar
+      (token de campo, no de tipo). Confirmado al escribir el fixture de LINQ sobre un array: la
+      fuente de array debe construirse por asignación elemento a elemento, no con inicializador
+      de colección — limitación preexistente, no introducida ni agravada por esta fase, solo
+      redescubierta al verificar.
+
+**Fixtures y tests**
+
+- [x] `Linq.cs` / `TestLinq` — `Where().Select().ToList()` encadenado sobre `List<int>`,
+      `Any`/`All` con predicado, `FirstOrDefault` con predicado, `Select`/`ToArray` sobre un
+      `int[]` (confirma que el camino rápido de `enumerateAll` para arrays funciona, no solo
+      `List<T>`)
+
+### Lo que se dejó explícitamente afuera de esta fase
+
+```txt
+- Las sobrecargas con índice de Select/Where (Func<T,int,TResult>/Func<T,int,bool>) — solo la
+  forma de un solo argumento está cubierta; agregar la de índice es mecánico pero no medido
+  como necesario todavía.
+- OrderBy/GroupBy/Skip/Take/Sum/Min/Max/Distinct/Concat/Reverse — no aparecieron con volumen
+  significativo en el probe de los 8 targets; candidatos para agregar bajo demanda si una
+  fase futura los mide como relevantes, no una lista aspiracional.
+- Encadenamiento verdaderamente perezoso (LINQ real es streaming; esta implementación es eager
+  en cada paso) — una fuente infinita o muy grande con un `.Take(n)` en algún punto de la
+  cadena materializaría de más; ningún paquete de los 8 targets ejercita ese patrón hoy.
+- Type::IsAssignableFrom sigue afuera (ver Fase 3.14) — ahora que existe el patrón de
+  "Machine-aware native" (linqRegistry) sería mecánicamente más simple agregarlo, pero no se
+  hizo en esta fase para mantenerla enfocada en LINQ.
+```
+
+### Re-certificación contra los mismos 8 targets (7 paquetes + Jint)
+
+| Paquete | % limpio Fase 3.14 | % limpio Fase 3.15 |
+|---|---|---|
+| `Ardalis.GuardClauses@5.0.0` | 93.3% | 93.3% |
+| `FluentValidation@11.9.2` | 84.6% | 86.3% |
+| `System.Text.Json@8.0.5` | 80.4% | 80.4% |
+| `Newtonsoft.Json@13.0.3` | 70.4% | 70.7% |
+| `Semver@2.3.0` | 82.7% | 83.7% |
+| `SimpleBase@4.0.0` | 60.9% | 60.9% |
+| `Humanizer.Core@2.14.1` | 88.0% | 88.3% |
+| **Promedio (7 paquetes)** | **80.1%** | **80.5%** |
+| `Jint@3.1.3` | 83.8% | 83.8% |
+| **Promedio (7 paquetes + Jint)** | **80.5%** | **80.9%** |
+
++0.4 puntos — más chico que el volumen crudo de hallazgos (~174 casos) sugería, mismo patrón ya
+documentado en Fase 3.10: LINQ solo "limpia" un método si era el único obstáculo, y varios de los
+métodos que usan LINQ en estos paquetes reales *también* tocan reflection profunda o regex, que
+siguen sin soporte. El valor real de esta fase es desbloquear el patrón `Where`/`Select`/`ToList`
+en sí — que ahora funciona de punta a punta, encadenado y sobre cualquier fuente — más que el
+movimiento en el promedio agregado. Con 80.9% el criterio de cierre firme de 85% todavía no se
+alcanza.
+
+### Cómo verificar Fase 3.15
+
+```bash
+go test ./... -race -count=3
+go test ./ -run TestLinq -v
 ```
 
 ---

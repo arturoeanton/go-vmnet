@@ -631,6 +631,65 @@ func TestReflection(t *testing.T) {
 	})
 }
 
+// TestLinq exercises System.Linq.Enumerable (Fase 3.15): a chained
+// Where().Select().ToList() over a List<int>, Any/All predicates,
+// FirstOrDefault, and Select/ToArray over an int[] source — the eager,
+// Machine-aware LINQ registry (internal/interpreter/linq.go), not the
+// CLR's real lazy iterators.
+func TestLinq(t *testing.T) {
+	asm := loadFixture(t)
+
+	t.Run("Where().Select().ToList()", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.LinqTest", "SumOfEvenDoubled")
+		if err != nil {
+			t.Fatalf("SumOfEvenDoubled() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 24 {
+			t.Errorf("SumOfEvenDoubled() = %d, want 24", got)
+		}
+	})
+
+	t.Run("Any", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.LinqTest", "AnyOver10")
+		if err != nil {
+			t.Fatalf("AnyOver10() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 0 {
+			t.Errorf("AnyOver10() = %d, want 0", got)
+		}
+	})
+
+	t.Run("All", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.LinqTest", "AllPositive")
+		if err != nil {
+			t.Fatalf("AllPositive() error = %v", err)
+		}
+		if got := out.Native().(int32); got == 0 {
+			t.Errorf("AllPositive() = %d, want nonzero", got)
+		}
+	})
+
+	t.Run("FirstOrDefault", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.LinqTest", "FirstEven")
+		if err != nil {
+			t.Fatalf("FirstEven() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 4 {
+			t.Errorf("FirstEven() = %d, want 4", got)
+		}
+	})
+
+	t.Run("Select/ToArray over an array source", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.LinqTest", "ArraySelectSum")
+		if err != nil {
+			t.Fatalf("ArraySelectSum() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 12 {
+			t.Errorf("ArraySelectSum() = %d, want 12", got)
+		}
+	})
+}
+
 // TestForeach exercises `foreach` over List<T>/Dictionary<K,V> (Fase
 // 3.11): the compiler-generated struct enumerator (GetEnumerator/
 // MoveNext/get_Current/Dispose, confirmed against real IL — List<T>'s

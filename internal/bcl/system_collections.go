@@ -97,6 +97,28 @@ func disposeNoop(args []runtime.Value) (runtime.Value, error) {
 	return runtime.Value{}, nil
 }
 
+// NewListValue wraps items as a real List<T>-shaped value — the same
+// native backing `new List<T>()` produces, so the result is a valid
+// source for another foreach/LINQ call/List<T> method. Used by LINQ
+// (internal/interpreter/linq.go, Fase 3.14) to materialize eager results
+// (Select/Where/ToList/...) as something the rest of the program can keep
+// treating as a normal collection.
+func NewListValue(items []runtime.Value) runtime.Value {
+	return runtime.ObjRef(&runtime.Object{Native: &nativeList{items: items}})
+}
+
+// NativeListItems returns a native-backed List<T>'s items, if native is
+// one — used by LINQ's enumerateAll (internal/interpreter/linq.go) as a
+// direct fast path (skip driving a real GetEnumerator/MoveNext/
+// get_Current loop when the elements are already a Go slice).
+func NativeListItems(native any) ([]runtime.Value, bool) {
+	l, ok := native.(*nativeList)
+	if !ok {
+		return nil, false
+	}
+	return l.items, true
+}
+
 // derefStructReceiver unwraps a struct instance method's receiver: it
 // arrives as a managed pointer (KindRef) from `ldloca`+`call`, same
 // reasoning as struct receivers throughout Fase 3.7-3.9.

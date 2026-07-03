@@ -324,3 +324,29 @@ no-async/no-regex restante (~174 casos en 4-5/8, Select/Any/ToList/
 Where/ToArray), viable desde que existen delegates (3.9), enumeradores
 reales (3.11) y despacho por interfaz (3.13) — candidato natural para
 la siguiente sub-fase.
+
+Fase 3.15 (LINQ: `System.Linq.Enumerable`) completa. Descubrimiento
+central: los métodos de `Enumerable` no pueden ser `bcl.Native` planos —
+cada uno necesita invocar el delegate argumento (`m.invokeFunc`) y/o
+recorrer una fuente `IEnumerable<T>` arbitraria vía el protocolo real
+`GetEnumerator`/`MoveNext`/`get_Current` (`m.call`, reusando el fallback
+de despacho por interfaz de 3.13), ninguno de los dos disponible a una
+función `func(args) (Value, error)` sin `Machine`. Se agregó un registro
+paralelo (`linqRegistry`, `internal/interpreter/linq.go`) de nativos
+"Machine-aware", mismo tipo de plumbing nuevo que `ExplicitImplResolver`
+ya había necesitado en 3.13. `Select`/`Where`/`Any`/`All`/`ToList`/
+`ToArray`/`FirstOrDefault` son eager (materializan de inmediato), no los
+iteradores perezosos reales de la CLR — una llamada encadenada
+(`xs.Where(...).Select(...).ToList()`) igual se comporta idéntica desde
+el punto de vista del llamador, porque cada resultado de LINQ se envuelve
+como un `List<T>` real vía `bcl.NewListValue` (mismo patrón que
+`bcl.NewTypeValue` de 3.14). `enumerateAll` unifica la fuente: camino
+rápido para array/`List<T>` nativo (ya son un slice de Go), protocolo
+real de iteración para cualquier otra cosa — el mismo mecanismo que
+`foreach` ya usa, no una segunda implementación de iteración. Certifi-
+cación: promedio de los 7 paquetes sube de 80.1% a 80.5% (80.5% a 80.9%
+con Jint) — movimiento más chico que el volumen crudo de hallazgos
+(~174 casos) sugería, mismo patrón ya visto en Fase 3.10: LINQ solo
+"limpia" un método si era el único obstáculo, y varios métodos que usan
+LINQ en estos paquetes también tocan reflection profunda o regex, que
+siguen sin soporte. Con 80.9% el 85% todavía no se alcanza.

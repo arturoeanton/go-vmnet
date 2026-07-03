@@ -38,3 +38,4 @@ Output: `tests/fixtures/csharp/bin/Release/netstandard2.0/Vmnet.Fixtures.dll`
 | `CheapWins.cs` | `CheapWins` | `String`/`Char` predicates and helpers (`IsNullOrEmpty`, `Split`, `StartsWith`, `IndexOf`, `Replace`, `Trim`, `IsUpper`, `IsDigit`, ...), `Int32.ToString`, `List<T>`/`Dictionary<K,V>` extras (`set_Item`, `ToArray`, `AddRange`, `Contains`, `TryGetValue`) | Fase 3.13 |
 | `TryCatch.cs` (`CustomException`/`CustomExceptionTest`) | `CustomExceptionTest` | a plugin-declared exception subclass: base-constructor chaining (`: base(message)`), catch by exact subtype and by real base type | Fase 3.13 |
 | `Reflection.cs` | `ReflectionTest` | `typeof(T)` (`ldtoken` + `GetTypeFromHandle`), `Object.GetType()`, `System.Type` equality/`Name`/`FullName` | Fase 3.14 |
+| `Linq.cs` | `LinqTest` | `System.Linq.Enumerable` (`Where`/`Select`/`ToList` chained, `Any`/`All`/`FirstOrDefault`, `Select`/`ToArray` over an array source) | Fase 3.15 |

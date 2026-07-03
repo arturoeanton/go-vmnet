@@ -93,6 +93,13 @@ func (m *Machine) tryCall(fullName string, args []runtime.Value, depth int, inst
 		v, err = native(args)
 		return v, hr, err, true
 	}
+	// LINQ (Fase 3.14): needs Machine access (invoking a delegate
+	// argument, driving an arbitrary source's real iteration protocol),
+	// which a plain bcl.Native doesn't have — see linq.go.
+	if linq, ok := linqRegistry[fullName]; ok {
+		v, err = linq(m, args, depth, instrCount)
+		return v, true, err, true
+	}
 	if m.Resolve == nil {
 		return runtime.Value{}, false, nil, false
 	}

@@ -183,7 +183,30 @@ func resolvableMethod(md *metadata.Metadata, fullName string) bool {
 	if interfaceDispatchTargets[fullName] {
 		return true
 	}
+	if linqTargets[fullName] {
+		return true
+	}
 	return isLocalMethod(md, fullName)
+}
+
+// linqTargets lists the System.Linq.Enumerable methods the interpreter
+// resolves through a dedicated Machine-aware registry (Fase 3.14,
+// internal/interpreter/linq.go) rather than bcl.Lookup — LINQ needs to
+// invoke a delegate argument and drive an arbitrary source's real
+// iteration protocol, neither available to a plain bcl.Native, so these
+// never appear in the bcl.Lookup checked above. Kept as its own map
+// (not folded into interfaceDispatchTargets) since the reason a
+// checker-only allowlist is needed here is different: not "the checker
+// can't know the concrete receiver type," but "the checker doesn't know
+// about the interpreter's separate LINQ registry at all."
+var linqTargets = map[string]bool{
+	"System.Linq.Enumerable::Select":         true,
+	"System.Linq.Enumerable::Where":          true,
+	"System.Linq.Enumerable::Any":            true,
+	"System.Linq.Enumerable::All":            true,
+	"System.Linq.Enumerable::ToList":         true,
+	"System.Linq.Enumerable::ToArray":        true,
+	"System.Linq.Enumerable::FirstOrDefault": true,
 }
 
 // interfaceDispatchTargets lists the foreach iteration protocol's

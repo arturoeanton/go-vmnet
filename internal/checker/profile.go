@@ -69,6 +69,7 @@ func init() {
 		"System.String::",
 		"System.Type::",
 		"System.Reflection.MemberInfo::get_Name",
+		"System.Linq.Enumerable::",
 		"System.Text.Encoding::",
 		"System.Text.StringBuilder::",
 		"System.Array::Empty",
