@@ -197,7 +197,25 @@ func resolvableMethod(md *metadata.Metadata, fullName string) bool {
 	if asyncMachineTargets[fullName] {
 		return true
 	}
+	if reflectionMachineTargets[fullName] {
+		return true
+	}
 	return isLocalMethod(md, fullName)
+}
+
+// reflectionMachineTargets lists the System.Type introspection methods
+// resolved through the Machine-aware registry (Fase 3.25,
+// internal/interpreter/reflection.go) rather than bcl.Lookup — a plugin
+// type's real IsValueType/IsEnum/IsInterface/BaseType/GetInterfaces needs
+// its actual TypeDef (Machine.ResolveType), unavailable to a plain
+// bcl.Native.
+var reflectionMachineTargets = map[string]bool{
+	"System.Type::get_IsValueType": true,
+	"System.Type::get_IsEnum":      true,
+	"System.Type::get_IsInterface": true,
+	"System.Type::get_BaseType":    true,
+	"System.Type::GetInterfaces":   true,
+	"System.Type::GetType":         true,
 }
 
 // asyncMachineTargets lists the async-related methods resolved through

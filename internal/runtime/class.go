@@ -40,6 +40,17 @@ type Type struct {
 	// (a shared heap reference).
 	IsValueType bool
 
+	// IsEnum marks a TypeDef that extends System.Enum specifically (a
+	// subset of IsValueType — every enum is also a value type, but not
+	// every value type is an enum). IsInterface marks a TypeDef declared
+	// with the TypeAttributes.Interface flag. Both Fase 3.25 (Type
+	// reflection): isAssignableTo/typeMatches (Fase 3.8) never needed this
+	// distinction (an enum's underlying storage and identity checks work
+	// the same as any other value type), but System.Type.IsEnum/
+	// IsInterface do.
+	IsEnum      bool
+	IsInterface bool
+
 	// BaseTypeFullName ("" if none — interfaces and System.Object itself)
 	// and Interfaces (directly implemented only, not transitively expanded
 	// — spec §II.22.23) back isinst/castclass's real type-hierarchy walk

@@ -83,6 +83,13 @@ type SigType struct {
 	// for a value-type instantiation (KeyValuePair<K,V>, Nullable<T>, a
 	// user struct<T>), false for a reference-type one (List<T>).
 	GenericInstIsValueType bool
+
+	// Args holds the type arguments of a SigGenericInst — e.g. [System.Int32]
+	// for List<int>. Retained since Fase 3.25 (System.Type reflection:
+	// typeof(List<int>).GetGenericArguments()) even though most existing
+	// callers (newobj/call-target resolution, initobj/ldobj/stobj) still
+	// only care about the open generic type name and ignore this.
+	Args []SigType
 }
 
 // MethodSig is a parsed MethodDefSig/MethodRefSig (ECMA-335 §II.23.2.1/.2).
@@ -226,20 +233,25 @@ func parseType(b []byte) (SigType, int, error) {
 			return SigType{}, 0, err
 		}
 		pos += sz2
+		args := make([]SigType, 0, n)
 		for i := uint32(0); i < n; i++ {
-			_, sz3, err := parseType(b[pos:])
+			arg, sz3, err := parseType(b[pos:])
 			if err != nil {
 				return SigType{}, 0, err
 			}
 			pos += sz3
+			args = append(args, arg)
 		}
-		// Type arguments aren't retained: vmnet's native collection backing
-		// (internal/bcl) doesn't need to know T to store a runtime.Value.
-		// GenericInstIsValueType IS retained (Fase 3.7): a value-type
-		// generic instantiation (KeyValuePair<K,V>, Nullable<T>, ...) needs
-		// a real zeroed default(T) — see fieldOrLocalDefault in assembly.go
-		// — unlike a reference-type one (List<T>), which defaults to null.
-		return SigType{Kind: SigGenericInst, Token: openType, GenericInstIsValueType: isValueType}, pos, nil
+		// Type arguments ARE retained (Args, Fase 3.25) for System.Type
+		// reflection (typeof(List<int>).GetGenericArguments()), even though
+		// vmnet's native collection backing (internal/bcl) still doesn't
+		// need to know T to store a runtime.Value and ignores them for that
+		// purpose. GenericInstIsValueType is retained separately (Fase
+		// 3.7): a value-type generic instantiation (KeyValuePair<K,V>,
+		// Nullable<T>, ...) needs a real zeroed default(T) — see
+		// fieldOrLocalDefault in assembly.go — unlike a reference-type one
+		// (List<T>), which defaults to null.
+		return SigType{Kind: SigGenericInst, Token: openType, GenericInstIsValueType: isValueType, Args: args}, pos, nil
 	default:
 		return SigType{}, 0, fmt.Errorf("metadata: unsupported signature element type %#x", et)
 	}

@@ -318,10 +318,11 @@ func (asm *Assembly) buildType(fullName string) (*runtime.Type, error) {
 		return nil, err
 	}
 
-	isValueType, err := asm.isValueType(typeDef)
+	isValueType, isEnum, err := asm.classifyTypeDef(typeDef)
 	if err != nil {
 		return nil, err
 	}
+	isInterface := typeDef.Flags&typeAttrInterface != 0
 
 	// Instance fields are inherited (real CLR field layout: a base type's
 	// fields come first in memory, before its own) — a struct can't have
@@ -360,10 +361,26 @@ func (asm *Assembly) buildType(fullName string) (*runtime.Type, error) {
 			return nil, err
 		}
 		def := runtime.Null()
-		if sig, err := metadata.ParseFieldSig(f.Signature); err == nil {
-			def, err = asm.fieldOrLocalDefault(sig)
-			if err != nil {
-				return nil, err
+		// A literal field (FieldAttributes.Literal — every enum member,
+		// e.g. `Red` on `enum TrafficLight`) is a real Constant-table value
+		// baked in at compile time, never a computed runtime default — and
+		// its own field signature is a self-referential valuetype token
+		// (the enum's own TypeDef: real IL declares `static literal
+		// valuetype TrafficLight Red = int32(0)`, not `int32 Red`).
+		// Running fieldOrLocalDefault on it would recurse into building
+		// this exact same Type again to compute ITS OWN default, which
+		// hasn't finished being built yet — infinite recursion (found the
+		// hard way, Fase 3.25, adding the project's first plugin-defined
+		// enum fixture). vmnet has no Constant-table reader yet (Fase 3.24
+		// scoped Enum.GetValues/IsDefined out for the same reason), so
+		// literal fields are simply skipped rather than crashing; their
+		// real value is unavailable today regardless.
+		if f.Flags&fieldAttrLiteral == 0 {
+			if sig, err := metadata.ParseFieldSig(f.Signature); err == nil {
+				def, err = asm.fieldOrLocalDefault(sig)
+				if err != nil {
+					return nil, err
+				}
 			}
 		}
 		if f.Flags&fieldAttrStatic != 0 {
@@ -377,6 +394,8 @@ func (asm *Assembly) buildType(fullName string) (*runtime.Type, error) {
 
 	t := runtime.NewType(typeDef.Namespace, typeDef.Name, fields, staticFields, fieldDefaults, staticFieldDefaults)
 	t.IsValueType = isValueType
+	t.IsEnum = isEnum
+	t.IsInterface = isInterface
 	t.BaseTypeFullName = baseName
 	// fullName is already correctly "+"-qualified for a nested type (this
 	// function's own caller chain always resolves it via
@@ -403,23 +422,32 @@ func (asm *Assembly) buildType(fullName string) (*runtime.Type, error) {
 	return t, nil
 }
 
-// isValueType reports whether typeDef is a struct (extends
+// classifyTypeDef reports whether typeDef is a struct (extends
 // System.ValueType) or an enum (extends System.Enum, itself a
-// System.ValueType) rather than a plain class. Interfaces and
+// System.ValueType) rather than a plain class, distinguishing the two
+// (Fase 3.25, System.Type.IsEnum) — isAssignableTo/typeMatches (Fase 3.8)
+// never needed that distinction (an enum's identity checks work the same
+// as any other value type), but reflection does. Interfaces and
 // System.Object itself have no Extends entry at all.
-func (asm *Assembly) isValueType(typeDef metadata.TypeDefRow) (bool, error) {
+func (asm *Assembly) classifyTypeDef(typeDef metadata.TypeDefRow) (isValueType, isEnum bool, err error) {
 	if typeDef.Extends.IsNil() {
-		return false, nil
+		return false, false, nil
 	}
 	name, err := resolveTypeTokenName(asm.md, typeDef.Extends)
 	if err != nil {
 		// A base type vmnet can't resolve (e.g. a TypeSpec-encoded base,
 		// vanishingly rare) isn't a value type as far as we can tell —
 		// treat it as a class rather than failing type resolution outright.
-		return false, nil
+		return false, false, nil
 	}
-	return name == "System.ValueType" || name == "System.Enum", nil
+	return name == "System.ValueType" || name == "System.Enum", name == "System.Enum", nil
 }
+
+// typeAttrInterface is TypeAttributes.Interface (ECMA-335 §II.23.1.15) —
+// Fase 3.25, System.Type.IsInterface: a TypeDef with no Extends entry is
+// either an interface or System.Object itself, indistinguishable without
+// checking this flag.
+const typeAttrInterface = 0x00000020
 
 // qualifyTypeRefName resolves a TypeRef's full name, walking ResolutionScope
 // when it points to another TypeRef (a nested type, e.g. List<T>'s own
@@ -516,6 +544,11 @@ func resolveTypeTokenName(md *metadata.Metadata, tok metadata.Token) (string, er
 
 // fieldAttrStatic is FieldAttributes.Static (ECMA-335 §II.23.1.5).
 const fieldAttrStatic = 0x0010
+
+// fieldAttrLiteral is FieldAttributes.Literal (ECMA-335 §II.23.1.5) — set
+// on every enum member (`Red` on `enum TrafficLight`) and any other C#
+// `const` field.
+const fieldAttrLiteral = 0x0040
 
 // fieldOrLocalDefault maps a field's or local's signature type to its CLR
 // implicit zero-init value (spec: fields via beforefieldinit/allocation,

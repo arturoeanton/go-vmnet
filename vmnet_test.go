@@ -1651,3 +1651,55 @@ func TestCheapWins5(t *testing.T) {
 		}
 	})
 }
+
+func TestReflection2(t *testing.T) {
+	asm := loadFixture(t)
+
+	boolCase := func(name, method string, want bool) {
+		t.Run(name, func(t *testing.T) {
+			out, err := asm.Call("Vmnet.Fixtures.Reflection2", method)
+			if err != nil {
+				t.Fatalf("%s() error = %v", method, err)
+			}
+			got := out.Native().(int32) != 0
+			if got != want {
+				t.Errorf("%s() = %v, want %v", method, got, want)
+			}
+		})
+	}
+	stringCase := func(name, method, want string) {
+		t.Run(name, func(t *testing.T) {
+			out, err := asm.Call("Vmnet.Fixtures.Reflection2", method)
+			if err != nil {
+				t.Fatalf("%s() error = %v", method, err)
+			}
+			if got := out.Native().(string); got != want {
+				t.Errorf("%s() = %q, want %q", method, got, want)
+			}
+		})
+	}
+
+	boolCase("List<int>.IsGenericType", "ListIntIsGenericTest", true)
+	stringCase("List<int>.GetGenericTypeDefinition", "ListIntGenericDefTest", "System.Collections.Generic.List`1")
+	stringCase("Dictionary<string,int>.GetGenericArguments", "ListIntGenericArgsTest", "System.String|System.Int32")
+	stringCase("List<>.MakeGenericType(string)", "MakeGenericListStringTest", "System.Collections.Generic.List`1[[System.String]]")
+	stringCase("Nullable.GetUnderlyingType(int?)", "NullableUnderlyingTest", "System.Int32")
+	boolCase("Nullable.GetUnderlyingType(int) is null", "NullableUnderlyingOfNonNullableTest", true)
+	boolCase("int.IsValueType", "IntIsValueTypeTest", true)
+	boolCase("Point.IsValueType", "PointIsValueTypeTest", true)
+	boolCase("Dog.IsValueType", "DogIsValueTypeTest", false)
+	boolCase("TrafficLight.IsEnum", "TrafficLightIsEnumTest", true)
+	boolCase("Dog.IsEnum", "DogIsEnumTest", false)
+	boolCase("IDisposable.IsInterface", "IDisposableIsInterfaceTest", true)
+	boolCase("IShape.IsInterface", "IShapeIsInterfaceTest", true)
+	boolCase("Dog.IsInterface", "DogIsInterfaceTest", false)
+	stringCase("Dog.BaseType", "DogBaseTypeTest", "Vmnet.Fixtures.Animal")
+	stringCase("Point.BaseType", "PointBaseTypeTest", "System.ValueType")
+	stringCase("TrafficLight.BaseType", "TrafficLightBaseTypeTest", "System.Enum")
+	boolCase("IShape.BaseType is null", "IShapeBaseTypeIsNullTest", true)
+	stringCase("Dog.GetInterfaces()", "DogInterfacesTest", "Vmnet.Fixtures.IShape;")
+	boolCase("Type.GetType(plugin type)", "GetTypePluginTest", true)
+	boolCase("Type.GetType(BCL value type)", "GetTypeBclValueTypeTest", true)
+	boolCase("Type.GetType(unknown) is null", "GetTypeUnknownIsNullTest", true)
+	boolCase("Type.Assembly.ToString() is non-empty", "AssemblyToStringNotEmptyTest", true)
+}

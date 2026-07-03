@@ -144,6 +144,8 @@ func init() {
 		"System.Int64::",
 		"System.Collections.Concurrent.ConcurrentDictionary`2::",
 		"System.Delegate::",
+		"System.Nullable::GetUnderlyingType",
+		"System.Reflection.Assembly::",
 	)
 	// netstandard-lite currently promises exactly the same BCL surface as
 	// rules (System.Type moved into `rules` in Fase 3.14, System.Convert

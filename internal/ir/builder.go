@@ -452,8 +452,21 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool, ehClaus
 			// type tokens anyway.
 			token := metadata.Token(instr.Operand.(uint32))
 			switch token.Table() {
-			case metadata.TableTypeRef, metadata.TableTypeDef, metadata.TableTypeSpec:
-				typeFullName, err := resolveTypeTokenOrGeneric(md, uint32(token))
+			case metadata.TableTypeRef, metadata.TableTypeDef:
+				typeFullName, err := resolveTypeToken(md, token)
+				if err != nil {
+					return nil, nil, fmt.Errorf("ir: ldtoken at IL offset %d: %w", instr.Offset, err)
+				}
+				out = append(out, LoadTypeToken{TypeFullName: typeFullName})
+			case metadata.TableTypeSpec:
+				// Unlike resolveTypeTokenOrGeneric (used by initobj/ldobj/
+				// stobj and MemberRef class resolution, which only ever need
+				// the open generic type name), typeof(T) on a closed generic
+				// instantiation needs its type arguments too (Fase 3.25:
+				// System.Type.GetGenericArguments/MakeGenericType) —
+				// resolveClosedTypeSpecName retains them as "Open`N[[Arg1],
+				// [Arg2]]".
+				typeFullName, err := resolveClosedTypeSpecName(md, token.RID())
 				if err != nil {
 					return nil, nil, fmt.Errorf("ir: ldtoken at IL offset %d: %w", instr.Offset, err)
 				}
@@ -736,6 +749,100 @@ func resolveTypeSpecName(md *metadata.Metadata, rid uint32) (string, error) {
 		return "", fmt.Errorf("unsupported TypeSpec kind %d", t.Kind)
 	}
 	return resolveTypeToken(md, t.Token)
+}
+
+// resolveClosedTypeSpecName resolves a TypeSpec to its full reflection-style
+// name INCLUDING type arguments (Fase 3.25) — used only by ldtoken's
+// typeof(T) path (System.Type reflection needs GetGenericArguments() to
+// work), unlike resolveTypeSpecName above which every other TypeSpec
+// consumer in this file still uses (they only need the open generic name).
+func resolveClosedTypeSpecName(md *metadata.Metadata, rid uint32) (string, error) {
+	sig, err := md.TypeSpecSignature(rid)
+	if err != nil {
+		return "", err
+	}
+	t, err := metadata.ParseTypeSpec(sig)
+	if err != nil {
+		return "", err
+	}
+	return sigTypeFullName(md, t)
+}
+
+// sigTypeFullName resolves any parsed SigType to a reflection-style full
+// name — for a closed generic instantiation, recursively including its
+// type arguments as "Open`N[[Arg1],[Arg2]]" (a simplified form of real
+// .NET's assembly-qualified closed-generic FullName: good enough for
+// vmnet's own Type.FullName-string-based equality/parsing, since nothing
+// here ever needs to round-trip through a real CLR loader).
+func sigTypeFullName(md *metadata.Metadata, t metadata.SigType) (string, error) {
+	switch t.Kind {
+	case metadata.SigBoolean:
+		return "System.Boolean", nil
+	case metadata.SigChar:
+		return "System.Char", nil
+	case metadata.SigI1:
+		return "System.SByte", nil
+	case metadata.SigU1:
+		return "System.Byte", nil
+	case metadata.SigI2:
+		return "System.Int16", nil
+	case metadata.SigU2:
+		return "System.UInt16", nil
+	case metadata.SigI4:
+		return "System.Int32", nil
+	case metadata.SigU4:
+		return "System.UInt32", nil
+	case metadata.SigI8:
+		return "System.Int64", nil
+	case metadata.SigU8:
+		return "System.UInt64", nil
+	case metadata.SigR4:
+		return "System.Single", nil
+	case metadata.SigR8:
+		return "System.Double", nil
+	case metadata.SigI:
+		return "System.IntPtr", nil
+	case metadata.SigU:
+		return "System.UIntPtr", nil
+	case metadata.SigString:
+		return "System.String", nil
+	case metadata.SigObject:
+		return "System.Object", nil
+	case metadata.SigClass, metadata.SigValueType:
+		return resolveTypeToken(md, t.Token)
+	case metadata.SigSZArray:
+		if t.Elem == nil {
+			return "", fmt.Errorf("ir: array type signature with no element type")
+		}
+		elemName, err := sigTypeFullName(md, *t.Elem)
+		if err != nil {
+			return "", err
+		}
+		return elemName + "[]", nil
+	case metadata.SigGenericInst:
+		openName, err := resolveTypeToken(md, t.Token)
+		if err != nil {
+			return "", err
+		}
+		if len(t.Args) == 0 {
+			return openName, nil
+		}
+		argNames := make([]string, len(t.Args))
+		for i, arg := range t.Args {
+			argName, err := sigTypeFullName(md, arg)
+			if err != nil {
+				return "", err
+			}
+			argNames[i] = argName
+		}
+		return openName + "[[" + strings.Join(argNames, "],[") + "]]", nil
+	case metadata.SigGenericParam:
+		// An unresolved method/type generic parameter (T, !!0) — same ""
+		// convention resolveTypeTokenOrGeneric already uses for this case.
+		return "", nil
+	default:
+		return "", fmt.Errorf("ir: unsupported generic type argument kind %d", t.Kind)
+	}
 }
 
 // resolveTypeTokenOrGeneric resolves the inline TypeDefOrRefOrSpec token used

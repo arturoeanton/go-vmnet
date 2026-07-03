@@ -547,3 +547,43 @@ candidato natural para la próxima fase, pero un bloque
 arquitectónicamente más grande (introspección respaldada por metadata
 real + invocación dinámica) que cualquier cosa atacada hasta ahora. Con
 88.7% el objetivo de ~97% todavía no se alcanza.
+
+Fase 3.25 (reflexión profunda, primera porción: introspección de
+`System.Type`) completa. Cambio de raíz en `internal/metadata/
+signatures.go`: `SigType` retiene ahora sus argumentos genéricos (`Args
+[]SigType`, antes descartados al parsear una instanciación genérica) —
+aditivo puro, todo consumidor existente sigue ignorándolos. Nuevo
+`resolveClosedTypeSpecName`/`sigTypeFullName` en `internal/ir/builder.go`,
+usado solo por `ldtoken` (`typeof(T)`): `typeof(List<int>)` retiene ahora
+sus argumentos como `"List\`1[[System.Int32]]"`, mientras que
+`initobj`/`ldobj`/`stobj`/resolución de `MemberRef` siguen sin
+necesitarlos. Sobre esa base: `Type.IsGenericType`/
+`GetGenericTypeDefinition`/`GetGenericArguments`/`MakeGenericType`
+(parseo puro de corchetes, sin acceso a `Machine`),
+`Nullable.GetUnderlyingType`. `runtime.Type` ganó `IsEnum`/`IsInterface`
+(antes solo `IsValueType`, que colapsaba struct y enum juntos) —
+`assembly.go` los puebla desde el `TypeDef` real (`IsInterface` lee el
+bit `TypeAttributes.Interface` directo de `Flags`, el único de los tres
+que no se deriva de `Extends`). Con eso: `Type.IsValueType`/`IsEnum`/
+`IsInterface`/`BaseType`/`GetInterfaces()`/`GetType(string)` — mapa fijo
+de primitivos/interfaces BCL conocidos primero, `TypeDef` real de plugin
+después (Machine-aware, `internal/interpreter/reflection.go`). Bug real
+encontrado con el primer `enum` de plugin de todo el proyecto
+(`TrafficLight`, fixture nuevo): `buildType` entraba en recursión
+infinita, porque un miembro de enum es un campo `static literal`
+autorreferenciado en IL real (`static literal valuetype TrafficLight Red
+= int32(0)`, no `int32`) — `fieldOrLocalDefault` intentaba calcular su
+default recursando en `resolveTypeByFullName` sobre el mismo tipo que
+todavía no había terminado de construirse. Arreglado saltando el cálculo
+de default para cualquier campo `FieldAttributes.Literal` (su valor real
+vive en la tabla `Constant`, que vmnet todavía no lee). Certificación:
+88.7% a **89.0%** (con Jint) — `System.Text.Json`/`Newtonsoft.Json`
+concentran la mayor parte del movimiento. El resto del bloque de
+reflexión (`System.Reflection.MethodInfo`/`PropertyInfo`/
+`ConstructorInfo` como objetos reales, `MethodBase.Invoke`/
+`Activator.CreateInstance`, `Type.GetMethod(s)`/`GetProperties`/
+`GetConstructors`/`GetFields`, `Enum.GetValues`/`GetNames`/`IsDefined`)
+queda confirmado como la superficie de mayor volumen restante — un
+diseño más grande (jerarquía de objetos respaldada por metadata real más
+invocación dinámica genuina), candidato para Fase 3.26. Con 89.0% el
+objetivo de ~97% todavía no se alcanza.

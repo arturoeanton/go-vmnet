@@ -33,6 +33,198 @@ func init() {
 	// Type). vmnet doesn't model MemberInfo as a distinct hierarchy; this
 	// covers the call site shape directly.
 	register("System.Reflection.MemberInfo::get_Name", true, typeGetName)
+
+	// Generics reflection (Fase 3.25) — all pure string manipulation over
+	// FullName's "Open`N[[Arg1],[Arg2]]" closed-generic encoding (see
+	// internal/ir/builder.go's sigTypeFullName, which is what produces
+	// that encoding for ldtoken/typeof(T) since this fase). None of these
+	// need Machine access: get_IsValueType/IsEnum/IsInterface/get_BaseType/
+	// GetInterfaces do (internal/interpreter/reflection.go) since a
+	// plugin-defined generic type needs its real TypeDef flags, not just
+	// name parsing.
+	register("System.Type::get_IsGenericType", true, typeGetIsGenericType)
+	register("System.Type::GetGenericTypeDefinition", true, typeGetGenericTypeDefinition)
+	register("System.Type::GetGenericArguments", true, typeGetGenericArguments)
+	register("System.Type::MakeGenericType", true, typeMakeGenericType)
+	register("System.Nullable::GetUnderlyingType", true, nullableGetUnderlyingType)
+
+	registerCtor("System.Reflection.Assembly", func([]runtime.Value) (*runtime.Object, error) {
+		return &runtime.Object{Native: &nativeAssembly{}}, nil
+	})
+	register("System.Type::get_Assembly", true, typeGetAssembly)
+	register("System.Reflection.Assembly::ToString", true, assemblyToString)
+	register("System.Reflection.Assembly::get_FullName", true, assemblyToString)
+}
+
+// nativeAssembly is a stub System.Reflection.Assembly — vmnet has no real
+// multi-assembly model (a plugin is always one flat set of resolvable
+// types plus the BCL surface this package implements), so every Assembly
+// value is interchangeable; only .ToString()/.FullName are given a
+// plausible constant (Fase 3.25), matching the CultureInfo stub precedent
+// (Fase 3.23).
+type nativeAssembly struct{}
+
+func typeGetAssembly(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Type.Assembly expects a receiver")
+	}
+	if _, err := asTypeInfo(args[0]); err != nil {
+		return runtime.Value{}, err
+	}
+	return runtime.ObjRef(&runtime.Object{Native: &nativeAssembly{}}), nil
+}
+
+func assemblyToString(args []runtime.Value) (runtime.Value, error) {
+	return runtime.String("vmnet, Version=0.0.0.0"), nil
+}
+
+// genericOpenName strips a closed generic instantiation's "[[Arg1],
+// [Arg2]]" suffix, if present, leaving the open generic type's own name
+// (e.g. "System.Collections.Generic.List`1[[System.Int32]]" ->
+// "System.Collections.Generic.List`1"). Exported for
+// internal/interpreter/reflection.go, which needs it to classify a
+// closed generic instantiation's IsValueType/IsEnum/IsInterface/BaseType
+// against the SAME open name a plugin's TypeDef or a hardcoded BCL entry
+// is registered under.
+func GenericOpenName(fullName string) string {
+	if idx := strings.Index(fullName, "[["); idx >= 0 {
+		return fullName[:idx]
+	}
+	return fullName
+}
+
+func isGenericTypeName(fullName string) bool {
+	return strings.Contains(GenericOpenName(fullName), "`")
+}
+
+// splitGenericArgs parses a closed generic instantiation's bracketed
+// argument list — e.g. "[[System.String],[System.Int32]]" ->
+// ["System.String", "System.Int32"] — tracking bracket depth so a nested
+// generic argument (itself closed, e.g. "[[System.Collections.Generic.
+// List`1[[System.String]]]]") splits correctly instead of breaking on its
+// own internal commas/brackets.
+func splitGenericArgs(bracketed string) []string {
+	if len(bracketed) < 2 || bracketed[0] != '[' || bracketed[len(bracketed)-1] != ']' {
+		return nil
+	}
+	inner := bracketed[1 : len(bracketed)-1]
+	var args []string
+	depth := 0
+	start := -1
+	for i := 0; i < len(inner); i++ {
+		switch inner[i] {
+		case '[':
+			if depth == 0 {
+				start = i + 1
+			}
+			depth++
+		case ']':
+			depth--
+			if depth == 0 {
+				args = append(args, inner[start:i])
+			}
+		}
+	}
+	return args
+}
+
+func typeGetIsGenericType(args []runtime.Value) (runtime.Value, error) {
+	ti, err := asTypeInfo(args[0])
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	return runtime.Bool(isGenericTypeName(ti.FullName)), nil
+}
+
+func typeGetGenericTypeDefinition(args []runtime.Value) (runtime.Value, error) {
+	ti, err := asTypeInfo(args[0])
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	open := GenericOpenName(ti.FullName)
+	if !strings.Contains(open, "`") {
+		return runtime.Value{}, &runtime.ManagedException{TypeName: "System.InvalidOperationException", Message: fmt.Sprintf("Type '%s' is not a generic type.", ti.FullName)}
+	}
+	return NewTypeValue(open), nil
+}
+
+// typeGetGenericArguments returns [] for an unbound open generic type
+// (typeof(List<>)) — real .NET returns the generic parameter placeholders
+// (T) there, which vmnet has no way to name (Fase 3.25, documented
+// limitation): every concrete closed instantiation this project actually
+// constructs (typeof(List<int>), MakeGenericType's own result) carries
+// real argument names and works fully.
+func typeGetGenericArguments(args []runtime.Value) (runtime.Value, error) {
+	ti, err := asTypeInfo(args[0])
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	idx := strings.Index(ti.FullName, "[[")
+	if idx < 0 {
+		return runtime.ArrRef(runtime.NewArray(0)), nil
+	}
+	argNames := splitGenericArgs(ti.FullName[idx:])
+	elems := make([]runtime.Value, len(argNames))
+	for i, n := range argNames {
+		elems[i] = NewTypeValue(n)
+	}
+	return runtime.ArrRef(&runtime.Array{Elems: elems}), nil
+}
+
+// typeMakeGenericType receives its type arguments as a real System.Type[]
+// (the C# compiler always lowers `params Type[]` to an actual array at
+// the call site) — unlike typeof(T), which loses its argument names for
+// an OPEN generic (typeof(List<>) has no way to carry "T"), this always
+// has real names to build a proper closed instantiation from.
+func typeMakeGenericType(args []runtime.Value) (runtime.Value, error) {
+	ti, err := asTypeInfo(args[0])
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	if len(args) < 2 || args[1].Kind != runtime.KindArray || args[1].Arr == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Type.MakeGenericType expects a Type[] argument")
+	}
+	open := GenericOpenName(ti.FullName)
+	argNames := make([]string, len(args[1].Arr.Elems))
+	for i, v := range args[1].Arr.Elems {
+		argTi, err := asTypeInfo(v)
+		if err != nil {
+			return runtime.Value{}, fmt.Errorf("bcl: System.Type.MakeGenericType: argument %d is not a Type", i)
+		}
+		argNames[i] = argTi.FullName
+	}
+	return NewTypeValue(open + "[[" + strings.Join(argNames, "],[") + "]]"), nil
+}
+
+// nullableGetUnderlyingType backs the static System.Nullable.
+// GetUnderlyingType(Type) helper (note: System.Nullable, not
+// System.Nullable`1 — this one real method lives on the non-generic
+// helper class real .NET uses for exactly this kind of type-erased
+// utility). Returns real null (not a Type) for any non-Nullable`1 input,
+// matching actual semantics.
+func nullableGetUnderlyingType(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: Nullable.GetUnderlyingType expects 1 argument")
+	}
+	if args[0].Kind == runtime.KindNull {
+		return runtime.Value{}, fmt.Errorf("bcl: Nullable.GetUnderlyingType: type argument is null")
+	}
+	ti, err := asTypeInfo(args[0])
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	if GenericOpenName(ti.FullName) != "System.Nullable`1" {
+		return runtime.Null(), nil
+	}
+	idx := strings.Index(ti.FullName, "[[")
+	if idx < 0 {
+		return runtime.Null(), nil
+	}
+	argNames := splitGenericArgs(ti.FullName[idx:])
+	if len(argNames) != 1 {
+		return runtime.Null(), nil
+	}
+	return NewTypeValue(argNames[0]), nil
 }
 
 // NewTypeValue builds a System.Type value for fullName — the runtime

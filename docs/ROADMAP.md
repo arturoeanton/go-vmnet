@@ -2469,6 +2469,144 @@ go test ./... -race -count=5
 go test ./ -run TestCheapWins5 -v
 ```
 
+### Fase 3.25 — Reflexión profunda, primera porción: introspección de System.Type
+
+Primera porción del bloque de "reflexión profunda" identificado como la categoría dominante
+restante al cierre de Fase 3.24 (findings de 4-5/8 de ancho). Alcance deliberadamente acotado a
+`System.Type` — introspección pura (generics, `IsValueType`/`IsEnum`/`IsInterface`/`BaseType`/
+`GetInterfaces`, `Type.GetType(string)`) — dejando afuera el bloque más grande todavía
+(`System.Reflection.MethodInfo`/`PropertyInfo`/`ConstructorInfo`/`ParameterInfo`, invocación
+dinámica vía `MethodBase.Invoke`/`Activator.CreateInstance`), que necesita una jerarquía de
+objetos real respaldada por metadata, no solo manipulación de nombres.
+
+**Tareas — generics de `System.Type`**
+
+- [x] **Cambio de raíz — `internal/metadata/signatures.go`**: `SigType` ganó un campo `Args
+      []SigType`, poblado en la rama `elementGenericInst` de `parseType` (antes descartaba cada
+      argumento parseado: `_, sz3, err := parseType(...)`). Aditivo puro — todo consumidor
+      existente de `SigType` sigue ignorando `Args` igual que antes; ningún comportamiento previo
+      cambia.
+- [x] **`internal/ir/builder.go`**: nuevo `resolveClosedTypeSpecName`/`sigTypeFullName`, usado
+      *solo* por el caso `ldtoken` (`typeof(T)`) — a diferencia de `resolveTypeTokenOrGeneric`
+      (usado por `initobj`/`ldobj`/`stobj` y resolución de `MemberRef`, que siguen sin necesitar
+      más que el nombre abierto), `typeof(List<int>)` ahora retiene sus argumentos como
+      `"System.Collections.Generic.List\`1[[System.Int32]]"` — confirmado contra IL real que
+      `typeof(List<>)` (genérico abierto) sigue resolviendo directo a un `TypeDef`/`TypeRef` sin
+      `TypeSpec` en absoluto, así que el nombre abierto nunca gana corchetes por accidente.
+- [x] `Type.get_IsGenericType` (`internal/bcl/system_type.go`): `strings.Contains(nombre, "\`")`
+      sobre la porción antes de `[[` — cierto tanto para el tipo abierto como el cerrado, igual
+      que el contrato real.
+- [x] `Type.GetGenericTypeDefinition()`: recorta el sufijo `[[...]]` si existe.
+- [x] `Type.GetGenericArguments()`: parser `splitGenericArgs` con seguimiento de profundidad de
+      corchetes (un argumento puede ser él mismo un genérico cerrado anidado). Vacío para un
+      genérico abierto (`typeof(List<>)`) — .NET real devuelve los parámetros (`T`) ahí, que
+      vmnet no tiene forma de nombrar (limitación documentada).
+- [x] `Type.MakeGenericType(params Type[])`: a diferencia de `typeof(T)`, SIEMPRE recibe nombres
+      reales en tiempo de ejecución (el compilador siempre baja `params Type[]` a un array real
+      en el sitio de llamada) — construye el nombre cerrado directamente, sin depender de que el
+      genérico abierto original haya retenido nada.
+- [x] `System.Nullable::GetUnderlyingType(Type)` (nótese: la clase helper no genérica
+      `System.Nullable`, no `System.Nullable\`1` — un método real distinto) — mismo parser de
+      corchetes, `null` para cualquier tipo que no sea `Nullable\`1[[...]]` cerrado.
+
+**Tareas — clasificación de tipos (Machine-aware, `internal/interpreter/reflection.go`)**
+
+- [x] `runtime.Type` ganó `IsEnum`/`IsInterface` (antes solo existía `IsValueType`, que colapsaba
+      struct y enum juntos — Fase 3.7 nunca necesitó la distinción). `assembly.go`'s `buildType`
+      los puebla: `classifyTypeDef` (antes `isValueType`) ahora también reporta `isEnum`
+      (`Extends == "System.Enum"` específicamente, no solo `"System.ValueType"`), e `isInterface`
+      lee el bit `TypeAttributes.Interface` (`0x20`) directo de `TypeDefRow.Flags` — el único de
+      los tres que no se podía derivar de `Extends` (una interfaz, igual que `System.Object`
+      mismo, no tiene `Extends` en absoluto).
+- [x] `Type.IsValueType`/`IsEnum`/`IsInterface`/`BaseType`/`GetInterfaces()`: clasificación en dos
+      niveles — un mapa fijo de primitivos/interfaces BCL conocidos primero (mismo patrón que
+      `exceptionBaseType`/`interfaceDispatchTargets`), luego el `TypeDef` real de un tipo de
+      plugin vía `Machine.ResolveType`. `GetInterfaces()` devuelve solo lo directamente
+      implementado (`runtime.Type.Interfaces`, sin expandir transitivamente — mismo alcance que
+      `isinst`/`castclass` desde Fase 3.8).
+- [x] `Type.GetType(string)`: resuelve un tipo de plugin vía `Machine.ResolveType` o un value type
+      nativo de BCL vía `bcl.LookupValueType`; cualquier otro nombre (una búsqueda cross-assembly
+      real, que necesita nombre calificado por ensamblado y un loader que vmnet no tiene) devuelve
+      `null`, igual que el contrato real de `Type.GetType` para un nombre que no puede resolver.
+- [x] `Type.Assembly` (`internal/bcl/system_type.go`): stub `System.Reflection.Assembly` — vmnet
+      no modela múltiples ensamblados reales, así que todo valor `Assembly` es intercambiable;
+      solo `.ToString()`/`.FullName` devuelven una constante plausible (mismo precedente que el
+      stub de `CultureInfo`, Fase 3.23).
+
+**Bug real encontrado y arreglado**
+
+- [x] **Recursión infinita en `buildType` al construir el primer `enum` declarado por un plugin
+      en todo el proyecto**: cada miembro de un enum (`Red` en `enum TrafficLight`) es un campo
+      `static literal` cuyo tipo, en IL real, es el propio enum (`static literal valuetype
+      TrafficLight Red = int32(0)`) — no `int32` como podría suponerse. `buildType` calculaba un
+      default para *todo* campo (estático o no) antes de separarlos, así que ese campo
+      autorreferenciado disparaba `fieldOrLocalDefault` → `valueTypeDefault` →
+      `resolveTypeByFullName("TrafficLight")` → `buildType("TrafficLight")` de nuevo — el tipo
+      todavía no estaba en la caché (`asm.types`) porque su propia construcción no había
+      terminado, así que cada vuelta repetía la misma cadena hasta agotar la pila
+      (`stack overflow` real, encontrado corriendo el fixture, no por inspección). Arreglado
+      saltando `fieldOrLocalDefault` para cualquier campo `FieldAttributes.Literal` (`0x40`): su
+      valor real vive en la tabla `Constant`, que vmnet todavía no lee (mismo motivo por el que
+      `Enum.GetValues`/`IsDefined` siguen fuera de alcance — ver abajo), así que no había ningún
+      default útil que calcular de todos modos.
+
+**Fixtures y tests**
+
+- [x] `Reflection2.cs` / `TestReflection2` (22 casos) — reusa la jerarquía `Animal`/`Dog`/`IShape`
+      de `TypeChecks.cs` y el struct `Point` de `Structs.cs` para que `BaseType`/`GetInterfaces`
+      ejerciten un `TypeDef` de plugin real, no solo nombres BCL; declara `TrafficLight`, el
+      primer `enum` de plugin del proyecto (regresión directa del bug de arriba).
+
+**Lo que se dejó explícitamente afuera**
+
+- `System.Enum.GetValues`/`GetNames`/`IsDefined`/`ToObject`: necesitan leer la tabla `Constant`
+  (valor literal real de cada miembro) — sin parser todavía en `internal/metadata`. Es la pieza
+  que más se repite en el probe (5/8 de ancho) pero es un módulo aparte, no una extensión barata
+  de esta fase.
+- El resto de la reflexión profunda: `System.Reflection.MethodInfo`/`PropertyInfo`/
+  `ConstructorInfo`/`ParameterInfo`/`MemberInfo`/`Assembly` como objetos reales,
+  `MethodBase.Invoke`/`Activator.CreateInstance` (invocación dinámica), `Type.GetMethod(s)`/
+  `GetProperties`/`GetConstructors`/`GetFields`/`GetElementType`/`get_IsArray`/`get_IsAbstract` —
+  confirmado por el probe post-3.25 como el bloque de mayor volumen restante; necesita una
+  jerarquía de objetos respaldada por metadata real (RID de método/propiedad/campo) más
+  invocación dinámica genuina (`Machine.call` desde un `MethodInfo` arbitrario), un diseño
+  bastante más grande que cualquier cosa de esta fase — candidato para Fase 3.26.
+- `System.Linq.Expressions` (`Expression.Parameter`/`Lambda`, 3/8): árboles de expresión, todavía
+  sin relación con el resto de la reflexión más allá de compartir cliente (Jint).
+- `Span\`1::op_Implicit`/`CopyTo` (3/8), `ldsflda`/`localloc` (opcodes, 3/8), `Convert.ChangeType`,
+  `Array.IndexOf`, `List\`1::Remove`, `RuntimeHelpers.GetHashCode`: superficie dispersa de volumen
+  moderado sin relación con reflexión — candidatos para un futuro paquete de wins baratos.
+
+### Re-certificación contra los mismos 8 targets (7 paquetes + Jint)
+
+| Paquete | % limpio Fase 3.24 | % limpio Fase 3.25 |
+|---|---|---|
+| `Ardalis.GuardClauses@5.0.0` | 96.8% | 96.8% |
+| `FluentValidation@11.9.2` | 93.3% | 93.7% |
+| `System.Text.Json@8.0.5` | 82.8% | 83.7% |
+| `Newtonsoft.Json@13.0.3` | 79.6% | 80.4% |
+| `Semver@2.3.0` | 91.0% | 91.0% |
+| `SimpleBase@4.0.0` | 85.3% | 85.3% |
+| `Humanizer.Core@2.14.1` | 93.4% | 93.4% |
+| **Promedio (7 paquetes)** | **88.9%** | **89.2%** |
+| `Jint@3.1.3` | 87.5% | 87.6% |
+| **Promedio (7 paquetes + Jint)** | **88.7%** | **89.0%** |
+
++0.3 puntos — movimiento moderado para una porción deliberadamente acotada (solo introspección de
+`Type`, sin tocar todavía `MethodInfo`/`PropertyInfo`/invocación dinámica). `System.Text.Json`
+(+0.9) y `Newtonsoft.Json` (+0.8) concentran la mayor parte, consistente con ambos usando
+`Type.IsGenericType`/`GetGenericArguments`/`IsValueType`/`IsEnum` en sus rutas de
+serialización/deserialización basadas en reflexión. Con 89.0% el objetivo de ~97% todavía no se
+alcanza — el probe confirma que el resto del bloque de reflexión (`MethodInfo`/`PropertyInfo`/
+invocación dinámica, `Enum.*`) es ahora, con claridad, la superficie de mayor volumen restante.
+
+### Cómo verificar Fase 3.25
+
+```bash
+go test ./... -race -count=5
+go test ./ -run TestReflection2 -v
+```
+
 ---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
