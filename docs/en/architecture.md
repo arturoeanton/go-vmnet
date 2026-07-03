@@ -653,3 +653,22 @@ the target's full transitive graph via `nuget.NewResolver` (same resolver
 without `AnalyzeWithDeps`, ~400 findings were false negatives for calls
 that already run correctly at runtime through the existing multi-assembly
 machinery.
+
+Fase 3.30 (`System.IO.MemoryStream`/`Stream` + a NuGet resolver bug) complete.
+`internal/bcl/system_io.go` adds `nativeMemoryStream` following exactly the
+"chain a managed subclass's `.ctor` into a native BCL base" pattern
+`system_exception.go` established in Fase 3.13 (`baseExceptionCtorInPlace`)
+— needed no interpreter change at all, since real packages (NPOI) declare
+their own direct subclasses of `MemoryStream`/`Stream`. Every instance
+method is registered under both `System.IO.MemoryStream::*` and
+`System.IO.Stream::*`, since real code overwhelmingly holds a
+`MemoryStream` in a `Stream`-typed local — Fase 3.27's virtual dispatch
+already tries the receiver's real concrete type (`bcl.NativeTypeName`)
+before the declared name, so either registration alone would resolve a
+callvirt site correctly. Separately: `nuget.ParseMinVersion`
+(`internal/nuget/version.go`) fixes a real resolver bug `AnalyzeWithDeps`'s
+first non-Jint use surfaced — `Resolver.visit` had no NuGet version-*range*
+parsing at all (`ClosedXML@0.105.0`'s `.nuspec` declares
+`DocumentFormat.OpenXml` as `[3.1.1, 4.0.0)`, not a plain pin), which broke
+dependency resolution outright for both `vmnet check package` and the real
+`vm.LoadPackage` runtime path — not just a checker-only issue.

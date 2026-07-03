@@ -108,6 +108,8 @@ func NativeTypeName(native any) (string, bool) {
 		return "System.Text.StringBuilder", true
 	case *nativeArrayEnumerator:
 		return "System.Array+ArrayEnumerator", true
+	case *nativeMemoryStream:
+		return "System.IO.MemoryStream", true
 	default:
 		return "", false
 	}

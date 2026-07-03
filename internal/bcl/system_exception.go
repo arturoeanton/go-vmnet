@@ -22,6 +22,8 @@ func init() {
 		"System.FormatException",
 		"System.OverflowException",
 		"System.NotImplementedException",
+		"System.IO.IOException",
+		"System.IO.EndOfStreamException",
 	} {
 		registerCtor(name, newExceptionCtor(name))
 		// A plugin's own exception subclass (`class MyException :

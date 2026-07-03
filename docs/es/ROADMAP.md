@@ -3036,6 +3036,87 @@ go test ./... -race -count=5
 /tmp/vmnet-cli check package NPOI@2.8.0 --profile=netstandard-lite   # Dependencies resolved: 21
 ```
 
+### Fase 3.30 — `System.IO.MemoryStream`/`Stream` + un bug real del resolver de NuGet
+
+Bloqueador de mayor impacto después de la medición honesta de Fase 3.29: `System.IO.Stream`/
+`MemoryStream` (709 findings combinados en NPOI, 92 en ClosedXML) — el hueco genuinamente-BCL más
+grande, y que se repite en ambos paquetes objetivo, coherente con la metodología de este loop de
+"elegir el bloqueador de mayor apalancamiento". Sondear el IL real de NPOI primero
+(`NPOI.POIDocument::WritePropertySet`, `NPOI.Util.HexDump::Dump`, ...) sacó a la luz dos cosas que
+valía la pena diseñar antes de escribir ningún nativo:
+
+1. NPOI declara subclases reales de `MemoryStream`/`Stream` directamente (por ejemplo
+   `NPOI.POIFS.FileSystem.NDocumentOutputStream extends System.IO.MemoryStream`,
+   `NPOI.Util.OutputStream extends System.IO.Stream`) — una clase managed encadenando su propio
+   `.ctor` a una clase base BCL *nativa*, exactamente la misma forma que
+   `system_exception.go`'s `baseExceptionCtorInPlace` ya resolvió para subclases de excepción
+   (Fase 3.13). No hace falta ningún cambio en el intérprete: `newObj` ya asigna el objeto derivado
+   con su propio `Type`/campos y después llama a su `.ctor`, que a su vez encadena vía un `call`
+   plano a `System.IO.MemoryStream::.ctor` — registrar ese nombre como un nativo normal (no-newobj)
+   que muta el `Obj.Native` del receptor *existente* en el lugar es trabajo puramente aditivo en
+   `internal/bcl`.
+2. El código real abrumadoramente mantiene un `MemoryStream` en un local/parámetro tipado como
+   `Stream` (`Stream s = new MemoryStream();`), así que los call sites compilan contra el nombre
+   declarado `System.IO.Stream::Method`, no `MemoryStream::Method`. El despacho virtual de la
+   Fase 3.27 ya intenta primero el tipo concreto real del receptor (vía `bcl.NativeTypeName`) antes
+   de caer al nombre declarado — así que registrar todo bajo `System.IO.MemoryStream::*` solo ya
+   resolvería correctamente un call site declarado como `Stream`; ambos nombres se registran de
+   todas formas para cubrir también un call site no-virtual que nombre `Stream` directamente.
+
+**Nativo nuevo: `internal/bcl/system_io.go`**
+
+- [x] `nativeMemoryStream{buf []byte, pos int, closed bool}` — `Write`/`WriteByte`/`Read`/
+      `ReadByte`/`Seek`/`SetLength`/`Flush`/`Close`/`Dispose`/`CopyTo`/`get_Length`/`get_Position`/
+      `set_Position`/`get_CanRead`/`get_CanWrite`/`get_CanSeek`, más `ToArray`/`GetBuffer`
+      (solo de MemoryStream en .NET real, registrados una vez). `System.IO.IOException` y
+      `System.IO.EndOfStreamException` agregados a la lista plana de excepciones ya existente en
+      `system_exception.go` (65 findings; `throw new IOException(...)` no necesitó nada más que
+      esa línea).
+- [x] `internal/checker/profile.go`: `System.IO.MemoryStream::`/`System.IO.Stream::`/
+      `System.IO.IOException`/`System.IO.EndOfStreamException` agregados al allowlist de
+      `netstandard-lite` — olvidarse este paso hizo que la primera re-medición no mostrara ningún
+      movimiento pese a que `bcl.Lookup` resolvía correctamente: `checkTarget` sigue marcando un
+      target resoluble-pero-fuera-de-profile como `KindOutOfProfile` (ver el mismo patrón de dos
+      pasos en el agregado de `System.Enum::HasFlag`/`System.Array::Copy` de Fase 3.27).
+
+**Un segundo bug real, no relacionado, encontrado al re-medir ClosedXML**
+
+- [x] El propio `.nuspec` de `ClosedXML@0.105.0` declara su dependencia de `DocumentFormat.OpenXml`
+      como un rango de versión NuGet (`[3.1.1, 4.0.0)`), no un pin plano — común en `.nuspec`
+      reales, pero el resolver de `internal/nuget` no tenía ningún parseo de rangos: `Resolver.
+      visit` pasaba el string de rango crudo directo a `Cache.Fetch` como si fuera una versión
+      exacta, lo que da 404 contra `api.nuget.org`. Esto rompía por completo la nueva (Fase 3.29)
+      resolución de dependencias de `vmnet check package ClosedXML@0.105.0` — y hubiera roto
+      igual de mal el camino real `vm.NuGet().Restore()` → `vm.LoadPackage("ClosedXML")`, ya que
+      ambos comparten el mismo `Resolver.Resolve`. `nuget.ParseMinVersion(v string) string`
+      (`internal/nuget/version.go`) extrae la cota inferior de un rango (`"[3.1.1, 4.0.0)"` →
+      `"3.1.1"`) — el mismo "lowest applicable version" al que NuGet mismo recurre por defecto
+      para un `PackageReference` plano sin notación floating, y determinístico sin necesitar una
+      vuelta extra para enumerar cada versión disponible. `Resolver.visit` normaliza a través de
+      esto antes de cada fetch.
+
+**Resultado**
+
+| Paquete | % limpio Fase 3.29 | % limpio Fase 3.30 |
+|---|---|---|
+| `NPOI@2.8.0` | 92.0% (`MethodsFlagged` 1131) | 94.2% (`MethodsFlagged` 825) |
+| `ClosedXML@0.105.0` | n/a (resolución de dependencias fallaba — ver arriba) | 90.2% (`MethodsFlagged` 1029, `Dependencies resolved: 12`) |
+
+Los findings con prefijo `System.IO` desaparecen por completo de los findings principales de ambos
+paquetes. Se re-chequearon los 8 targets ya certificados (`Jint`, `Newtonsoft.Json`,
+`Ardalis.GuardClauses`) después del fix del resolver — conteos de dependencias y de métodos sin
+cambios, ninguna regresión por ninguno de los dos fixes.
+
+### Cómo verificar Fase 3.30
+
+```bash
+go build ./...
+go vet ./...
+go test ./... -race -count=5
+/tmp/vmnet-cli check package NPOI@2.8.0 --profile=netstandard-lite       # Sin findings de System.IO
+/tmp/vmnet-cli check package ClosedXML@0.105.0 --profile=netstandard-lite # Dependencies resolved: 12 (antes era un error duro)
+```
+
 ---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")

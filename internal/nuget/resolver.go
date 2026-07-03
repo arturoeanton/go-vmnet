@@ -42,6 +42,7 @@ func (r *Resolver) Resolve(direct []Dependency) (map[string]*ResolvedPackage, er
 
 	var visit func(id, version string, chain []string) error
 	visit = func(id, version string, chain []string) error {
+		version = ParseMinVersion(version)
 		key := strings.ToLower(id)
 		for _, c := range chain {
 			if strings.EqualFold(c, id) {

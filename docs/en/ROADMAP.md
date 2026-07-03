@@ -3025,6 +3025,83 @@ go test ./... -race -count=5
 /tmp/vmnet-cli check package NPOI@2.8.0 --profile=netstandard-lite   # Dependencies resolved: 21
 ```
 
+### Fase 3.30 — `System.IO.MemoryStream`/`Stream` + a real NuGet resolver bug
+
+Highest-impact blocker after Fase 3.29's honest measurement: `System.IO.Stream`/`MemoryStream`
+(709 combined findings in NPOI, 92 in ClosedXML) — the single largest genuinely-BCL gap, and one
+that recurs in both target packages, matching this loop's "pick the highest-leverage blocker"
+methodology. Probing NPOI's real IL first (`NPOI.POIDocument::WritePropertySet`,
+`NPOI.Util.HexDump::Dump`, ...) surfaced two things worth designing around before writing any
+native:
+
+1. NPOI declares real subclasses of `MemoryStream`/`Stream` directly (e.g.
+   `NPOI.POIFS.FileSystem.NDocumentOutputStream extends System.IO.MemoryStream`,
+   `NPOI.Util.OutputStream extends System.IO.Stream`) — a managed class chaining its own `.ctor`
+   into a *native* BCL base class, the exact same shape `system_exception.go`'s
+   `baseExceptionCtorInPlace` already solved for exception subclasses (Fase 3.13). No interpreter
+   change needed at all: `newObj` already allocates the derived object with its own `Type`/fields
+   and then calls its `.ctor`, which itself chains via a plain `call` into
+   `System.IO.MemoryStream::.ctor` — registering that name as a regular (non-newobj) native that
+   mutates the *existing* receiver's `Obj.Native` in place is purely additive `internal/bcl` work.
+2. Real code overwhelmingly holds a `MemoryStream` in a `Stream`-typed local/parameter
+   (`Stream s = new MemoryStream();`), so call sites compile against the declared `System.IO.
+   Stream::Method` name, not `MemoryStream::Method`. Fase 3.27's virtual dispatch already tries the
+   receiver's real concrete type first (via `bcl.NativeTypeName`) before ever falling back to the
+   declared name — so registering everything under `System.IO.MemoryStream::*` alone would already
+   resolve a `Stream`-declared callvirt site correctly; both names are registered anyway to also
+   cover a plain (non-virtual) call site naming `Stream` directly.
+
+**New native: `internal/bcl/system_io.go`**
+
+- [x] `nativeMemoryStream{buf []byte, pos int, closed bool}` — `Write`/`WriteByte`/`Read`/
+      `ReadByte`/`Seek`/`SetLength`/`Flush`/`Close`/`Dispose`/`CopyTo`/`get_Length`/`get_Position`/
+      `set_Position`/`get_CanRead`/`get_CanWrite`/`get_CanSeek`, plus `ToArray`/`GetBuffer`
+      (MemoryStream-only in real .NET, registered once). `System.IO.IOException` and
+      `System.IO.EndOfStreamException` added to `system_exception.go`'s existing flat exception
+      list (65 findings; `throw new IOException(...)` needed nothing beyond that one line).
+- [x] `internal/checker/profile.go`: `System.IO.MemoryStream::`/`System.IO.Stream::`/
+      `System.IO.IOException`/`System.IO.EndOfStreamException` added to the `netstandard-lite`
+      allowlist — forgetting this step made the first re-measurement show *zero* movement despite
+      `bcl.Lookup` resolving correctly: `checkTarget` still flags a resolvable-but-out-of-profile
+      target as `KindOutOfProfile` (see Fase 3.27's `System.Enum::HasFlag`/`System.Array::Copy`
+      addition for the same two-step pattern).
+
+**A second, unrelated real bug found while re-measuring ClosedXML**
+
+- [x] `ClosedXML@0.105.0`'s own `.nuspec` declares its `DocumentFormat.OpenXml` dependency as a
+      NuGet version *range* (`[3.1.1, 4.0.0)`), not a plain pin — common in real `.nuspec` files,
+      but `internal/nuget`'s resolver had no range parsing at all: `Resolver.visit` handed the raw
+      range string straight to `Cache.Fetch` as if it were an exact version, which 404's against
+      `api.nuget.org`. This broke `vmnet check package ClosedXML@0.105.0`'s new (Fase 3.29)
+      dependency resolution outright — and would equally have broken the real
+      `vm.NuGet().Restore()` → `vm.LoadPackage("ClosedXML")` runtime path, since both share the
+      same `Resolver.Resolve`. `nuget.ParseMinVersion(v string) string` (`internal/nuget/
+      version.go`) extracts a range's lower bound (`"[3.1.1, 4.0.0)"` → `"3.1.1"`) — the same
+      "lowest applicable version" NuGet itself defaults to for a plain `PackageReference` with no
+      floating notation, and deterministic without an extra round-trip to enumerate every
+      available version. `Resolver.visit` normalizes through it before every fetch.
+
+**Result**
+
+| Package | Fase 3.29 clean % | Fase 3.30 clean % |
+|---|---|---|
+| `NPOI@2.8.0` | 92.0% (`MethodsFlagged` 1131) | 94.2% (`MethodsFlagged` 825) |
+| `ClosedXML@0.105.0` | n/a (dependency resolution failed — see above) | 90.2% (`MethodsFlagged` 1029, `Dependencies resolved: 12`) |
+
+`System.IO`-prefixed findings are gone from both packages' top findings entirely. Re-checked the
+existing 8 certified targets (`Jint`, `Newtonsoft.Json`, `Ardalis.GuardClauses`) after the resolver
+fix — dependency counts and method counts unchanged, no regression from either fix.
+
+### How to verify Fase 3.30
+
+```bash
+go build ./...
+go vet ./...
+go test ./... -race -count=5
+/tmp/vmnet-cli check package NPOI@2.8.0 --profile=netstandard-lite       # Clean-relevant: no System.IO findings
+/tmp/vmnet-cli check package ClosedXML@0.105.0 --profile=netstandard-lite # Dependencies resolved: 12 (was a hard error before)
+```
+
 ---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 

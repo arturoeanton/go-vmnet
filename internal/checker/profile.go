@@ -158,6 +158,10 @@ func init() {
 		"System.Enum::IsDefined",
 		"System.Enum::ToObject",
 		"System.Enum::HasFlag",
+		"System.IO.MemoryStream::",
+		"System.IO.Stream::",
+		"System.IO.IOException",
+		"System.IO.EndOfStreamException",
 	)
 	// netstandard-lite currently promises exactly the same BCL surface as
 	// rules (System.Type moved into `rules` in Fase 3.14, System.Convert

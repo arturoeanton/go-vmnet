@@ -43,6 +43,39 @@ func CompareVersions(a, b string) int {
 	}
 }
 
+// ParseMinVersion extracts the concrete version the resolver actually
+// fetches from a NuGet dependency version string, which may be a plain
+// version ("5.0.0", meaning ">= 5.0.0") or a full NuGet version range
+// ("[3.1.1, 4.0.0)", "[3.1.1]", "(1.0.0, )", ...) — real .nuspec files
+// use ranges routinely (ClosedXML@0.105.0's own dependency on
+// DocumentFormat.OpenXml is declared as "[3.1.1, 4.0.0)", not a plain
+// pin). vmnet always resolves to the range's lower bound: the same
+// "lowest applicable version" NuGet itself defaults to for a plain
+// PackageReference with no floating notation, and deterministic without
+// an extra round-trip to enumerate every available version and pick the
+// highest one satisfying the range. A malformed or open-ended-minimum
+// range ("(, 4.0.0)") falls back to the original string unchanged —
+// Cache.Fetch will then fail with a clear "not found", which is more
+// honest than silently guessing a version.
+func ParseMinVersion(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" || (v[0] != '[' && v[0] != '(') {
+		return v
+	}
+	inner := v
+	if len(inner) >= 2 {
+		inner = inner[1 : len(inner)-1]
+	}
+	if comma := strings.IndexByte(inner, ','); comma >= 0 {
+		inner = inner[:comma]
+	}
+	inner = strings.TrimSpace(inner)
+	if inner == "" {
+		return v
+	}
+	return inner
+}
+
 func splitVersion(v string) (core []string, prerelease string) {
 	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
 	if plus := strings.IndexByte(v, '+'); plus >= 0 {

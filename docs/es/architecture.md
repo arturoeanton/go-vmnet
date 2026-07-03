@@ -678,3 +678,24 @@ el `.nuspec` de `NPOI@2.8.0` lista dependencias NuGet genuinas (`ZString`,
 sin `AnalyzeWithDeps`, ~400 findings eran falsos negativos de llamadas que
 ya corren correctamente en runtime a través del mecanismo multi-ensamblado
 existente.
+
+Fase 3.30 (`System.IO.MemoryStream`/`Stream` + un bug del resolver de
+NuGet) completa. `internal/bcl/system_io.go` agrega `nativeMemoryStream`
+siguiendo exactamente el patrón "encadenar el `.ctor` de una subclase
+managed a una clase base BCL nativa" que `system_exception.go` estableció
+en Fase 3.13 (`baseExceptionCtorInPlace`) — no necesitó ningún cambio en
+el intérprete, ya que paquetes reales (NPOI) declaran sus propias
+subclases directas de `MemoryStream`/`Stream`. Cada método de instancia
+se registra bajo `System.IO.MemoryStream::*` y `System.IO.Stream::*` a la
+vez, ya que el código real abrumadoramente mantiene un `MemoryStream` en
+un local tipado como `Stream` — el despacho virtual de la Fase 3.27 ya
+intenta el tipo concreto real del receptor (`bcl.NativeTypeName`) antes
+que el nombre declarado, así que cualquiera de las dos registraciones por
+sí sola resolvería un call site virtual correctamente. Por separado:
+`nuget.ParseMinVersion` (`internal/nuget/version.go`) arregla un bug real
+del resolver que el primer uso no-Jint de `AnalyzeWithDeps` sacó a la luz
+— `Resolver.visit` no tenía ningún parseo de rangos de versión NuGet
+(`ClosedXML@0.105.0` declara `DocumentFormat.OpenXml` como
+`[3.1.1, 4.0.0)`, no un pin plano), lo que rompía la resolución de
+dependencias por completo tanto para `vmnet check package` como para el
+camino real de runtime `vm.LoadPackage` — no solo un problema del checker.
