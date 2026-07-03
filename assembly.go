@@ -141,7 +141,11 @@ func resolveMethodDefOrRefName(md *metadata.Metadata, tok metadata.Token) (class
 		if err != nil {
 			return "", "", err
 		}
-		return qualify(owner.Namespace, owner.Name), row.Name, nil
+		ownerName, err := qualifyTypeDefName(md, ownerRID, owner)
+		if err != nil {
+			return "", "", err
+		}
+		return ownerName, row.Name, nil
 	case metadata.TableMemberRef:
 		row, err := md.MemberRef(tok.RID())
 		if err != nil {
@@ -169,7 +173,11 @@ func (asm *Assembly) buildMethod(methodRID uint32, row metadata.MethodDefRow) (*
 	if err != nil {
 		return nil, err
 	}
-	fullName := qualify(typeDef.Namespace, typeDef.Name) + "::" + row.Name
+	typeName, err := qualifyTypeDefName(asm.md, typeRID, typeDef)
+	if err != nil {
+		return nil, err
+	}
+	fullName := typeName + "::" + row.Name
 
 	if m, ok := asm.cachedMethod(fullName); ok {
 		return m, nil
@@ -357,6 +365,14 @@ func (asm *Assembly) buildType(fullName string) (*runtime.Type, error) {
 	t := runtime.NewType(typeDef.Namespace, typeDef.Name, fields, staticFields, fieldDefaults, staticFieldDefaults)
 	t.IsValueType = isValueType
 	t.BaseTypeFullName = baseName
+	// fullName is already correctly "+"-qualified for a nested type (this
+	// function's own caller chain always resolves it via
+	// qualifyTypeDefName before calling resolveTypeByFullName) — t.Name
+	// alone is just the bare TypeDef name ("<>c"), which fullTypeName
+	// (internal/interpreter/typecheck.go) would otherwise reconstruct
+	// into a colliding, unqualified name for any nested plugin type
+	// (Fase 3.17, same bug class as the ldsfld one this fase fixed).
+	t.QualifiedName = fullName
 
 	ifaceTokens, err := asm.md.InterfaceImpls(typeRID)
 	if err != nil {
@@ -415,6 +431,37 @@ func qualifyTypeRefName(md *metadata.Metadata, row metadata.TypeRefRow) (string,
 	return enclosingName + "+" + row.Name, nil
 }
 
+// qualifyTypeDefName resolves a TypeDef's full name, walking the
+// NestedClass table (spec §II.22.32) when it's a nested type — the
+// TypeDef-table counterpart of qualifyTypeRefName above, needed for a
+// plugin's own nested types. Found the hard way (Fase 3.17): the C#
+// compiler emits one non-capturing-lambda cache class (literally named
+// "<>c") PER enclosing type that has any, so an assembly with lambdas in
+// two different classes ends up with two separate TypeDefs both named
+// "<>c" — collapsing either to its bare name picks whichever
+// metadata.FindTypeDef happens to scan first, silently resolving a
+// static field/method against the WRONG type. Narrower duplicate of
+// internal/ir/builder.go's qualifyTypeDefName (unexported there, and
+// this package can't import an internal/ package's unexported helpers).
+func qualifyTypeDefName(md *metadata.Metadata, typeRID uint32, row metadata.TypeDefRow) (string, error) {
+	enclosingRID, ok, err := md.EnclosingClass(typeRID)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return qualify(row.Namespace, row.Name), nil
+	}
+	enclosingRow, err := md.TypeDef(enclosingRID)
+	if err != nil {
+		return "", err
+	}
+	enclosingName, err := qualifyTypeDefName(md, enclosingRID, enclosingRow)
+	if err != nil {
+		return "", err
+	}
+	return enclosingName + "+" + row.Name, nil
+}
+
 // resolveTypeTokenName resolves a TypeDef/TypeRef/TypeSpec token to
 // "Namespace.Name" — a TypeSpec (a generic interface instantiation like
 // IEnumerable<T>/IComparable<T>, extremely common in a class's
@@ -435,7 +482,7 @@ func resolveTypeTokenName(md *metadata.Metadata, tok metadata.Token) (string, er
 		if err != nil {
 			return "", err
 		}
-		return qualify(row.Namespace, row.Name), nil
+		return qualifyTypeDefName(md, tok.RID(), row)
 	case metadata.TableTypeSpec:
 		sig, err := md.TypeSpecSignature(tok.RID())
 		if err != nil {

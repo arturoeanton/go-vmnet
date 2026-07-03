@@ -1750,6 +1750,115 @@ go test ./... -race -count=3
 go test ./ -run TestReflection -v
 ```
 
+### Fase 3.17 — Bug crítico: colisión de nombres de tipos anidados propios del plugin + `System.Lazy<T>`
+
+Al agregar `Lazy.cs` (un segundo archivo con lambdas no-capturadoras, junto a `Linq.cs` de Fase
+3.15) y correr la suite completa con `-count=3` (no solo una vez), `TestLinq` empezó a fallar con
+`"<>c has no static field \"<>9__0_0\""` — un bug real, no relacionado con `Lazy<T>` en sí, que la
+adición de un segundo archivo con lambdas simplemente hizo alcanzable por primera vez.
+
+**Causa raíz**: el compilador de C# emite una clase cache de lambdas no-capturadoras (literalmente
+llamada `<>c`) **por cada tipo contenedor** que tiene alguna — un ensamblado con lambdas en dos
+clases distintas (`LinqTest` y `LazyTest`) termina con **dos TypeDefs separados, ambos llamados
+`<>c`** (mismo `Name`, ambos con `Namespace=""`, ya que un tipo anidado siempre tiene namespace
+vacío — spec §II.22.32). Todo el código de vmnet que resolvía un token `TypeDef` a un nombre
+completo (`ldsfld`/`stsfld`/`newobj`/`call`/`ir.Build`, más los duplicados en `assembly.go` y
+`internal/checker/analyzer.go`) colapsaba directamente a `Qualify(typeDef.Namespace, typeDef.Name)`
+— **sin caminar la tabla `NestedClass`** — así que ambos `<>c` colapsaban al mismo string `"<>c"`,
+y `metadata.FindTypeDef` devolvía el que escaneara primero, sin importar cuál necesitaba el sitio
+de llamada real. Esto es la MISMA clase de bug que Fase 3.11 ya había arreglado para `TypeRef`
+(tipos anidados *foráneos*, vía `qualifyTypeRefName`/`ResolutionScope`) — y que esa misma fase
+había **documentado explícitamente como riesgo preexistente, no arreglado**, para `TypeDef` (tipos
+anidados *propios del plugin*, vía `NestedClass`). El riesgo, tal cual se predijo, terminó siendo
+real.
+
+**Impacto medido — mucho más grande que un problema de fixtures**: al medir contra los 8 targets
+después del arreglo, el promedio saltó de 80.6% a **82.8%** (7 paquetes) y de 81.0% a **83.0%**
+con Jint — el salto más grande de toda la secuencia 3.6-3.17 después de Fase 3.12. `SimpleBase`
+solo saltó de 60.9% a 75.6% (+14.7 puntos). La razón: **cualquier paquete real con más de una
+clase usando lambdas no-capturadoras** (patrón extremadamente común, no un caso de borde) ya
+estaba silenciosamente resolviendo `ldsfld`/`call` contra el `<>c` equivocado en algún punto,
+produciendo errores de "static field/method not found" en métodos que no tenían nada que ver con
+lambdas per se, solo compartían ensamblado con otra clase que también usaba alguna.
+
+**Tareas — el arreglo**
+
+- [x] `metadata.EnclosingClass(typeRID) (uint32, bool, error)` (nuevo, `internal/metadata/
+      resolver.go`) — lee la tabla `NestedClass` (spec §II.22.32), sin función previa que la
+      leyera en absoluto (confirmado antes de escribir nada).
+- [x] `qualifyTypeDefName`/`QualifyTypeDefName` (nuevo, duplicado en `internal/ir/builder.go`
+      —exportado, ya que `internal/checker` también lo necesita y sí puede importar `internal/ir`—
+      y en `assembly.go` —no exportado, mismo patrón ya establecido para `qualifyTypeRefName`—):
+      camina `NestedClass` recursivamente construyendo `Enclosing+Nested`, igual que
+      `qualifyTypeRefName` ya hace para `ResolutionScope`. Reemplaza el `Qualify(ns,name)` directo
+      en los 8 sitios reales que resuelven un token `TypeDef` a nombre: `resolveCallTarget`,
+      `resolveMemberRefClassName`, `resolveTypeToken`, `resolveNewObjTarget`, `resolveFieldTarget`
+      (el sitio exacto del bug — `ldsfld`/`stsfld`) en `internal/ir/builder.go`;
+      `resolveMethodDefOrRefName`, `buildMethod`, `resolveTypeTokenName` en `assembly.go`;
+      `Analyze` en `internal/checker/analyzer.go`.
+- [x] `metadata.FindTypeDef` extendido para aceptar un nombre `"+"`-calificado (el round-trip: el
+      nombre calificado que `qualifyTypeDefName` produce necesita volver a resolverse a la fila
+      `TypeDef` real más tarde, vía `buildType`/`resolveByFullName`) — un simple match por
+      `Name`+`Namespace` no alcanza cuando hay varios TypeDefs con el mismo `Name` anidados en
+      tipos distintos; ahora camina `NestedClass` hacia arriba desde cada candidato para confirmar
+      que la cadena de contenedores coincide con lo pedido, con el `Namespace` anclado únicamente
+      en el nivel más externo (el único que tiene uno real).
+- [x] `runtime.Type.QualifiedName` (nuevo campo) — `buildType` lo setea al nombre ya calificado
+      que recibió como entrada; `fullTypeName` (`internal/interpreter/typecheck.go`, usado por el
+      despacho por interfaz de Fase 3.13 y el catch-matching de excepciones) lo prefiere sobre
+      reconstruir desde `Namespace`+`Name`, que perdería la calificación de nuevo para cualquier
+      tipo anidado propio del plugin.
+
+**Tareas — `System.Lazy<T>`**
+
+- [x] `nativeLazy` (`internal/bcl/system_lazy.go`, archivo nuevo): constructor cubre las
+      sobrecargas con factory `Func<T>` (con o sin un `bool`/`LazyThreadSafetyMode` final,
+      ignorado — todo acceso ya se serializa vía el propio mutex de la instancia sin importar el
+      modo pedido); `get_IsValueCreated` (native plano); `get_Value` — necesita `Machine` (invocar
+      el factory usa `m.invokeFunc`), así que va al `machineRegistry` generalizado en Fase 3.16
+      (`internal/interpreter/lazy.go`, archivo nuevo). `bcl.LazyGetOrCompute` mantiene el lock de
+      la instancia durante **todo** el cómputo (no solo alrededor del chequeo), para que dos
+      goroutines compitiendo por el mismo `Lazy<T>.Value` por primera vez se serialicen en "uno
+      computa, el otro bloquea y ve el mismo resultado cacheado" en vez de "ambos computan, uno
+      pisa silenciosamente el resultado del otro" — un riesgo real, no hipotético: un campo
+      estático `Lazy<T>` es el uso dominante real, y `Assembly.Call` está documentado como seguro
+      para goroutines concurrentes.
+
+**Fixtures y tests**
+
+- [x] `Lazy.cs` / `TestLazy` — factory invocado exactamente una vez (verificado contando
+      invocaciones reales, no solo revisando que el valor devuelto sea consistente),
+      `IsValueCreated` antes/después del primer acceso
+- [x] `Linq.cs` + `Lazy.cs` juntos, corridos con `-count>=3`, son la cobertura de regresión del
+      bug de `<>c` — ambos archivos ya tienen lambdas no-capturadoras en clases distintas, la
+      forma exacta que lo reprodujo
+
+### Re-certificación contra los mismos 8 targets (7 paquetes + Jint)
+
+| Paquete | % limpio Fase 3.16 | % limpio Fase 3.17 |
+|---|---|---|
+| `Ardalis.GuardClauses@5.0.0` | 93.3% | 93.3% |
+| `FluentValidation@11.9.2` | 86.4% | 86.4% |
+| `System.Text.Json@8.0.5` | 80.9% | 80.9% |
+| `Newtonsoft.Json@13.0.3` | 71.0% | 71.0% |
+| `Semver@2.3.0` | 83.7% | 83.7% |
+| `SimpleBase@4.0.0` | 60.9% | **75.6%** |
+| `Humanizer.Core@2.14.1` | 88.3% | 88.8% |
+| **Promedio (7 paquetes)** | **80.6%** | **82.8%** |
+| `Jint@3.1.3` | 83.8% | 84.0% |
+| **Promedio (7 paquetes + Jint)** | **81.0%** | **83.0%** |
+
++2.2 puntos (+2.0 con Jint) de un arreglo de corrección, no de una feature nueva — `SimpleBase`
+solo explica casi todo el salto en los 7 paquetes. Con 83.0% el criterio de cierre firme de 85%
+todavía no se alcanza, pero el margen se cerró considerablemente.
+
+### Cómo verificar Fase 3.17
+
+```bash
+go test ./... -race -count=5
+go test ./ -run 'TestLinq|TestLazy' -count=3 -v
+```
+
 ---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")

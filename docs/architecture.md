@@ -361,3 +361,40 @@ conocido, resolviendo el `TypeDef` real del candidato y caminando con
 `m.typeMatches`. Certificación: 80.5% a 80.6% (80.9% a 81.0% con Jint) —
 movimiento mínimo, mismo patrón de "no era el único obstáculo" ya visto
 en LINQ. Con 81.0% el 85% todavía no se alcanza.
+
+Fase 3.17 (bug crítico: colisión de nombres de tipos anidados propios
+del plugin + `System.Lazy<T>`) completa — el salto más grande de la
+secuencia 3.6-3.17 después de 3.12, y no de una feature nueva sino de un
+arreglo de corrección. El compilador de C# emite una clase cache de
+lambdas no-capturadoras (literalmente llamada `<>c`) POR CADA tipo
+contenedor que tiene alguna — un ensamblado con lambdas en dos clases
+distintas termina con dos TypeDefs separados, ambos llamados `<>c`
+(mismo Name, Namespace vacío, ya que un tipo anidado siempre lo tiene).
+Todo el código que resolvía un token TypeDef a nombre completo
+colapsaba directo a `Namespace.Name` sin caminar la tabla `NestedClass`
+(spec §II.22.32) — la MISMA clase de bug que Fase 3.11 ya había
+arreglado para TypeRef (tipos anidados foráneos) pero había dejado
+explícitamente documentado como riesgo preexistente para TypeDef (tipos
+del propio plugin). El riesgo se volvió real: al agregar un segundo
+archivo con lambdas y correr la suite con `-count=3` (no solo una vez),
+`ldsfld` empezó a resolver contra el `<>c` equivocado. Arreglado con
+`metadata.EnclosingClass` (nuevo, lee `NestedClass`, sin lector previo),
+`qualifyTypeDefName`/`QualifyTypeDefName` (nuevo, camina la tabla
+recursivamente igual que `qualifyTypeRefName` ya hace con
+`ResolutionScope`, reemplazando el `Qualify` directo en 8 sitios reales
+across `internal/ir/builder.go`, `assembly.go` e
+`internal/checker/analyzer.go`), `metadata.FindTypeDef` extendido para
+aceptar nombres `"+"`-calificados en el round-trip, y
+`runtime.Type.QualifiedName` (nuevo campo) para que `fullTypeName`
+(despacho por interfaz de 3.13, catch-matching de excepciones) no
+reconstruya y pierda la calificación de nuevo. Impacto medido: 80.6% a
+82.8% (81.0% a 83.0% con Jint) — `SimpleBase` solo saltó +14.7 puntos,
+confirmando que cualquier paquete real con más de una clase usando
+lambdas (patrón extremadamente común) ya estaba silenciosamente
+resolviendo contra el `<>c` equivocado en algún punto. De paso, se
+agregó `System.Lazy<T>` (factory `Func<T>` invocado exactamente una vez,
+cacheado, con el lock de la instancia sostenido durante todo el cómputo
+para serializar correctamente accesos concurrentes al mismo campo
+estático — el uso dominante real de `Lazy<T>`), cuyo fixture (agregado
+junto al de LINQ) fue lo que expuso el bug en primer lugar. Con 83.0% el
+85% todavía no se alcanza, pero el margen se cerró considerablemente.

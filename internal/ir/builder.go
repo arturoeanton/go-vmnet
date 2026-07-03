@@ -594,7 +594,11 @@ func resolveCallTarget(md *metadata.Metadata, token uint32) (fullName string, ha
 		if err != nil {
 			return "", false, 0, false, err
 		}
-		full := Qualify(typeDef.Namespace, typeDef.Name) + "::" + row.Name
+		typeName, err := QualifyTypeDefName(md, typeRID, typeDef)
+		if err != nil {
+			return "", false, 0, false, err
+		}
+		full := typeName + "::" + row.Name
 		return full, sig.HasThis, int(sig.ParamCount), sig.RetType.Kind != metadata.SigVoid, nil
 
 	case metadata.TableMemberRef:
@@ -657,6 +661,42 @@ func qualifyTypeRefName(md *metadata.Metadata, row metadata.TypeRefRow) (string,
 	return enclosingName + "+" + row.Name, nil
 }
 
+// QualifyTypeDefName resolves a TypeDef's full name, walking the
+// NestedClass table (spec §II.22.32) when it's a nested type — the
+// TypeDef-table counterpart of qualifyTypeRefName above, needed for a
+// PLUGIN's own nested types (as opposed to a foreign/BCL one, referenced
+// via TypeRef). Found the hard way (Fase 3.17): the C# compiler emits
+// one non-capturing-lambda cache class (named literally "<>c") PER
+// enclosing type that has any — an assembly with lambdas in two
+// different classes ends up with two entirely separate TypeDefs both
+// named "<>c" (same bare Name, both Namespace ""). Collapsing either to
+// its bare name — what every call site below did before this fix — picks
+// whichever one metadata.FindTypeDef happens to scan first, silently
+// resolving ldsfld/ldfld/newobj/call against the WRONG type's members
+// (a real, reproduced bug: two fixture files each with lambdas produced
+// two "<>c" TypeDefs, and the second file's lambda cache field lookups
+// resolved against the first file's "<>c" instead). A nested TypeDef's
+// own Namespace column is always empty (spec: it inherits the enclosing
+// type's), same reasoning as qualifyTypeRefName.
+func QualifyTypeDefName(md *metadata.Metadata, typeRID uint32, row metadata.TypeDefRow) (string, error) {
+	enclosingRID, ok, err := md.EnclosingClass(typeRID)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return Qualify(row.Namespace, row.Name), nil
+	}
+	enclosingRow, err := md.TypeDef(enclosingRID)
+	if err != nil {
+		return "", err
+	}
+	enclosingName, err := QualifyTypeDefName(md, enclosingRID, enclosingRow)
+	if err != nil {
+		return "", err
+	}
+	return enclosingName + "+" + row.Name, nil
+}
+
 func resolveMemberRefClassName(md *metadata.Metadata, class metadata.Token) (string, error) {
 	switch class.Table() {
 	case metadata.TableTypeRef:
@@ -670,7 +710,7 @@ func resolveMemberRefClassName(md *metadata.Metadata, class metadata.Token) (str
 		if err != nil {
 			return "", err
 		}
-		return Qualify(row.Namespace, row.Name), nil
+		return QualifyTypeDefName(md, class.RID(), row)
 	case metadata.TableTypeSpec:
 		return resolveTypeSpecName(md, class.RID())
 	default:
@@ -738,7 +778,7 @@ func resolveTypeToken(md *metadata.Metadata, tok metadata.Token) (string, error)
 		if err != nil {
 			return "", err
 		}
-		return Qualify(row.Namespace, row.Name), nil
+		return QualifyTypeDefName(md, tok.RID(), row)
 	default:
 		return "", fmt.Errorf("unsupported type token table %#x", byte(tok.Table()))
 	}
@@ -764,7 +804,10 @@ func resolveNewObjTarget(md *metadata.Metadata, token uint32) (typeFullName, cto
 		if err != nil {
 			return "", "", 0, err
 		}
-		typeFullName = Qualify(typeDef.Namespace, typeDef.Name)
+		typeFullName, err = QualifyTypeDefName(md, typeRID, typeDef)
+		if err != nil {
+			return "", "", 0, err
+		}
 		return typeFullName, typeFullName + "::" + row.Name, int(sig.ParamCount), nil
 
 	case metadata.TableMemberRef:
@@ -803,7 +846,11 @@ func resolveFieldTarget(md *metadata.Metadata, token uint32) (typeFullName, fiel
 		if err != nil {
 			return "", "", err
 		}
-		return Qualify(typeDef.Namespace, typeDef.Name), row.Name, nil
+		typeFullName, err = QualifyTypeDefName(md, typeRID, typeDef)
+		if err != nil {
+			return "", "", err
+		}
+		return typeFullName, row.Name, nil
 
 	case metadata.TableMemberRef:
 		// A field declared outside this assembly (e.g. on a BCL type) is

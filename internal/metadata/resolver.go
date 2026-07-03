@@ -1,6 +1,9 @@
 package metadata
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Typed row accessors for the Fase 1 core table subset (spec §10.2,
 // docs/ROADMAP.md). Every other table still parses (tables.go) but is only
@@ -187,21 +190,73 @@ func (md *Metadata) TypeDefFieldRange(rid uint32) (start, end uint32, err error)
 }
 
 // FindTypeDef looks up a type by namespace+name, scanning TypeDef rows.
+// name may be "+"-qualified (e.g. "LinqTest+<>c", outermost first) for a
+// nested type — the round-trip counterpart of qualifyTypeDefName
+// (internal/ir/builder.go, root assembly.go), which produces exactly
+// this format. This isn't optional: the C# compiler emits one
+// non-capturing-lambda cache class (literally named "<>c") PER enclosing
+// type that has any, so an assembly can easily have several entirely
+// separate TypeDefs sharing the same bare Name (all with an empty
+// Namespace, since nested types always do) — a plain Name+Namespace
+// match alone can't tell them apart at all (Fase 3.17).
 func (md *Metadata) FindTypeDef(namespace, name string) (rid uint32, row TypeDefRow, err error) {
 	t := md.tables[TableTypeDef]
 	if t == nil {
 		return 0, TypeDefRow{}, fmt.Errorf("%w: no TypeDef table", ErrOutOfRange)
 	}
+	parts := strings.Split(name, "+")
+	simpleName := parts[len(parts)-1]
 	for i := uint32(1); i <= t.rowCount; i++ {
 		r, err := md.TypeDef(i)
 		if err != nil {
 			return 0, TypeDefRow{}, err
 		}
-		if r.Name == name && r.Namespace == namespace {
+		if r.Name != simpleName {
+			continue
+		}
+		ok, err := md.typeDefMatchesPath(i, namespace, parts)
+		if err != nil {
+			return 0, TypeDefRow{}, err
+		}
+		if ok {
 			return i, r, nil
 		}
 	}
 	return 0, TypeDefRow{}, fmt.Errorf("%w: type %s.%s not found", ErrOutOfRange, namespace, name)
+}
+
+// typeDefMatchesPath confirms TypeDef rid's real enclosing-type chain
+// (walked via the NestedClass table) matches parts (outermost first,
+// rid's own simple name last) with namespace anchored on the outermost
+// enclosing type — the only level with a real, non-empty Namespace
+// column (spec §II.22.32: every nested type's own Namespace is always
+// "").
+func (md *Metadata) typeDefMatchesPath(rid uint32, namespace string, parts []string) (bool, error) {
+	enclosingRID, nested, err := md.EnclosingClass(rid)
+	if err != nil {
+		return false, err
+	}
+	if !nested {
+		if len(parts) != 1 {
+			return false, nil
+		}
+		row, err := md.TypeDef(rid)
+		if err != nil {
+			return false, err
+		}
+		return row.Namespace == namespace, nil
+	}
+	if len(parts) < 2 {
+		return false, nil
+	}
+	enclosingRow, err := md.TypeDef(enclosingRID)
+	if err != nil {
+		return false, err
+	}
+	if enclosingRow.Name != parts[len(parts)-2] {
+		return false, nil
+	}
+	return md.typeDefMatchesPath(enclosingRID, namespace, parts[:len(parts)-1])
 }
 
 // InterfaceImpls returns the token list of interfaces TypeDef rid directly
@@ -227,6 +282,24 @@ func (md *Metadata) InterfaceImpls(typeRID uint32) ([]Token, error) {
 		out = append(out, iface)
 	}
 	return out, nil
+}
+
+// EnclosingClass returns the TypeDef RID that directly encloses TypeDef
+// typeRID (spec §II.22.32's NestedClass table), and false if typeRID is
+// not a nested type at all. NestedClass is a simple (uncoded) index pair
+// — compared directly, same pattern as InterfaceImpls above.
+func (md *Metadata) EnclosingClass(typeRID uint32) (uint32, bool, error) {
+	t := md.tables[TableNestedClass]
+	if t == nil {
+		return 0, false, nil
+	}
+	for i := uint32(0); i < t.rowCount; i++ {
+		if t.col(i, 0) != typeRID {
+			continue
+		}
+		return t.col(i, 1), true, nil
+	}
+	return 0, false, nil
 }
 
 // MethodImplRow is one explicit interface implementation (spec

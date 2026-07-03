@@ -649,6 +649,37 @@ func TestReflection(t *testing.T) {
 	})
 }
 
+// TestLazy exercises System.Lazy<T> (Fase 3.17): a static field
+// initialized from a Func<T> factory (compiled into the class's .cctor
+// calling Lazy`1::.ctor — a plain bcl.NativeCtor, no Machine needed),
+// and Value access, which does need Machine access (Fase 3.17's
+// machineRegistry entry) to invoke the factory lazily on first access
+// and cache it — verified by counting real factory invocations, not
+// just checking the returned value happens to be consistent.
+func TestLazy(t *testing.T) {
+	asm := loadFixture(t)
+
+	t.Run("factory invoked once, cached on second access", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.LazyTest", "ValueTwiceAndCallCount")
+		if err != nil {
+			t.Fatalf("ValueTwiceAndCallCount() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 101001 {
+			t.Errorf("ValueTwiceAndCallCount() = %d, want 101001", got)
+		}
+	})
+
+	t.Run("IsValueCreated flips after the first access", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.LazyTest", "IsValueCreatedBeforeAndAfterAccess")
+		if err != nil {
+			t.Fatalf("IsValueCreatedBeforeAndAfterAccess() error = %v", err)
+		}
+		if got := out.Native().(int32); got == 0 {
+			t.Errorf("IsValueCreatedBeforeAndAfterAccess() = %d, want nonzero", got)
+		}
+	})
+}
+
 // TestLinq exercises System.Linq.Enumerable (Fase 3.15): a chained
 // Where().Select().ToList() over a List<int>, Any/All predicates,
 // FirstOrDefault, and Select/ToArray over an int[] source — the eager,

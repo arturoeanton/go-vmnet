@@ -21,6 +21,18 @@ type Type struct {
 	Fields       []string // instance fields, declaration order, matches Object.Fields index
 	StaticFields []string // static fields, declaration order, matches statics index
 
+	// QualifiedName is the real "+"-nested full name (e.g.
+	// "LinqTest+<>c") when this Type is a nested type — "" for a
+	// top-level type or a synthetic BCL value type, where Namespace+"."+
+	// Name (or just Name) is already correct and unambiguous. Set once,
+	// at construction (assembly.go's buildType); anything reconstructing
+	// a Type's full name (fullTypeName, internal/interpreter/
+	// typecheck.go) must prefer this over Namespace+Name whenever it's
+	// non-empty — two different nested types (most commonly the
+	// compiler's own per-enclosing-type "<>c" lambda cache class) can
+	// share the exact same bare Name/Namespace (Fase 3.17).
+	QualifiedName string
+
 	// IsValueType marks a struct (extends System.ValueType/System.Enum in
 	// its TypeDef, or one of vmnet's synthetic BCL value types like
 	// Nullable`1) — Fase 3.7. Instances are runtime.Struct, copied by

@@ -70,6 +70,7 @@ func init() {
 		"System.Type::",
 		"System.Reflection.MemberInfo::get_Name",
 		"System.Linq.Enumerable::",
+		"System.Lazy`1::",
 		"System.Text.Encoding::",
 		"System.Text.StringBuilder::",
 		"System.Array::Empty",

@@ -57,7 +57,11 @@ func Analyze(f *pe.File, md *metadata.Metadata, profile Profile) *Report {
 				continue // abstract/extern/P-Invoke: no IL body to analyze
 			}
 
-			fullName := ir.Qualify(typeDef.Namespace, typeDef.Name) + "::" + row.Name
+			typeName, err := ir.QualifyTypeDefName(md, typeRID, typeDef)
+			if err != nil {
+				continue
+			}
+			fullName := typeName + "::" + row.Name
 			report.MethodsAnalyzed++
 
 			findings := analyzeMethod(f, md, fullName, row, profile)
@@ -186,7 +190,7 @@ func resolvableMethod(md *metadata.Metadata, fullName string) bool {
 	if linqTargets[fullName] {
 		return true
 	}
-	if fullName == "System.Type::IsAssignableFrom" {
+	if fullName == "System.Type::IsAssignableFrom" || fullName == "System.Lazy`1::get_Value" {
 		return true
 	}
 	return isLocalMethod(md, fullName)

@@ -99,6 +99,9 @@ func (m *Machine) typeMatches(t *runtime.Type, target string) bool {
 }
 
 func fullTypeName(t *runtime.Type) string {
+	if t.QualifiedName != "" {
+		return t.QualifiedName
+	}
 	if t.Namespace == "" {
 		return t.Name
 	}
