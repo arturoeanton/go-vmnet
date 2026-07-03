@@ -3381,6 +3381,58 @@ go test ./... -race -count=5
 /tmp/vmnet-cli check package ClosedXML@0.105.0 --profile=netstandard-lite # sin findings de System.Xml.Linq
 ```
 
+### Fase 3.36 — `System.Collections.ArrayList`/`Hashtable` (colecciones legacy)
+
+El último bloqueador de cluster único grande de NPOI: los predecesores legacy, no-genéricos, de
+`List<T>`/`Dictionary<K,V>` (~145 findings combinados: `ArrayList` `.ctor`/`get_Count`/`Add`/
+`ToArray`, `Hashtable` `get_Item`/`set_Item`/`.ctor`). Como el `runtime.Value` de vmnet ya es una
+unión etiquetada uniforme sin importar el argumento de tipo genérico real, `nativeList`/
+`nativeDict` respaldan `ArrayList`/`Hashtable` textualmente — genuinamente cero tipos de backing
+nuevos, solo registraciones nuevas apuntando a funciones ya existentes.
+
+- [x] `internal/bcl/system_collections.go`: `ArrayList` reutiliza cada uno de los métodos ya
+      existentes de `nativeList` directamente, incluido `GetEnumerator` — `listGetEnumerator`
+      siempre etiqueta su struct resultado como `"List`1+Enumerator"` sin importar el tipo de
+      receptor declarado, y el despacho virtual de `Machine.call` (Fase 3.27) intenta primero el
+      tipo struct concreto real del receptor, así que `MoveNext`/`get_Current` resuelven
+      correctamente sin necesitar una registración separada de `"ArrayList+Enumerator"` — la misma
+      reutilización gratis que Fase 3.32 ya encontró para `Dictionary.Values`/`.Keys`. `Hashtable`
+      reutiliza `nativeDict` de la misma forma, con una diferencia semántica real capturada antes
+      de que se subiera: `Dictionary<K,V>.get_Item` lanza `KeyNotFoundException` con una clave
+      faltante, pero el `Hashtable.get_Item` real devuelve `null` — aliasear `dictGetItem`
+      directamente hubiera sido un bug de comportamiento real, no solo una feature incompleta, así
+      que una pequeña variante `hashtableGetItem` devuelve `Null()` en un miss en vez de eso.
+      `Hashtable.Contains` se registra como un alias real de `ContainsKey` (cierto en el `Hashtable`
+      real, a diferencia de `Dictionary<K,V>`, que no tiene ese alias) y `.Remove` como `void`
+      (`hasReturn=false`) en vez del `bool` de `Dictionary<K,V>.Remove`.
+    - Hueco conocido, dejado sin hacer: `Hashtable.GetEnumerator`/`foreach` (la semántica real
+      produce `DictionaryEntry`, no `KeyValuePair`2`) no está conectado — ningún IL real de los
+      paquetes objetivo de este loop se encontró enumerando un `Hashtable`, solo acceso tipo
+      indexador `get_Item`/`set_Item`.
+- [x] `internal/checker/profile.go`: `System.Collections.ArrayList::`/`Hashtable::` agregados al
+      allowlist de `netstandard-lite`.
+
+**Resultado**
+
+| Paquete | % limpio Fase 3.35 | % limpio Fase 3.36 |
+|---|---|---|
+| `NPOI@2.8.0` | 95.1% (`MethodsFlagged` 694) | 95.7% (`MethodsFlagged` 616) |
+
+Los findings de `ArrayList`/`Hashtable` desaparecen por completo de los findings principales de
+NPOI. Los bloqueadores principales restantes son individualmente chicos: `Console.Write` (48),
+`Int16.ToString`/`Array.Clone` (46 cada uno), `String.ToUpper`/`.ToLower`/`.Compare`,
+`XmlDocument.CreateElement`, `Encoding.GetEncoding`, `StringBuilder.get_Chars`/`.Remove`/
+`.set_Chars`, `Decimal.op_Explicit`, y una cola larga por debajo de 15 findings cada uno.
+
+### Cómo verificar Fase 3.36
+
+```bash
+go build ./...
+go vet ./...
+go test ./... -race -count=5
+/tmp/vmnet-cli check package NPOI@2.8.0 --profile=netstandard-lite # sin findings de ArrayList/Hashtable
+```
+
 ---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")

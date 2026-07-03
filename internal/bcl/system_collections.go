@@ -102,6 +102,50 @@ func init() {
 	register("System.Collections.Generic.Dictionary`2+KeyCollection+Enumerator::MoveNext", true, listEnumeratorMoveNext)
 	register("System.Collections.Generic.Dictionary`2+KeyCollection+Enumerator::get_Current", true, listEnumeratorGetCurrent)
 
+	// System.Collections.ArrayList (Fase 3.36) is the legacy,
+	// non-generic predecessor of List<T> — vmnet's runtime.Value is
+	// already a uniform tagged union regardless of a real generic type
+	// argument, so nativeList (and every one of its existing methods)
+	// backs ArrayList verbatim with zero new code. GetEnumerator reuses
+	// listGetEnumerator, which always tags its result struct
+	// "List`1+Enumerator" regardless of the declared receiver type —
+	// Machine.call's virtual dispatch (Fase 3.27) tries the receiver's
+	// actual concrete struct type first, so MoveNext/get_Current resolve
+	// correctly without a separate "ArrayList+Enumerator" registration.
+	registerCtor("System.Collections.ArrayList", func([]runtime.Value) (*runtime.Object, error) {
+		return &runtime.Object{Native: &nativeList{}}, nil
+	})
+	register("System.Collections.ArrayList::Add", false, listAdd)
+	register("System.Collections.ArrayList::get_Count", true, listCount)
+	register("System.Collections.ArrayList::get_Item", true, listGetItem)
+	register("System.Collections.ArrayList::set_Item", false, listSetItem)
+	register("System.Collections.ArrayList::ToArray", true, listToArray)
+	register("System.Collections.ArrayList::Contains", true, listContains)
+	register("System.Collections.ArrayList::RemoveAt", false, listRemoveAt)
+	register("System.Collections.ArrayList::Insert", false, listInsert)
+	register("System.Collections.ArrayList::Clear", false, listClear)
+	register("System.Collections.ArrayList::Remove", true, listRemove)
+	register("System.Collections.ArrayList::GetEnumerator", true, listGetEnumerator)
+
+	// System.Collections.Hashtable is the legacy, non-generic
+	// predecessor of Dictionary<K,V> — nativeDict backs it the same way,
+	// with the same string-keys-only scope nativeDict already documents.
+	// Contains(key) is a real alias for ContainsKey on Hashtable (unlike
+	// Dictionary<K,V>, which has no such alias). GetEnumerator/foreach
+	// (yielding DictionaryEntry, not KeyValuePair`2) is deliberately not
+	// wired up: no real IL in this loop's target packages was found
+	// enumerating a Hashtable, only indexer-style access.
+	registerCtor("System.Collections.Hashtable", func([]runtime.Value) (*runtime.Object, error) {
+		return &runtime.Object{Native: &nativeDict{m: map[string]runtime.Value{}}}, nil
+	})
+	register("System.Collections.Hashtable::get_Item", true, hashtableGetItem)
+	register("System.Collections.Hashtable::set_Item", false, dictSetItem)
+	register("System.Collections.Hashtable::ContainsKey", true, dictContainsKey)
+	register("System.Collections.Hashtable::Contains", true, dictContainsKey)
+	register("System.Collections.Hashtable::get_Count", true, dictCount)
+	register("System.Collections.Hashtable::Clear", false, dictClear)
+	register("System.Collections.Hashtable::Remove", false, dictRemove)
+
 	register("System.Collections.Generic.KeyValuePair`2::get_Key", true, keyValuePairGetKey)
 	register("System.Collections.Generic.KeyValuePair`2::get_Value", true, keyValuePairGetValue)
 	// `var kv = new KeyValuePair<K,V>(k, v);` assigned straight to a
@@ -523,6 +567,25 @@ func dictGetItem(args []runtime.Value) (runtime.Value, error) {
 	v, ok := d.m[key]
 	if !ok {
 		return runtime.Value{}, fmt.Errorf("bcl: Dictionary has no key %q", key)
+	}
+	return v, nil
+}
+
+// hashtableGetItem backs Hashtable's indexer, unlike Dictionary<K,V>'s:
+// a missing key returns null rather than throwing KeyNotFoundException,
+// matching real System.Collections.Hashtable semantics.
+func hashtableGetItem(args []runtime.Value) (runtime.Value, error) {
+	d, err := asDict(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	key, err := dictKey(args, 1)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	v, ok := d.m[key]
+	if !ok {
+		return runtime.Null(), nil
 	}
 	return v, nil
 }

@@ -173,6 +173,8 @@ func init() {
 		"System.Xml.Linq.XElement::",
 		"System.Xml.Linq.XAttribute::",
 		"System.Xml.Linq.XName::",
+		"System.Collections.ArrayList::",
+		"System.Collections.Hashtable::",
 	)
 	// netstandard-lite currently promises exactly the same BCL surface as
 	// rules (System.Type moved into `rules` in Fase 3.14, System.Convert
