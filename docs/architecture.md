@@ -515,3 +515,35 @@ esperado para wins dispersos, pero el valor real son los dos bugs de
 corrección (uno de ellos era un riesgo silencioso desde Fase 3.13 en
 cualquier despacho por interfaz con firma incompatible). Con 88.5% el
 objetivo de ~97% todavía no se alcanza.
+
+Fase 3.24 (quinto paquete de wins baratos) completa:
+`ConcurrentDictionary`1` (mutex real + `GetOrAdd` con overload de valor
+literal y de factory delegado, resuelto por el registro Machine-aware ya
+que invocar el factory necesita `Machine`), `Regex.Replace` (mismo motor
+RE2 y desambiguación por `Kind` que `IsMatch`/`Match`), y el primer
+soporte real de delegado multicast del proyecto —
+`Delegate.Combine`/`Remove`, respaldado por un campo `Chain []*Func`
+nuevo en `runtime.Func` que `invokeFunc` recorre después del target
+propio, descartando resultados intermedios igual que
+`MulticastDelegate.Invoke` real. También `System.Array::GetEnumerator` +
+un enumerador de referencia real (a diferencia del struct inlineado de
+`List<T>`), y un bug real encontrado verificando `(Action)Delegate.
+Combine(...)` contra IL real: `isAssignableTo` no tenía ningún caso para
+`KindFunc` — un delegado nunca había pasado por un `castclass` real
+hasta ahora — arreglado aceptando cualquier cast/isinst delegado-a-
+delegado sobre un valor de delegado real, ya que `runtime.Func` no lleva
+un tipo de delegado declarado propio contra el cual chequear (se detecta
+estructuralmente, no por tipo, desde Fase 3.9). Certificación: 88.7% a
+**88.9%** (88.5% a **88.7%** con Jint) — el movimiento más chico de la
+secuencia de wins baratos, esperado: son superficies reales pero
+angostas. El probe post-3.24 confirma que la cola de superficie barata
+de volumen se agotó: los hallazgos con más ancho (4-5/8 paquetes) están
+ahora concentrados casi enteramente en reflexión profunda
+(`Type.MakeGenericType`/`GetInterfaces`/`get_IsGenericType`/
+`GetMethod(s)`/`GetProperties`/`GetConstructors`, `System.Reflection.
+MethodInfo`/`PropertyInfo`/`ParameterInfo`/`MemberInfo`/`Assembly`,
+`MethodBase.Invoke`, `Activator.CreateInstance`, `System.Enum.*`) — el
+candidato natural para la próxima fase, pero un bloque
+arquitectónicamente más grande (introspección respaldada por metadata
+real + invocación dinámica) que cualquier cosa atacada hasta ahora. Con
+88.7% el objetivo de ~97% todavía no se alcanza.

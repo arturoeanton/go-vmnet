@@ -43,6 +43,17 @@ func (m *Machine) isAssignableTo(v runtime.Value, target string) bool {
 		return target == "System.String"
 	case runtime.KindArray, runtime.KindBytes:
 		return target == "System.Array"
+	case runtime.KindFunc:
+		// A delegate value (runtime.Func) doesn't carry its own declared
+		// delegate type (Action vs. Func`2 vs. a custom `delegate`
+		// declaration) — see Func's doc comment, Fase 3.9: it's detected
+		// structurally, not per-type. `(Action)Delegate.Combine(a, b)`
+		// (Fase 3.24) is the first real castclass against a delegate value
+		// this project has hit; with no declared type to check against,
+		// any delegate-typed cast/isinst on a real delegate value succeeds
+		// — matching the fact that vmnet never rejects a delegate
+		// invocation for a type mismatch either.
+		return true
 	case runtime.KindStruct:
 		if v.Struct == nil {
 			return false

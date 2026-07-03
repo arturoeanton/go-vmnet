@@ -2347,6 +2347,128 @@ go test ./... -race -count=5
 go test ./ -run TestCheapWins4 -v
 ```
 
+### Fase 3.24 — Quinto paquete de wins baratos: ConcurrentDictionary, Regex.Replace, Delegate multicast
+
+Quinta ronda del probe de findings-por-target. A diferencia de las rondas anteriores, el probe
+post-3.23 ya no mostraba una cola larga de superficies dispersas de volumen moderado: los
+hallazgos con más ancho (5-4/8 paquetes) están ahora concentrados casi enteramente en reflexión
+profunda (`Type.MakeGenericType`/`GetGenericTypeDefinition`/`GetInterfaces`/`get_IsGenericType`/
+`get_IsEnum`/`GetMethod(s)`/`GetProperties`/`GetConstructors`/`get_BaseType`, `System.Reflection.
+MethodInfo`/`PropertyInfo`/`ParameterInfo`/`MemberInfo`/`Assembly`, `MethodBase.Invoke`,
+`Activator.CreateInstance`, `System.Enum.GetValues`/`GetNames`/`IsDefined`/`ToObject` —
+requieren introspección respaldada por metadata real, no solo un native más). Esta fase toma la
+última cosecha de superficie barata que NO depende de reflexión antes de abordar ese bloque más
+grande en una fase dedicada.
+
+**Tareas**
+
+- [x] `System.Collections.Concurrent.ConcurrentDictionary`2` (`internal/bcl/
+      system_concurrentdictionary.go`, archivo nuevo): mismo backing por mutex + `map[string]
+      Value` que `Dictionary`2` (limitación de solo-claves-string ya documentada, Fase 2), más un
+      `sync.Mutex` real — el punto de este tipo sobre `Dictionary`2` es acceso concurrente
+      seguro, y aunque un único `Machine` de vmnet nunca corre en más de una goroutine a la vez,
+      una aplicación host sí puede compartir legítimamente un `ConcurrentDictionary` entre varias.
+      `GetOrAdd` tiene dos overloads reales (`(key, TValue value)` y `(key, Func<TKey,TValue>
+      factory)`) resueltos bajo el mismo nombre de call target — como el dispatch de vmnet no
+      distingue overloads por firma, el `Kind` del tercer argumento los distingue en tiempo de
+      ejecución (mismo patrón que `resolveRegexAndInput`). Invocar el factory necesita acceso a
+      `Machine`, así que `GetOrAdd` se resuelve por el registro Machine-aware
+      (`internal/interpreter/concurrentdict.go`), no por un native plano — mismo motivo que
+      `Lazy`1.Value` (Fase 3.17). El resto (`TryAdd`/`TryGetValue`/`TryRemove`/`ContainsKey`/
+      indexador/`get_Count`) sí son natives planos.
+- [x] `Regex.Replace` (`internal/bcl/system_regex.go`): mismo mecanismo de desambiguación estático
+      vs. instancia por `Kind` que `IsMatch`/`Match` (`resolveRegexReplace`), reusando el motor
+      RE2 de Go (`ReplaceAllString`) — la sintaxis `$1`/`${name}` de reemplazo de .NET coincide
+      con la de Go en los casos comunes, misma limitación de dialecto ya documentada para
+      `IsMatch`/`Match` (Fase 3.20).
+- [x] `Delegate.Combine`/`Delegate.Remove` (`internal/bcl/system_delegate.go`, archivo nuevo):
+      primer soporte real de delegado multicast del proyecto. `runtime.Func` ganó un campo
+      `Chain []*Func` (lista de targets adicionales); `Machine.invokeFunc`
+      (`internal/interpreter/calls.go`) ahora invoca el target propio y luego cada entrada de
+      `Chain` en orden, descartando todos los resultados menos el último — igual que
+      `MulticastDelegate.Invoke` real. `Combine`/`Remove` son natives planos: solo manipulan
+      listas de `*Func`, no necesitan invocar nada.
+- [x] `System.Array::GetEnumerator` + su enumerador (`internal/bcl/system_array.go`): a diferencia
+      de `List`1.Enumerator` (struct inlineado directo en el call site del `foreach`, Fase 3.11),
+      un array recorrido por el protocolo no genérico `IEnumerable` recibe un enumerador real de
+      tipo referencia (`System.Array+SZArrayEnumerator` en la BCL real) — confirmado contra IL
+      real (Fase 3.24): `foreach` sobre una fuente tipada `Array`/`IEnumerable` compila a
+      `callvirt System.Array::GetEnumerator` directo, y el *resultado* se recorre a través de la
+      interfaz `IEnumerator` (`callvirt MoveNext`/`get_Current`). Se agregó `nativeArrayEnumerator`
+      con una entrada real en `NativeTypeName` (`system_object.go`) — el despacho por interfaz de
+      Fase 3.13 es lo que redirige esas llamadas tipadas por interfaz a los natives concretos
+      registrados bajo `System.Array+ArrayEnumerator::`.
+- [x] **Bug real encontrado al verificar `(Action)Delegate.Combine(a1, a2)` contra IL real**:
+      `isAssignableTo` (`internal/interpreter/typecheck.go`) no tenía ningún caso para
+      `KindFunc` — un delegado nunca había necesitado pasar por un `castclass`/`isinst` real hasta
+      ahora (`Action a = SomeMethod;` no emite `castclass`; el compilador ya construye el tipo
+      correcto). `Delegate.Combine` devuelve `Delegate` (el tipo base), así que asignarlo a
+      `Action` sí compila a un `castclass Action` real. Como `runtime.Func` no lleva su propio
+      tipo de delegado declarado (se detecta estructuralmente, no por tipo — ver el comentario de
+      `Func`, Fase 3.9), no hay nada contra qué chequear: se agregó `case runtime.KindFunc: return
+      true`, aceptando cualquier cast/isinst delegado-a-delegado sobre un valor de delegado real.
+
+**Fixtures y tests**
+
+- [x] `CheapWins5.cs` / `TestCheapWins5` — un caso por cada native de la lista de arriba, más
+      `ConcurrentDictGetOrAddFactoryTest` (confirma que el factory corre exactamente una vez pese
+      a tres llamadas con la misma clave) y `DelegateCombineThenRemoveTest` (regresión de
+      multicast: combinar dos, quitar uno, invocar el que queda).
+
+**Lo que se dejó explícitamente afuera**
+
+- `System.Enum.GetValues`/`GetNames`/`IsDefined`/`ToObject`: requieren leer los literales de campo
+  estático de un `enum` real desde su `TypeDef` (tabla `Constant`, sin parser en
+  `internal/metadata` todavía) — parte del mismo bloque de reflexión profunda que el resto de la
+  lista de abajo, no una superficie aislada.
+- Reflexión profunda completa (`Type.GetMethods`/`GetProperties`/`GetConstructors`/
+  `get_BaseType`/`GetInterfaces`/`MakeGenericType`/`GetGenericTypeDefinition`/
+  `GetGenericArguments`/`get_IsGenericType`/`get_IsEnum`/`get_IsValueType`/`get_IsInterface`,
+  `System.Reflection.MethodInfo`/`PropertyInfo`/`ConstructorInfo`/`ParameterInfo`/`MemberInfo`/
+  `Assembly`, `MethodBase.Invoke`, `Activator.CreateInstance`): confirmado por el probe como la
+  categoría dominante restante (findings de 4-5/8 de ancho, la mayor concentración vista desde
+  Fase 3.13) — candidato natural para una fase dedicada propia, con su propio diseño (necesita
+  introspección respaldada por metadata real más invocación dinámica, no solo otro native más).
+- `System.Linq.Expressions` (árboles de expresión — `Expression.Parameter`/`Lambda`): apareció con
+  volumen moderado (3/8) en el mismo probe, pero es una superficie completamente nueva (parsear y
+  evaluar un árbol de expresión) sin relación con la reflexión de arriba más allá de compartir
+  cliente (Jint la usa para JIT/interpretación de expresiones JS compiladas).
+- `Span`1::op_Implicit` (53 casos, 3/8): conversión implícita `T[] -> Span<T>`/`Span<T> ->
+  ReadOnlySpan<T>` sin native propio; candidato barato para una fase futura si el probe lo sigue
+  mostrando con volumen tras resolver reflexión.
+- `ldsflda`/`localloc` (opcodes, 3/8 cada uno): dirección de un campo estático real y buffer de
+  pila dinámico — ninguno tiene un fixture propio verificado contra IL real todavía.
+
+### Re-certificación contra los mismos 8 targets (7 paquetes + Jint)
+
+| Paquete | % limpio Fase 3.23 | % limpio Fase 3.24 |
+|---|---|---|
+| `Ardalis.GuardClauses@5.0.0` | 96.8% | 96.8% |
+| `FluentValidation@11.9.2` | 92.7% | 93.3% |
+| `System.Text.Json@8.0.5` | 82.7% | 82.8% |
+| `Newtonsoft.Json@13.0.3` | 79.2% | 79.6% |
+| `Semver@2.3.0` | 91.0% | 91.0% |
+| `SimpleBase@4.0.0` | 85.3% | 85.3% |
+| `Humanizer.Core@2.14.1` | 93.3% | 93.4% |
+| **Promedio (7 paquetes)** | **88.7%** | **88.9%** |
+| `Jint@3.1.3` | 87.2% | 87.5% |
+| **Promedio (7 paquetes + Jint)** | **88.5%** | **88.7%** |
+
++0.2 puntos — el movimiento más chico de la secuencia de "wins baratos" (esperado: `Concurrent
+Dictionary`/`Delegate.Combine`/`Regex.Replace` son superficies reales pero angostas comparadas con
+LINQ o async). `FluentValidation` (+0.6) y `Newtonsoft.Json` (+0.4) concentran casi todo el
+movimiento — consistente con ambos usando caches basados en delegados/diccionarios concurrentes
+internamente. Confirma la lectura de la sección anterior: con 88.7% y sin más superficie barata de
+volumen visible en el probe, el camino hacia ~97% pasa por la reflexión profunda, no por otra
+ronda de wins dispersos.
+
+### Cómo verificar Fase 3.24
+
+```bash
+go test ./... -race -count=5
+go test ./ -run TestCheapWins5 -v
+```
+
 ---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")

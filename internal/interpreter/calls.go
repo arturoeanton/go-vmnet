@@ -121,6 +121,23 @@ func (m *Machine) invokeFunc(fn *runtime.Func, args []runtime.Value, depth int, 
 	if fn == nil {
 		return runtime.Value{}, false, &runtime.ManagedException{TypeName: "System.NullReferenceException", Message: "delegate is null"}
 	}
+	result, hasReturn, err := m.invokeFuncTarget(fn, args, depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, false, err
+	}
+	// A multicast delegate (built by Delegate.Combine, Fase 3.24) runs
+	// every remaining target too, keeping only the last one's result —
+	// matching real MulticastDelegate.Invoke.
+	for _, next := range fn.Chain {
+		result, hasReturn, err = m.invokeFuncTarget(next, args, depth, instrCount)
+		if err != nil {
+			return runtime.Value{}, false, err
+		}
+	}
+	return result, hasReturn, nil
+}
+
+func (m *Machine) invokeFuncTarget(fn *runtime.Func, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, bool, error) {
 	callArgs := args
 	if fn.Receiver != nil {
 		callArgs = append([]runtime.Value{*fn.Receiver}, args...)

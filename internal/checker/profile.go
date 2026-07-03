@@ -87,6 +87,8 @@ func init() {
 		"System.Text.Encoding::",
 		"System.Text.StringBuilder::",
 		"System.Array::Empty",
+		"System.Array::GetEnumerator",
+		"System.Array+ArrayEnumerator::",
 		"System.Globalization.CultureInfo::",
 		"System.Environment::get_CurrentManagedThreadId",
 		"System.Nullable`1::",
@@ -140,6 +142,8 @@ func init() {
 		"System.DateTimeOffset::",
 		"System.ValueTuple`2::",
 		"System.Int64::",
+		"System.Collections.Concurrent.ConcurrentDictionary`2::",
+		"System.Delegate::",
 	)
 	// netstandard-lite currently promises exactly the same BCL surface as
 	// rules (System.Type moved into `rules` in Fase 3.14, System.Convert

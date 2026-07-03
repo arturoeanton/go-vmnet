@@ -190,7 +190,8 @@ func resolvableMethod(md *metadata.Metadata, fullName string) bool {
 	if linqTargets[fullName] {
 		return true
 	}
-	if fullName == "System.Type::IsAssignableFrom" || fullName == "System.Lazy`1::get_Value" {
+	if fullName == "System.Type::IsAssignableFrom" || fullName == "System.Lazy`1::get_Value" ||
+		fullName == "System.Collections.Concurrent.ConcurrentDictionary`2::GetOrAdd" {
 		return true
 	}
 	if asyncMachineTargets[fullName] {

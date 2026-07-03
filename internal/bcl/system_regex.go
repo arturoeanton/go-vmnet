@@ -40,6 +40,7 @@ func init() {
 	registerCtor("System.Text.RegularExpressions.Regex", regexCtor)
 	register("System.Text.RegularExpressions.Regex::IsMatch", true, regexIsMatch)
 	register("System.Text.RegularExpressions.Regex::Match", true, regexMatch)
+	register("System.Text.RegularExpressions.Regex::Replace", true, regexReplace)
 
 	register("System.Text.RegularExpressions.Match::get_Groups", true, matchGetGroups)
 
@@ -108,6 +109,41 @@ func regexIsMatch(args []runtime.Value) (runtime.Value, error) {
 		return runtime.Value{}, err
 	}
 	return runtime.Bool(re.MatchString(input)), nil
+}
+
+// resolveRegexReplace disambiguates the static (input, pattern, replacement)
+// and instance (receiver, input, replacement) call shapes the same way
+// resolveRegexAndInput does for IsMatch/Match. .NET's `$1`/`${name}` group
+// reference syntax in the replacement string overlaps Go's own, so
+// ReplaceAllString handles the common cases directly — same RE2-dialect
+// limitation already documented on nativeRegex above.
+func resolveRegexReplace(args []runtime.Value) (re *regexp.Regexp, input, replacement string, err error) {
+	if len(args) != 3 {
+		return nil, "", "", fmt.Errorf("bcl: Regex.Replace expects 3 arguments")
+	}
+	if args[0].Kind == runtime.KindObject && args[0].Obj != nil {
+		nr, ok := args[0].Obj.Native.(*nativeRegex)
+		if !ok || args[1].Kind != runtime.KindString || args[2].Kind != runtime.KindString {
+			return nil, "", "", fmt.Errorf("bcl: Regex.Replace instance method: unsupported argument shape")
+		}
+		return nr.re, args[1].Str, args[2].Str, nil
+	}
+	if args[0].Kind == runtime.KindString && args[1].Kind == runtime.KindString && args[2].Kind == runtime.KindString {
+		re, err := compileRegex(args[1].Str)
+		if err != nil {
+			return nil, "", "", err
+		}
+		return re, args[0].Str, args[2].Str, nil
+	}
+	return nil, "", "", fmt.Errorf("bcl: Regex.Replace: unsupported argument shape")
+}
+
+func regexReplace(args []runtime.Value) (runtime.Value, error) {
+	re, input, replacement, err := resolveRegexReplace(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	return runtime.String(re.ReplaceAllString(input, replacement)), nil
 }
 
 func regexMatch(args []runtime.Value) (runtime.Value, error) {

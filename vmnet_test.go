@@ -1577,3 +1577,77 @@ func TestCheapWins4(t *testing.T) {
 		}
 	})
 }
+
+func TestCheapWins5(t *testing.T) {
+	asm := loadFixture(t)
+
+	t.Run("ConcurrentDictionary.GetOrAdd(value)", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins5", "ConcurrentDictGetOrAddValueTest")
+		if err != nil {
+			t.Fatalf("ConcurrentDictGetOrAddValueTest() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 20 {
+			t.Errorf("ConcurrentDictGetOrAddValueTest() = %d, want 20", got)
+		}
+	})
+
+	t.Run("ConcurrentDictionary.GetOrAdd(factory) runs once", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins5", "ConcurrentDictGetOrAddFactoryTest")
+		if err != nil {
+			t.Fatalf("ConcurrentDictGetOrAddFactoryTest() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 501 {
+			t.Errorf("ConcurrentDictGetOrAddFactoryTest() = %d, want 501", got)
+		}
+	})
+
+	t.Run("ConcurrentDictionary.TryGetValue", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins5", "ConcurrentDictTryGetValueTest")
+		if err != nil {
+			t.Fatalf("ConcurrentDictTryGetValueTest() error = %v", err)
+		}
+		if got := out.Native().(int32); got == 0 {
+			t.Errorf("ConcurrentDictTryGetValueTest() = %d, want nonzero", got)
+		}
+	})
+
+	t.Run("Regex.Replace", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins5", "RegexReplaceTest", String("abc123def456"))
+		if err != nil {
+			t.Fatalf("RegexReplaceTest() error = %v", err)
+		}
+		if got := out.Native().(string); got != "abc#def#" {
+			t.Errorf("RegexReplaceTest() = %q, want %q", got, "abc#def#")
+		}
+	})
+
+	t.Run("Delegate.Combine multicast", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins5", "DelegateCombineTest")
+		if err != nil {
+			t.Fatalf("DelegateCombineTest() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 11 {
+			t.Errorf("DelegateCombineTest() = %d, want 11", got)
+		}
+	})
+
+	t.Run("Delegate.Combine then Remove", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins5", "DelegateCombineThenRemoveTest")
+		if err != nil {
+			t.Fatalf("DelegateCombineThenRemoveTest() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 1 {
+			t.Errorf("DelegateCombineThenRemoveTest() = %d, want 1", got)
+		}
+	})
+
+	t.Run("foreach over array through System.Array/IEnumerable", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins5", "ArrayForeachAsIEnumerableTest")
+		if err != nil {
+			t.Fatalf("ArrayForeachAsIEnumerableTest() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 10 {
+			t.Errorf("ArrayForeachAsIEnumerableTest() = %d, want 10", got)
+		}
+	})
+}

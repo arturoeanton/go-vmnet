@@ -106,6 +106,8 @@ func NativeTypeName(native any) (string, bool) {
 		return "System.Collections.Generic.Dictionary`2", true
 	case *nativeStringBuilder:
 		return "System.Text.StringBuilder", true
+	case *nativeArrayEnumerator:
+		return "System.Array+ArrayEnumerator", true
 	default:
 		return "", false
 	}

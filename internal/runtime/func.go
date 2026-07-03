@@ -23,6 +23,12 @@ package runtime
 type Func struct {
 	FullName string
 	Receiver *Value // nil for a static-method target
+	// Chain holds additional targets appended by Delegate.Combine (Fase
+	// 3.24): a multicast delegate invokes itself, then each entry in
+	// Chain, in order — matching real MulticastDelegate.Invoke, which
+	// runs every combined target and (for a non-void delegate) discards
+	// every result but the last.
+	Chain []*Func
 }
 
 // BindDelegate combines an unbound Func (from ldftn/ldvirtftn) with the
