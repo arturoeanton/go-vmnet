@@ -7,37 +7,40 @@ import (
 	"github.com/arturoeanton/go-vmnet/internal/runtime"
 )
 
-// linqNative is like bcl.Native but with Machine access — needed because
-// every System.Linq.Enumerable method either invokes a delegate argument
-// (m.invokeFunc) or walks an arbitrary IEnumerable<T> source via the real
+// machineNative is like bcl.Native but with Machine access — needed by
+// any BCL method that must invoke a delegate argument (m.invokeFunc),
+// drive an arbitrary IEnumerable<T> source via the real
 // GetEnumerator/MoveNext/get_Current protocol (m.call, reusing the Fase
-// 3.13 interface-dispatch fallback), neither available to a plain
-// bcl.Native (func(args) (Value, error), no Machine). LINQ here is eager
-// (materializes into a []runtime.Value immediately), not the CLR's real
-// lazy iterators — a deliberate simplification: a chained call like
-// `xs.Where(...).Select(...).ToList()` still behaves identically from the
-// caller's point of view, since every LINQ result is wrapped as a real,
-// immediately-enumerable List<T>-shaped value (bcl.NewListValue).
-type linqNative func(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error)
+// 3.13 interface-dispatch fallback), or walk the real type hierarchy
+// (m.typeMatches/m.ResolveType) — none of which a plain bcl.Native
+// (func(args) (Value, error), no Machine) can do. First used for LINQ
+// (Fase 3.15, this file); Fase 3.16 reuses it for
+// Type::IsAssignableFrom (internal/interpreter/reflection.go).
+type machineNative func(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error)
 
-// linqRegistry is populated from init(), not a var literal: a literal
-// referencing linqSelect etc. (which transitively call back into
-// tryCall, which reads linqRegistry) trips Go's initialization-cycle
-// detector, even though the actual read only ever happens at call time,
-// long after init. Assigning inside a function body sidesteps that
-// static check entirely.
-var linqRegistry map[string]linqNative
+// machineRegistry is declared as an empty map literal (not populated
+// inline) so each file's own init() can add its entries — a literal
+// referencing e.g. linqSelect directly here (which transitively calls
+// back into tryCall, which reads machineRegistry) trips Go's
+// initialization-cycle detector, even though the actual read only ever
+// happens at call time, long after init. Assigning from within a
+// function body sidesteps that static check entirely.
+var machineRegistry = map[string]machineNative{}
 
+// LINQ here is eager (materializes into a []runtime.Value immediately),
+// not the CLR's real lazy iterators — a deliberate simplification: a
+// chained call like `xs.Where(...).Select(...).ToList()` still behaves
+// identically from the caller's point of view, since every LINQ result
+// is wrapped as a real, immediately-enumerable List<T>-shaped value
+// (bcl.NewListValue).
 func init() {
-	linqRegistry = map[string]linqNative{
-		"System.Linq.Enumerable::Select":         linqSelect,
-		"System.Linq.Enumerable::Where":          linqWhere,
-		"System.Linq.Enumerable::Any":            linqAny,
-		"System.Linq.Enumerable::All":            linqAll,
-		"System.Linq.Enumerable::ToList":         linqToList,
-		"System.Linq.Enumerable::ToArray":        linqToArray,
-		"System.Linq.Enumerable::FirstOrDefault": linqFirstOrDefault,
-	}
+	machineRegistry["System.Linq.Enumerable::Select"] = linqSelect
+	machineRegistry["System.Linq.Enumerable::Where"] = linqWhere
+	machineRegistry["System.Linq.Enumerable::Any"] = linqAny
+	machineRegistry["System.Linq.Enumerable::All"] = linqAll
+	machineRegistry["System.Linq.Enumerable::ToList"] = linqToList
+	machineRegistry["System.Linq.Enumerable::ToArray"] = linqToArray
+	machineRegistry["System.Linq.Enumerable::FirstOrDefault"] = linqFirstOrDefault
 }
 
 // enumerateAll drives an arbitrary IEnumerable<T>'s real iteration

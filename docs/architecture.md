@@ -350,3 +350,14 @@ con Jint) — movimiento más chico que el volumen crudo de hallazgos
 "limpia" un método si era el único obstáculo, y varios métodos que usan
 LINQ en estos paquetes también tocan reflection profunda o regex, que
 siguen sin soporte. Con 80.9% el 85% todavía no se alcanza.
+
+Fase 3.16 (`Type::IsAssignableFrom`) completa — el segundo hallazgo más
+ancho de reflection dejado explícitamente afuera de 3.14, ahora mecánico
+gracias al registro Machine-aware que 3.15 ya había generalizado
+(`linqRegistry` renombrado a `machineRegistry`, sin cambio de
+comportamiento). `typeIsAssignableFrom` re-deriva `isAssignableTo` (Fase
+3.8) partiendo de un nombre de tipo en vez de un `Value`/`Kind` ya
+conocido, resolviendo el `TypeDef` real del candidato y caminando con
+`m.typeMatches`. Certificación: 80.5% a 80.6% (80.9% a 81.0% con Jint) —
+movimiento mínimo, mismo patrón de "no era el único obstáculo" ya visto
+en LINQ. Con 81.0% el 85% todavía no se alcanza.

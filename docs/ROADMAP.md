@@ -671,6 +671,7 @@ corrió el mismo probe de findings-por-opcode/BCL, ahora incluyendo Jint, contra
 | **3.13** | `foreach` sobre colección tipada como interfaz (despacho por tipo real del receptor) + paquete de wins baratos (`String`/`Char`/`List`/`Dictionary`) | `IEnumerable`1::GetEnumerator`/`IEnumerator`1::get_Current`/`IEnumerator::MoveNext` eran el hallazgo más ancho (7/8) tras Fase 3.12 |
 | **3.14** | Reflection-lite: `ldtoken`/`typeof(T)`, `Object.GetType()`, `System.Type` (igualdad/`Name`/`FullName`) | `ldtoken` (6/8), `Object::GetType` (5/8) y `MemberInfo::get_Name` (5/8) eran los tres hallazgos más anchos tras Fase 3.13 |
 | **3.15** | LINQ (`System.Linq.Enumerable`: `Select`/`Where`/`Any`/`All`/`ToList`/`ToArray`/`FirstOrDefault`) | ~174 casos en 4-5/8 tras Fase 3.14, viable desde que existen delegates (3.9), enumeradores reales (3.11) y despacho por interfaz (3.13) |
+| **3.16** | `Type::IsAssignableFrom` | Segundo hallazgo más ancho de reflection tras 3.14 (84 casos, 4/8); mecánico una vez que existe el registro Machine-aware de 3.15 |
 | **3.x** | Re-medición final, cierre de brecha restante hacia 85%, validación literal del demo Jint | Confirma el número Y que el escenario concreto corre, no solo el promedio |
 
 ### Fase 3.6 — `switch` + BCL barata de alto alcance
@@ -1694,6 +1695,59 @@ alcanza.
 ```bash
 go test ./... -race -count=3
 go test ./ -run TestLinq -v
+```
+
+### Fase 3.16 — `Type::IsAssignableFrom`
+
+Sub-fase chica: el segundo hallazgo más ancho de reflection dejado explícitamente afuera de Fase
+3.14 (84 casos, 4/8) — no se hizo entonces porque necesitaba acceso a `Machine` (caminar la
+jerarquía real de tipos requiere `Machine.ResolveType`, no disponible a un `bcl.Native` plano),
+pero ese exacto tipo de plumbing ya existe desde Fase 3.15 (`machineRegistry`, generalizado de
+`linqRegistry` — mismo registro, ahora con un nombre que no asume que solo LINQ lo va a usar).
+
+**Tareas**
+
+- [x] `typeIsAssignableFrom` (`internal/interpreter/reflection.go`, archivo nuevo) — re-deriva la
+      lógica de `isAssignableTo` (Fase 3.8) partiendo de un **nombre** de tipo en vez de un
+      `runtime.Value`/`Kind` ya conocido (ambos operandos son `System.Type`, que solo cargan un
+      `FullName` string): igualdad exacta o `target == "System.Object"` corta camino de
+      inmediato, si no se resuelve el `TypeDef` real del candidato y se camina con
+      `m.typeMatches` — el mismo walk que `isinst`/`castclass` y el catch-matching de
+      excepciones (Fase 3.13) ya usan.
+- [x] `bcl.TypeFullNameOf` (nuevo, exportado) — extrae el `FullName` de un valor `System.Type`
+      desde fuera de `internal/bcl`, ya que `nativeTypeInfo` es un tipo no exportado.
+- [x] Checker: entrada directa para `"System.Type::IsAssignableFrom"` en `resolvableMethod`
+      (no se creó un mapa nuevo de un solo elemento, a diferencia de `linqTargets`).
+
+**Fixtures y tests**
+
+- [x] `Reflection.cs` (`VehicleAssignableFromCar`/`CarNotAssignableFromVehicle`) — cubierto
+      dentro de `TestReflection`
+
+### Re-certificación contra los mismos 8 targets (7 paquetes + Jint)
+
+| Paquete | % limpio Fase 3.15 | % limpio Fase 3.16 |
+|---|---|---|
+| `Ardalis.GuardClauses@5.0.0` | 93.3% | 93.3% |
+| `FluentValidation@11.9.2` | 86.3% | 86.4% |
+| `System.Text.Json@8.0.5` | 80.4% | 80.9% |
+| `Newtonsoft.Json@13.0.3` | 70.7% | 71.0% |
+| `Semver@2.3.0` | 83.7% | 83.7% |
+| `SimpleBase@4.0.0` | 60.9% | 60.9% |
+| `Humanizer.Core@2.14.1` | 88.3% | 88.3% |
+| **Promedio (7 paquetes)** | **80.5%** | **80.6%** |
+| `Jint@3.1.3` | 83.8% | 83.8% |
+| **Promedio (7 paquetes + Jint)** | **80.9%** | **81.0%** |
+
++0.1 puntos — movimiento mínimo, esperado para un método con volumen concentrado en pocos
+métodos que probablemente también tocan otras superficies sin soporte (mismo patrón que LINQ en
+esta misma fase). Con 81.0% el criterio de cierre firme de 85% todavía no se alcanza.
+
+### Cómo verificar Fase 3.16
+
+```bash
+go test ./... -race -count=3
+go test ./ -run TestReflection -v
 ```
 
 ---

@@ -116,6 +116,19 @@ func typeFullName(t *runtime.Type) string {
 	return t.Namespace + "." + t.Name
 }
 
+// TypeFullNameOf returns a System.Type value's FullName — used by
+// internal/interpreter/reflection.go (Fase 3.16), which needs it outside
+// this package to implement Type::IsAssignableFrom (a Machine-aware
+// native: walking the real type hierarchy needs Machine.ResolveType,
+// unavailable to a plain bcl.Native).
+func TypeFullNameOf(v runtime.Value) (string, bool) {
+	ti, err := asTypeInfo(v)
+	if err != nil {
+		return "", false
+	}
+	return ti.FullName, true
+}
+
 func asTypeInfo(v runtime.Value) (*nativeTypeInfo, error) {
 	if v.Kind == runtime.KindRef && v.Ref != nil {
 		v = *v.Ref

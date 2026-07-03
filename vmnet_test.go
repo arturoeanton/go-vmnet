@@ -629,6 +629,24 @@ func TestReflection(t *testing.T) {
 			t.Errorf("TypeNotEquals() = %d, want nonzero", got)
 		}
 	})
+
+	t.Run("Type.IsAssignableFrom", func(t *testing.T) {
+		yes, err := asm.Call("Vmnet.Fixtures.ReflectionTest", "VehicleAssignableFromCar")
+		if err != nil {
+			t.Fatalf("VehicleAssignableFromCar() error = %v", err)
+		}
+		if got := yes.Native().(int32); got == 0 {
+			t.Errorf("VehicleAssignableFromCar() = %d, want nonzero", got)
+		}
+
+		no, err := asm.Call("Vmnet.Fixtures.ReflectionTest", "CarNotAssignableFromVehicle")
+		if err != nil {
+			t.Fatalf("CarNotAssignableFromVehicle() error = %v", err)
+		}
+		if got := no.Native().(int32); got != 0 {
+			t.Errorf("CarNotAssignableFromVehicle() = %d, want 0", got)
+		}
+	})
 }
 
 // TestLinq exercises System.Linq.Enumerable (Fase 3.15): a chained

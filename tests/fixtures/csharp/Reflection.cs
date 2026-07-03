@@ -34,5 +34,18 @@ namespace Vmnet.Fixtures
         {
             return typeof(Car) != typeof(Vehicle);
         }
+
+        // Fase 3.16: Type.IsAssignableFrom, deferred out of Fase 3.14 as
+        // needing Machine access (walking the real class hierarchy needs
+        // Machine.ResolveType, unavailable to a plain bcl.Native).
+        public static bool VehicleAssignableFromCar()
+        {
+            return typeof(Vehicle).IsAssignableFrom(typeof(Car));
+        }
+
+        public static bool CarNotAssignableFromVehicle()
+        {
+            return typeof(Car).IsAssignableFrom(typeof(Vehicle));
+        }
     }
 }

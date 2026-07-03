@@ -186,6 +186,9 @@ func resolvableMethod(md *metadata.Metadata, fullName string) bool {
 	if linqTargets[fullName] {
 		return true
 	}
+	if fullName == "System.Type::IsAssignableFrom" {
+		return true
+	}
 	return isLocalMethod(md, fullName)
 }
 

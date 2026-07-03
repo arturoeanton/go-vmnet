@@ -93,11 +93,13 @@ func (m *Machine) tryCall(fullName string, args []runtime.Value, depth int, inst
 		v, err = native(args)
 		return v, hr, err, true
 	}
-	// LINQ (Fase 3.14): needs Machine access (invoking a delegate
-	// argument, driving an arbitrary source's real iteration protocol),
-	// which a plain bcl.Native doesn't have — see linq.go.
-	if linq, ok := linqRegistry[fullName]; ok {
-		v, err = linq(m, args, depth, instrCount)
+	// Machine-aware natives (LINQ, Fase 3.15; Type::IsAssignableFrom,
+	// Fase 3.16): need Machine access (invoking a delegate argument,
+	// driving an arbitrary source's real iteration protocol, walking the
+	// real type hierarchy), none of which a plain bcl.Native has — see
+	// linq.go/reflection.go.
+	if native, ok := machineRegistry[fullName]; ok {
+		v, err = native(m, args, depth, instrCount)
 		return v, true, err, true
 	}
 	if m.Resolve == nil {
