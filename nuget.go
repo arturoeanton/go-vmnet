@@ -105,14 +105,44 @@ func (n *NuGetManager) Packages() ([]Package, error) {
 }
 
 // LoadPackage loads the assembly Restore selected for id (spec §6.4:
-// `vm.LoadPackage("NodaTime")`), reading its .nupkg from the local cache.
+// `vm.LoadPackage("NodaTime")`), reading its .nupkg from the local cache
+// — and, since Fase 3.27, also loads id's full transitive dependency
+// closure (walking the lockfile's own already-resolved Dependencies
+// graph, computed once by Restore) and attaches each as an
+// Assembly.WithDependencies dep, so a package whose own IL directly
+// calls into another package's types (not just the BCL) resolves
+// end-to-end — e.g. Jint's real dependency chain (Jint -> Esprima ->
+// System.Memory -> ...). A dependency with no selectable managed asset
+// (a pure reference/native/compile-only package) is silently skipped,
+// not an error: it may still be a legitimate link in the chain with
+// simply nothing of its own to load.
 func (vm *VM) LoadPackage(id string) (*Assembly, error) {
 	n := vm.NuGet()
 	lf, err := nuget.ReadLockFile(n.lockfile)
 	if err != nil {
 		return nil, fmt.Errorf("vmnet: %w (run NuGet().Restore() first)", err)
 	}
+	asm, err := vm.loadLockedPackage(n, lf, id, map[string]*Assembly{})
+	if err != nil {
+		return nil, err
+	}
+	if asm == nil {
+		return nil, fmt.Errorf("vmnet: package %q has no usable assembly (check NuGet().Packages() for the reason)", id)
+	}
+	return asm, nil
+}
 
+// loadLockedPackage loads one locked package's own selected asset (if
+// any) and recursively attaches its dependencies — see LoadPackage's
+// doc comment. loaded caches by package ID within one LoadPackage call,
+// both to avoid reloading a package reachable through more than one
+// path in the dependency graph (diamond dependencies are common) and to
+// terminate on any dependency cycle, however unlikely in a real NuGet
+// graph.
+func (vm *VM) loadLockedPackage(n *NuGetManager, lf *nuget.LockFile, id string, loaded map[string]*Assembly) (*Assembly, error) {
+	if asm, ok := loaded[id]; ok {
+		return asm, nil
+	}
 	var found *nuget.LockedPackage
 	for i := range lf.Packages {
 		if lf.Packages[i].ID == id {
@@ -124,7 +154,8 @@ func (vm *VM) LoadPackage(id string) (*Assembly, error) {
 		return nil, fmt.Errorf("vmnet: package %q is not in %s (add + restore it first)", id, n.lockfile)
 	}
 	if found.SelectedAsset == "" {
-		return nil, fmt.Errorf("vmnet: package %q has no usable assembly: %s", id, found.Unselectable)
+		loaded[id] = nil
+		return nil, nil
 	}
 
 	data, err := n.cache.Load(found.ID, found.Version)
@@ -141,6 +172,20 @@ func (vm *VM) LoadPackage(id string) (*Assembly, error) {
 	if !ok {
 		return nil, fmt.Errorf("vmnet: %s@%s: locked asset %q is missing from the cached .nupkg (re-run Restore)", found.ID, found.Version, found.SelectedAsset)
 	}
+	asm, err := vm.LoadBytes(found.ID+"@"+found.Version, assetData)
+	if err != nil {
+		return nil, err
+	}
+	loaded[id] = asm
 
-	return vm.LoadBytes(found.ID+"@"+found.Version, assetData)
+	for _, depID := range found.Dependencies {
+		depAsm, err := vm.loadLockedPackage(n, lf, depID, loaded)
+		if err != nil {
+			return nil, fmt.Errorf("vmnet: loading %s's dependency %q: %w", id, depID, err)
+		}
+		if depAsm != nil {
+			asm.WithDependencies(depAsm)
+		}
+	}
+	return asm, nil
 }

@@ -20,6 +20,33 @@ func init() {
 	register("System.Collections.Generic.Stack`1::Pop", true, stackPop)
 	register("System.Collections.Generic.Stack`1::Peek", true, stackPeek)
 	register("System.Collections.Generic.Stack`1::get_Count", true, stackCount)
+	register("System.Collections.Generic.Stack`1::Clear", false, stackClear)
+	register("System.Collections.Generic.Stack`1::Contains", true, stackContains)
+}
+
+func stackClear(args []runtime.Value) (runtime.Value, error) {
+	s, err := asStack(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	s.items = nil
+	return runtime.Value{}, nil
+}
+
+func stackContains(args []runtime.Value) (runtime.Value, error) {
+	s, err := asStack(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("bcl: Stack.Contains expects 1 argument")
+	}
+	for _, item := range s.items {
+		if valuesEqual(item, args[1]) {
+			return runtime.Bool(true), nil
+		}
+	}
+	return runtime.Bool(false), nil
 }
 
 func asStack(args []runtime.Value) (*nativeStack, error) {

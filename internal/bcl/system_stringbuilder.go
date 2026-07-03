@@ -33,6 +33,15 @@ func init() {
 	register("System.Text.StringBuilder::ToString", true, sbToString)
 	register("System.Text.StringBuilder::get_Length", true, sbLength)
 	register("System.Text.StringBuilder::Clear", true, sbClear)
+	// Capacity: vmnet's StringBuilder is backed by a Go strings.Builder,
+	// which auto-grows with no separate, meaningfully distinct notion of
+	// "allocated but unused" capacity to report — the current length is
+	// a defensible stand-in (real Capacity is always >= Length, and
+	// EnsureCapacity's usual caller just wants "big enough", which the
+	// auto-growing backing already guarantees regardless of what this
+	// returns).
+	register("System.Text.StringBuilder::get_Capacity", true, sbLength)
+	register("System.Text.StringBuilder::EnsureCapacity", true, sbLength)
 }
 
 func asStringBuilder(args []runtime.Value) (*nativeStringBuilder, error) {

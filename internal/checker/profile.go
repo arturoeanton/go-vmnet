@@ -28,6 +28,8 @@ const (
 var bclPrefixes = map[Profile][]string{
 	ProfileMinimal: {
 		"System.Math::",
+		"System.BitConverter::",
+		"System.Runtime.CompilerServices.RuntimeHelpers::InitializeArray",
 		"System.Double::IsNaN",
 		"System.String::Concat",
 		"System.String::get_Length",
@@ -88,8 +90,12 @@ func init() {
 		"System.Text.StringBuilder::",
 		"System.Array::Empty",
 		"System.Array::GetEnumerator",
+		"System.Array::Resize",
+		"System.Array::IndexOf",
+		"System.Array::Copy",
 		"System.Array+ArrayEnumerator::",
 		"System.Globalization.CultureInfo::",
+		"System.TimeZoneInfo::",
 		"System.Environment::get_CurrentManagedThreadId",
 		"System.Nullable`1::",
 		"System.DateTime::",
@@ -123,6 +129,7 @@ func init() {
 		"System.Collections.Generic.HashSet`1::",
 		"System.Collections.Generic.HashSet`1+Enumerator::",
 		"System.Collections.Generic.Stack`1::",
+		"System.Collections.Generic.Queue`1::",
 		"System.TimeSpan::",
 		"System.Text.RegularExpressions.Regex::",
 		"System.Text.RegularExpressions.Match::",
@@ -150,6 +157,7 @@ func init() {
 		"System.Enum::GetNames",
 		"System.Enum::IsDefined",
 		"System.Enum::ToObject",
+		"System.Enum::HasFlag",
 	)
 	// netstandard-lite currently promises exactly the same BCL surface as
 	// rules (System.Type moved into `rules` in Fase 3.14, System.Convert
@@ -204,8 +212,8 @@ func instrIsObjectModel(instr ir.Instr) bool {
 	switch v := instr.(type) {
 	case ir.NewObj, ir.LoadField, ir.StoreField, ir.Throw,
 		ir.NewArr, ir.LoadLen, ir.LoadElem, ir.StoreElem, ir.LoadElemAddr,
-		ir.LoadFieldAddr, ir.LoadStaticField, ir.StoreStaticField,
-		ir.InitObj, ir.IsInst, ir.CastClass, ir.LoadFtn, ir.LoadTypeToken,
+		ir.LoadFieldAddr, ir.LoadStaticField, ir.StoreStaticField, ir.LoadStaticFieldAddr,
+		ir.InitObj, ir.IsInst, ir.CastClass, ir.LoadFtn, ir.LoadTypeToken, ir.LoadFieldToken,
 		ir.Leave, ir.EndFinally, ir.Rethrow:
 		return true
 	case ir.Call:

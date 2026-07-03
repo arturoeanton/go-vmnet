@@ -1,6 +1,30 @@
 package runtime
 
-import "github.com/arturoeanton/go-vmnet/internal/ir"
+import (
+	"errors"
+
+	"github.com/arturoeanton/go-vmnet/internal/ir"
+)
+
+// ErrMethodNotFound is what a Resolvers.Resolve implementation should
+// wrap its error with when fullName genuinely names no method at all
+// (Fase 3.27) — as opposed to a method that exists but failed to build
+// (an unsupported opcode somewhere in its own IL body, a malformed
+// signature, ...), a categorically different, real failure. Distinguishing
+// the two matters most for a type's .cctor: internal/interpreter/
+// statics.go's runCctor must silently skip a genuinely absent
+// constructor (the overwhelmingly common case — most types have none)
+// but MUST NOT silently skip one that exists and simply couldn't be
+// built, since that constructor may have already been about to set real
+// static state (e.g. a static delegate field) before whatever made it
+// fail — silently treating "exists but broken" as "doesn't exist" would
+// leave that state at its zero value with no error at all, exactly the
+// "plausible-but-wrong" failure mode this project treats as worse than a
+// hard error (found running real Jint/Esprima: Character's .cctor sets
+// three delegate fields before hitting an unsupported opcode later in
+// the same method, and swallowing the build error silently left them
+// null instead of surfacing the real problem).
+var ErrMethodNotFound = errors.New("runtime: method not found")
 
 // Method is a resolved, IR-lowered CIL method ready to execute — the
 // interpreter never touches il.Instruction or metadata.Token directly.
@@ -27,4 +51,44 @@ type Method struct {
 	// finally/fault — Fase 3.10), IR-index-based. Nil for the overwhelming
 	// majority of methods, which have none.
 	Handlers []ir.Handler
+
+	// Resolvers binds this specific Method to the Assembly whose metadata
+	// produced it (Fase 3.27, multi-assembly resolution) — every "Namespace.
+	// Type::Method"/"Namespace.Type" name this method's own IR references
+	// (a call target, a field's owning type, ...) must resolve against
+	// THIS assembly first, not whichever assembly's Call()/LoadFile
+	// happened to be the original entry point. Nil for a method built
+	// outside the normal Assembly.buildMethod path (e.g. a test harness
+	// constructing a *Method by hand) — interpreter.Machine.invoke then
+	// just keeps using whatever resolvers were already active, matching
+	// the simpler pre-Fase-3.27 single-assembly behavior.
+	Resolvers *Resolvers
+}
+
+// Resolvers bundles the four name-resolution callbacks a Machine needs to
+// run interpreted IR that isn't a BCL native (Fase 3.27) — one bundle per
+// loaded Assembly. Defined here (not in internal/interpreter, where the
+// individual Resolver/TypeResolver/... types used to live) so a
+// *runtime.Method can carry its own bundle directly without an import
+// cycle: runtime already defines Method/Type/Value, everything these
+// closures need to reference.
+type Resolvers struct {
+	// Resolve looks up another method by full name, given the actual
+	// call-site arguments (receiver included for an instance call) to
+	// disambiguate a real overload set — see assembly.go's
+	// pickMethodOverload.
+	Resolve func(fullName string, args []Value) (*Method, error)
+	// ResolveType looks up a type's field layout by full name.
+	ResolveType func(fullName string) (*Type, error)
+	// ResolveExplicitImpl finds the real (mangled) method name a concrete
+	// type uses to explicitly implement an interface method (Fase 3.13).
+	ResolveExplicitImpl func(concreteTypeFullName, interfaceFullName, methodName string) (implMethodName string, ok bool)
+	// ResolveEnum reads a plugin-declared enum's members (Fase 3.26).
+	ResolveEnum func(fullName string) (names []string, values []int64, ok bool)
+	// ResolveFieldBytes returns a field's compiler-embedded initial-value
+	// blob, if it has one (Fase 3.27: RuntimeHelpers.InitializeArray, the
+	// pattern behind an array literal's blob initializer — `ldtoken
+	// <field>` names the field, this fetches its actual raw bytes from
+	// the owning assembly's PE image).
+	ResolveFieldBytes func(typeFullName, fieldName string) ([]byte, bool)
 }

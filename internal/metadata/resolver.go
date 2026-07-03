@@ -422,7 +422,14 @@ func (md *Metadata) MethodDef(rid uint32) (MethodDefRow, error) {
 }
 
 // FindMethodDef looks up a static/instance method by name within the
-// method range owned by TypeDef typeRID.
+// method range owned by TypeDef typeRID, returning the first match —
+// callers that need to disambiguate a real overload set (same name,
+// different signature) should use FindMethodDefCandidates instead (Fase
+// 3.27); kept as its own simpler function since the overwhelming
+// majority of methods in practice aren't overloaded at all, and every
+// existing caller that doesn't have real call-site arguments to
+// disambiguate with (resolveExplicitImpl's mangled-name lookups, ...)
+// has no better option anyway.
 func (md *Metadata) FindMethodDef(typeRID uint32, name string) (rid uint32, row MethodDefRow, err error) {
 	start, end, err := md.TypeDefMethodRange(typeRID)
 	if err != nil {
@@ -438,6 +445,36 @@ func (md *Metadata) FindMethodDef(typeRID uint32, name string) (rid uint32, row 
 		}
 	}
 	return 0, MethodDefRow{}, fmt.Errorf("%w: method %s not found", ErrOutOfRange, name)
+}
+
+// FindMethodDefCandidates returns every method matching name within
+// TypeDef typeRID's own method range (Fase 3.27) — a real .NET method
+// can be overloaded (same name, different signature; discovered the
+// hard way running Jint's real Engine class, which has 5 constructors
+// and 9 SetValue overloads), which FindMethodDef alone can't
+// disambiguate: it always returns whichever happens to come first in
+// the metadata table. vmnet's overload resolution (assembly.go's
+// pickMethodOverload) scores these against the actual call-site
+// arguments.
+func (md *Metadata) FindMethodDefCandidates(typeRID uint32, name string) (rids []uint32, rows []MethodDefRow, err error) {
+	start, end, err := md.TypeDefMethodRange(typeRID)
+	if err != nil {
+		return nil, nil, err
+	}
+	for i := start; i < end; i++ {
+		r, err := md.MethodDef(i)
+		if err != nil {
+			return nil, nil, err
+		}
+		if r.Name == name {
+			rids = append(rids, i)
+			rows = append(rows, r)
+		}
+	}
+	if len(rids) == 0 {
+		return nil, nil, fmt.Errorf("%w: method %s not found", ErrOutOfRange, name)
+	}
+	return rids, rows, nil
 }
 
 func (md *Metadata) Param(rid uint32) (ParamRow, error) {

@@ -2705,6 +2705,161 @@ go test ./ -run TestReflection3 -v
 
 ---
 
+### Fase 3.27 — Resolución multi-ensamblado + demo real de `Jint.Engine.Evaluate()`
+
+Disparada por una pregunta directa: ¿puede vmnet correr el ejemplo de Jint de verdad, no un stub?
+La respuesta arrancó en "no": `Call()` solo invocaba métodos estáticos de un único ensamblado, y
+Jint necesita resolver símbolos a través de su propia cadena de dependencias NuGet real (Jint →
+Esprima → System.Memory → System.Buffers/System.Numerics.Vectors/
+System.Runtime.CompilerServices.Unsafe). Esta fase construyó esa arquitectura desde cero y después
+persiguió, uno por uno, cada bug real que aparecía al ejecutar `new Engine().Evaluate("1 + 2")`
+contra los DLLs reales — sin fixtures propios, sin atajos.
+
+**Arquitectura nueva: resolución multi-ensamblado**
+
+- [x] `Assembly.deps []*Assembly` + `WithDependencies(...*Assembly) *Assembly`. `vm.LoadPackage`
+      ahora carga automáticamente el grafo completo de dependencias transitivas de un paquete
+      (`loadLockedPackage`, recursivo sobre `Dependencies []string` del lockfile), enganchando
+      cada una vía `WithDependencies`.
+- [x] Cada resolver (`resolveMethod`, `resolveByFullName`, `resolveExplicitImpl`,
+      `resolveEnumMembers`, `resolveFieldBytes`) cae a `asm.deps` cuando no encuentra el símbolo
+      localmente, propagando el error real del dep más profundo — no un genérico "not found" que
+      esconde el problema real.
+- [x] **Resolución con ámbito de ensamblado real**: `runtime.Resolvers` (definido en
+      `internal/runtime/method.go` para evitar un ciclo de imports) agrupa los 5 resolvers de una
+      `*runtime.Method`; `Machine.invoke` intercambia los resolvers activos de la Machine a los de
+      `method.Resolvers` durante esa llamada. Corrige colisiones de nombre entre ensamblados —
+      `<PrivateImplementationDetails>` existe por separado en `Jint.dll` y en `Esprima.dll`, y
+      antes de esto el diseño de resolver global podía resolver silenciosamente contra el
+      ensamblado equivocado.
+- [x] `runtime.ErrMethodNotFound`: distingue "no existe tal método" (seguro ignorar en
+      `runCctor`) de "el método existe pero falló al construirse" (un error real que debe
+      propagarse, porque el `.cctor` que falla puede haber mutado ya estado estático real antes
+      de fallar).
+
+**Resolución real de overloads (antes: "primer match por nombre gana")**
+
+- [x] `pickMethodOverload` (`assembly.go`): filtro duro de aridad + `scoreParamMatch` (tabla de
+      puntaje por `Kind`) + refinamiento de coincidencia exacta de nombre de tipo (+50 si
+      coincide exacto, -3 si es un mismatch confirmado, +20 si el argumento es subclase del tipo
+      declarado — ver abajo). Encontrado corriendo Jint real: `Engine` tiene 5 constructores y 9
+      overloads de `SetValue`; el motor de clases de Jint tiene múltiples overloads del mismo
+      nombre y aridad que solo se distinguen por tipo de parámetro.
+- [x] **Bug de subtipo vs. tipo genérico**: un argumento cuyo tipo concreto es subclase del tipo
+      declarado de un parámetro (p. ej. un `JsNumber` contra un parámetro `JsValue`) recibía la
+      misma penalización de -3 que un mismatch real, haciendo perder el overload correcto contra
+      un overload de `object` sin relación — causaba una recursión infinita real en
+      `Engine.SetValue`. Fix: `valueIsAssignableToTypeName` camina la cadena `BaseTypeFullName`
+      del tipo del argumento; un subtipo confirmado suma +20 en vez de restar 3.
+- [x] **Bug de forma dura (Fase final, el más sutil)**: `GlobalObject` en Jint declara su propio
+      `GetOwnProperty(Key property)` no-virtual (un atajo interno de performance) con el mismo
+      nombre y aridad que el `GetOwnProperty(JsValue property)` virtual que hereda pero no
+      sobreescribe. El *chain walk* de despacho virtual (ver abajo) encontraba ese único candidato
+      por nombre en `GlobalObject` y lo aceptaba sin más — un valor `JsValue` (referencia) nunca
+      puede ser directamente un `Key` (struct) sin una conversión visible en el IL, así que esto
+      corrompía en silencio cada lookup de propiedad. Fix: `hasHardShapeMismatch` descalifica la
+      combinación `KindObject` argumento vs. `SigValueType` parámetro incluso cuando es el único
+      candidato por nombre (`candidateMatchesArgs`) — el chain walk entonces sigue subiendo hasta
+      encontrar el verdadero método virtual.
+- [x] **Bug de puntaje `KindRef`**: un argumento `byref` (`ref`/`in`) puntuaba igual que un
+      `KindObject` contra un parámetro `SigClass`/`SigObject` (puntaje 5) pero solo 1 (el
+      default) contra el `SigByRef` correcto — invertido. Corregido con un caso `KindRef` propio
+      (10 si `SigByRef`, 1 si no). Causaba que `StringDictionarySlim<T>`'s helper genérico
+      `MoveNext<T>(ref Node? node, in NodeList<T> list)` perdiera contra un overload no
+      relacionado de un solo `Node` — devolvía el `NodeList` completo como si fuera un único nodo.
+
+**Despacho virtual real (antes: solo probaba el tipo concreto como fallback tras un "no resuelto")**
+
+- [x] `Machine.call` ahora, para toda llamada virtual, prueba el tipo concreto del receptor
+      *primero* — no solo cuando el nombre declarado falla en resolver del todo. Un método de
+      clase base puede existir y resolver perfectamente bien (un `MethodDef` real, invocable)
+      pero seguir siendo el incorrecto cuando el tipo real del receptor tiene su propio override.
+- [x] **Chain walk completo**: si el tipo concreto no tiene el método (name-only lookup, sin
+      herencia dentro de `resolveMethod`), sube por `BaseTypeFullName` probando cada ancestro
+      hasta llegar al tipo declarado — no solo el tipo hoja. Esprima's `Node.GetChildNodes()`
+      lanza `NotImplementedException` deliberadamente ("olvidaste hacer override") — con solo el
+      tipo hoja probado, cada nodo concreto (que no sobreescribe `GetChildNodes` directo, sino a
+      través de una clase intermedia) disparaba esa guardia en cada llamada.
+
+**`newarr`/structs: tipado correcto de los defaults (antes: `Null()` ciego sin importar el tipo)**
+
+- [x] `ir.NewArr` ahora lleva `TypeFullName` (resuelto del token de tipo del elemento, igual que
+      `initobj`). El intérprete siembra cada slot con `runtime.Value` real para tipos valor
+      (struct, enum, primitivos: int/long/float/double/bool/char/byte/...) en vez de un `Null()`
+      genérico — un array de valor nunca es null en CLR real. `internal/interpreter/structs.go`
+      gana `primitiveDefaults` (mapa de nombres de primitivos CIL a su default, ninguno tenía
+      `TypeDef` ni entrada en el registro de value types de BCL).
+- [x] **El bug real que esto expuso, no uno cosmético**: `Jint.Collections.StringDictionarySlim`
+      usa `int[] _buckets`; sin el default correcto, `buckets[i]` leía `Null()`, y una resta
+      contra eso fallaba con "binary op on mismatched value kinds".
+- [x] **Bug de aliasing real, el más caro de encontrar de toda la fase**: `newObj`/
+      `runtime.NewStruct` copiaban los defaults de campo con `copy()` — una copia superficial de
+      `runtime.Value`. Cuando un default es `KindStruct`, `Value.Struct` es un puntero: **todas**
+      las instancias de un tipo compartían el mismo `*Struct` subyacente para ese campo, hasta que
+      algo lo sobreescribía explícitamente. Esto hacía que `Esprima.Utils.AdditionalDataSlot`
+      (embebido en cada nodo AST, usado por Jint para cachear expresiones compiladas por nodo) se
+      compartiera entre dos literales AST distintos ("1" y "2") — cachear el resultado compilado
+      de "1" hacía que "2" leyera ese mismo caché, y `"1 + 2"` evaluaba a `2`. Fix: cada default se
+      clona (`Value.Clone()`) por campo en vez de copiarse en bloque — en `internal/runtime/
+      struct.go` (`NewStruct`) y `internal/interpreter/calls.go` (`newObj`).
+
+**Wins chicos encontrados en el camino (cada uno, un gap real corriendo Jint/Esprima)**
+
+- [x] `ir.LoadStaticFieldAddr` (`ldsflda`) + `runtime.Type.StaticFieldAddr` + `bcl.
+      LookupStaticFieldHost`/`registerStaticFieldHost` (registro separado de `LookupValueType`,
+      ya que `System.String` necesita almacenamiento estático para `string.Empty` pero no es un
+      value type).
+- [x] `RuntimeHelpers.InitializeArray` (patrón de inicializador de array literal): `ir.
+      LoadFieldToken`, `runtime.Resolvers.ResolveFieldBytes`, lectura de campos respaldados por
+      RVA vía la tabla `FieldRVA` de metadata (`internal/metadata/fieldrva.go`, nuevo).
+- [x] Guard de profundidad de recursión al construir tipos valor (`maxValueTypeDepth = 24`) —
+      stack overflow real de Go (no del intérprete) con una cadena de campos de value type
+      auto-referencial.
+- [x] **Bug de default de enum**: un enum se representa en CIL siempre como su primitivo
+      subyacente directo en el stack, nunca como struct — pero `valueTypeDefault`/
+      `defaultValueFor` envolvían *todo* value type default (incluyendo enums) en un struct.
+      `Jint.Runtime.Debugger.StepMode` (un enum real del plugin) disparaba "switch on non-int32
+      value kind" hasta este fix.
+- [x] `isinst`/`castclass` contra un array (`is T[]`) — `resolveTypeTokenOrGeneric` no tenía caso
+      para `SigSZArray`.
+- [x] `OpRem` (`%`) para floats — CIL `rem` es `fmod` IEEE 754 (mismo signo que el dividendo,
+      distinto de `Math.IEEERemainder`); Go's `%` no aplica a floats, así que usa `math.Mod`.
+- [x] `System.Delegate::op_Equality`/`op_Inequality`, `System.Enum::HasFlag`,
+      `System.Array::Copy` (overload de 5 argumentos) — superficie de BCL mundana, cada una
+      encontrada como el siguiente bloqueo exacto al re-correr el demo.
+
+**El demo: `examples/jint-demo/`**
+
+- [x] `JintWrapper.cs`/`JintWrapper.csproj` (commiteados, `netstandard2.0`, referencia
+      `Jint@3.1.3`) + `main.go`: carga Jint vía `vm.NuGet()`/`vm.LoadPackage`, carga
+      `JintWrapper.dll` (compilado aparte con `dotnet build -c Release`) vía `vm.LoadBytes` +
+      `WithDependencies`, y llama `RunJs("1 + 2")` → `"3"` y `AddNumbers(3, 4)` → `7` — ambos a
+      través del motor Jint real, sin modificar, corriendo dentro de vmnet.
+- [x] `TestJintDemoE2E` (raíz del repo, gateada tras `VMNET_NETWORK_TESTS=1`, con skip limpio si
+      `JintWrapper.dll` no está compilado — mismo patrón que `tests/fixtures/csharp`).
+
+**Lo que se dejó explícitamente afuera**
+
+- No se re-corrió la certificación completa de los 8 targets (7 paquetes + Jint): el objetivo de
+  esta fase era el demo funcional, no mover el porcentaje agregado. Los fixes de esta fase son
+  todos correcciones de corrección real (no solo cobertura nueva), así que deberían mover el
+  número en la próxima medición, pero eso queda para una fase futura dedicada a re-medir.
+- `hasHardShapeMismatch` solo cubre la combinación `KindObject` vs. `SigValueType` — la única que
+  causó daño real observado. La combinación simétrica (`KindStruct` vs. un `SigClass` específico,
+  no `SigObject`, ya que boxear a `object` sí es válido) queda sin cubrir a propósito: menos
+  certeza de que sea siempre un mismatch real, y ningún caso real la disparó todavía.
+
+### Cómo verificar Fase 3.27
+
+```bash
+go test ./... -race -count=5
+dotnet build examples/jint-demo/JintWrapper.csproj -c Release
+VMNET_NETWORK_TESTS=1 go test ./ -run TestJintDemoE2E -v
+cd examples/jint-demo && go run .
+```
+
+---
+
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
 
 **Objetivo:** convertir el motor funcional en un producto adoptable, confiable, documentado y

@@ -44,7 +44,7 @@ func (vm *VM) LoadBytes(name string, data []byte) (*Assembly, error) {
 		name:    name,
 		file:    f,
 		md:      md,
-		methods: map[string]*runtime.Method{},
+		methods: map[uint32]*runtime.Method{},
 		types:   map[string]*runtime.Type{},
 	}, nil
 }

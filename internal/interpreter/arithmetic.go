@@ -2,6 +2,7 @@ package interpreter
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/arturoeanton/go-vmnet/internal/ir"
 	"github.com/arturoeanton/go-vmnet/internal/runtime"
@@ -119,6 +120,13 @@ func evalBinOpFloat[T float32 | float64](op ir.BinOpKind, a, b T, wrap func(T) r
 		return wrap(a * b), nil
 	case ir.OpDiv:
 		return wrap(a / b), nil
+	case ir.OpRem:
+		// CIL `rem` on floats is IEEE 754 fmod (spec §III.3.55) — same
+		// sign as the dividend, unlike Math.IEEERemainder. Go's %
+		// doesn't apply to floats, so math.Mod (float64-only) does the
+		// work; float32 round-trips through it since T is constrained to
+		// float32|float64 and math.Mod's inputs/output are float64.
+		return wrap(T(math.Mod(float64(a), float64(b)))), nil
 	case ir.OpCeq:
 		return runtime.Bool(a == b), nil
 	case ir.OpCgt:

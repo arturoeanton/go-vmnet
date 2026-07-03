@@ -130,6 +130,19 @@ func (t *Type) StaticField(idx int) Value {
 	return t.statics[idx]
 }
 
+// StaticFieldAddr returns a raw pointer to static field idx's storage
+// slot, for ldsflda (Fase 3.27) — e.g. a lazy-initialization pattern
+// passing a static field by ref (`LoadData(ref s_cachedData)`), found
+// running real third-party code (Esprima's Character.s_characterData).
+// Deliberately bypasses staticsMu: a real CLR pointer from ldsflda has
+// no built-in synchronization either — whatever the caller does with it
+// (an Interlocked.CompareExchange, a lock, or just single-threaded lazy
+// init) is on them, same as StaticField's readers/SetStaticField's
+// writers racing a raw pointer write would be regardless.
+func (t *Type) StaticFieldAddr(idx int) *Value {
+	return &t.statics[idx]
+}
+
 // SetStaticField writes static field idx.
 func (t *Type) SetStaticField(idx int, v Value) {
 	t.staticsMu.Lock()

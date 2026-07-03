@@ -32,6 +32,12 @@ go.work.sum
 tests/fixtures/csharp/bin/
 tests/fixtures/csharp/obj/
 
+# .NET build output for the examples/jint-demo wrapper (JintWrapper.cs is
+# committed source; the compiled JintWrapper.dll it produces is not — see
+# examples/jint-demo/README.md)
+examples/jint-demo/bin/
+examples/jint-demo/obj/
+
 # vmnet's own NuGet package cache (`vmnet add`/`restore`, see
 # docs/ROADMAP.md Fase 3) — downloaded .nupkg files, never committed.
 # vmnet.json/vmnet.lock.json are NOT ignored here: a real project commits

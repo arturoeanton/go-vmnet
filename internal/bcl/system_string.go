@@ -146,8 +146,18 @@ func stringLength(args []runtime.Value) (runtime.Value, error) {
 	return runtime.Int32(int32(len([]rune(args[0].Str)))), nil
 }
 
+// stringEquals handles both the 2-arg shape (instance Equals(string) or
+// static Equals(string, string)) and the 3-arg shape with a trailing
+// System.StringComparison — vmnet has no real BCL enum metadata for
+// StringComparison (a BCL-only enum, Fase 3.27), so its raw underlying
+// int32 value is checked directly against the real enum's known values:
+// CurrentCultureIgnoreCase=1/InvariantCultureIgnoreCase=3/
+// OrdinalIgnoreCase=5 (the three odd/IgnoreCase ones) mean
+// case-insensitive; anything else (including no culture support
+// anywhere else in vmnet either, see StringComparer/CultureInfo's own
+// stubs) compares ordinally.
 func stringEquals(args []runtime.Value) (runtime.Value, error) {
-	if len(args) != 2 {
+	if len(args) < 2 {
 		return runtime.Value{}, fmt.Errorf("bcl: System.String.Equals expects 2 string arguments")
 	}
 	a, b := args[0], args[1]
@@ -156,6 +166,16 @@ func stringEquals(args []runtime.Value) (runtime.Value, error) {
 	}
 	if a.Kind != runtime.KindString || b.Kind != runtime.KindString {
 		return runtime.Value{}, fmt.Errorf("bcl: System.String.Equals expects 2 string arguments")
+	}
+	ignoreCase := false
+	if len(args) >= 3 && args[2].Kind == runtime.KindI4 {
+		switch args[2].I4 {
+		case 1, 3, 5:
+			ignoreCase = true
+		}
+	}
+	if ignoreCase {
+		return runtime.Bool(strings.EqualFold(a.Str, b.Str)), nil
 	}
 	return runtime.Bool(a.Str == b.Str), nil
 }
@@ -196,11 +216,14 @@ func stringStartsWith(args []runtime.Value) (runtime.Value, error) {
 // every other index vmnet exposes over a string (Substring, get_Chars) —
 // not real UTF-16 code-unit positions, a documented simplification.
 func stringIndexOf(args []runtime.Value) (runtime.Value, error) {
-	if len(args) < 2 || args[0].Kind != runtime.KindString || args[1].Kind != runtime.KindString {
-		return runtime.Value{}, fmt.Errorf("bcl: System.String.IndexOf expects a string argument")
+	if len(args) < 2 || args[0].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.IndexOf expects a string receiver")
+	}
+	needle, ok := stringOrCharRunes(args[1])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.IndexOf: unsupported argument shape")
 	}
 	runes := []rune(args[0].Str)
-	needle := []rune(args[1].Str)
 	start := 0
 	if len(args) >= 3 && args[2].Kind == runtime.KindI4 {
 		start = int(args[2].I4)
@@ -217,17 +240,34 @@ func stringIndexOf(args []runtime.Value) (runtime.Value, error) {
 }
 
 func stringLastIndexOf(args []runtime.Value) (runtime.Value, error) {
-	if len(args) < 2 || args[0].Kind != runtime.KindString || args[1].Kind != runtime.KindString {
-		return runtime.Value{}, fmt.Errorf("bcl: System.String.LastIndexOf expects a string argument")
+	if len(args) < 2 || args[0].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.LastIndexOf expects a string receiver")
+	}
+	needle, ok := stringOrCharRunes(args[1])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.LastIndexOf: unsupported argument shape")
 	}
 	runes := []rune(args[0].Str)
-	needle := []rune(args[1].Str)
 	for i := len(runes) - len(needle); i >= 0; i-- {
 		if runesEqual(runes[i:i+len(needle)], needle) {
 			return runtime.Int32(int32(i)), nil
 		}
 	}
 	return runtime.Int32(-1), nil
+}
+
+// stringOrCharRunes accepts either overload IndexOf/LastIndexOf's second
+// argument commonly takes in real code — a full string, or a single char
+// (KindI4, e.g. `s.IndexOf(':')`, found running real Jint/Esprima).
+func stringOrCharRunes(v runtime.Value) ([]rune, bool) {
+	switch v.Kind {
+	case runtime.KindString:
+		return []rune(v.Str), true
+	case runtime.KindI4:
+		return []rune{rune(v.I4)}, true
+	default:
+		return nil, false
+	}
 }
 
 func runesEqual(a, b []rune) bool {

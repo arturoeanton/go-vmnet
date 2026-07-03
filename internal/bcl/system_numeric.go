@@ -19,6 +19,74 @@ func init() {
 	register("System.Int32::TryParse", true, int32TryParse)
 	register("System.Int32::CompareTo", true, int32CompareTo)
 	register("System.Int64::ToString", true, int64ToString)
+	register("System.Int64::Parse", true, int64Parse)
+	register("System.Int64::TryParse", true, int64TryParse)
+}
+
+func int64Parse(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 || args[0].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Int64.Parse expects a string argument")
+	}
+	n, err := strconv.ParseInt(args[0].Str, 10, 64)
+	if err != nil {
+		return runtime.Value{}, &runtime.ManagedException{TypeName: "System.FormatException", Message: fmt.Sprintf("Input string %q was not in a correct format.", args[0].Str)}
+	}
+	return runtime.Int64(n), nil
+}
+
+// int64TryParse's `out long result` arrives as a managed pointer, same
+// mechanism as Int32.TryParse — but unlike Int32.TryParse, real code
+// calling Int64.TryParse commonly uses the ReadOnlySpan<char> overload
+// (`TryParse(ReadOnlySpan<char>, out long)`, found running real Jint/
+// Esprima number-parsing code) or the NumberStyles/IFormatProvider
+// overload, not just the plain (string, out long) shape — parseTextArg/
+// lastOutRef handle any of these uniformly rather than hard-requiring
+// exactly 2 arguments.
+func int64TryParse(args []runtime.Value) (runtime.Value, error) {
+	text, ok := parseTextArg(args)
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Int64.TryParse: unsupported argument shape")
+	}
+	outRef := lastOutRef(args)
+	if outRef == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Int64.TryParse: no out parameter found")
+	}
+	n, err := strconv.ParseInt(text, 10, 64)
+	if err != nil {
+		*outRef = runtime.Int64(0)
+		return runtime.Bool(false), nil
+	}
+	*outRef = runtime.Int64(n)
+	return runtime.Bool(true), nil
+}
+
+// parseTextArg reads the "what to parse" argument any Xxx.Parse/TryParse
+// native receives as its first real argument — either a plain string or
+// a ReadOnlySpan<char> (real modern code commonly prefers the latter to
+// avoid allocating a substring first).
+func parseTextArg(args []runtime.Value) (string, bool) {
+	if len(args) == 0 {
+		return "", false
+	}
+	if args[0].Kind == runtime.KindString {
+		return args[0].Str, true
+	}
+	if args[0].Kind == runtime.KindStruct && args[0].Struct != nil {
+		return spanToStringValue(args[0].Struct)
+	}
+	return "", false
+}
+
+// lastOutRef finds a TryParse-shaped native's `out` parameter: real
+// TryParse overloads always declare it last, regardless of how many
+// NumberStyles/IFormatProvider arguments come before it.
+func lastOutRef(args []runtime.Value) *runtime.Value {
+	for i := len(args) - 1; i >= 0; i-- {
+		if args[i].Kind == runtime.KindRef && args[i].Ref != nil {
+			return args[i].Ref
+		}
+	}
+	return nil
 }
 
 func int64ToString(args []runtime.Value) (runtime.Value, error) {

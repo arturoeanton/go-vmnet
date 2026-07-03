@@ -20,7 +20,12 @@ func (asm *Assembly) machine() *interpreter.Machine {
 // payloads (e.g. an instance method or a class you don't want to model
 // argument-by-argument in Go) use CallBytes/CallJSON instead.
 func (asm *Assembly) Call(typeName, methodName string, args ...Value) (Value, error) {
-	method, err := asm.resolveMethod(typeName, methodName)
+	rtArgs := make([]runtime.Value, len(args))
+	for i, a := range args {
+		rtArgs[i] = a.toRuntime()
+	}
+
+	method, err := asm.resolveMethod(typeName, methodName, rtArgs)
 	if err != nil {
 		return nil, fmt.Errorf("vmnet: %w", err)
 	}
@@ -29,11 +34,6 @@ func (asm *Assembly) Call(typeName, methodName string, args ...Value) (Value, er
 	}
 	if len(args) != method.ParamCount {
 		return nil, fmt.Errorf("vmnet: %s.%s expects %d argument(s), got %d", typeName, methodName, method.ParamCount, len(args))
-	}
-
-	rtArgs := make([]runtime.Value, len(args))
-	for i, a := range args {
-		rtArgs[i] = a.toRuntime()
 	}
 
 	result, err := asm.machine().Invoke(method, rtArgs)
@@ -49,7 +49,7 @@ func (asm *Assembly) Call(typeName, methodName string, args ...Value) (Value, er
 // CallBytes resolves typeName.methodName as a static `byte[] X(byte[])`
 // method and invokes it with input, returning its raw result (spec §25.3).
 func (asm *Assembly) CallBytes(typeName, methodName string, input []byte) ([]byte, error) {
-	method, err := asm.resolveMethod(typeName, methodName)
+	method, err := asm.resolveMethod(typeName, methodName, []runtime.Value{runtime.Bytes(input)})
 	if err != nil {
 		return nil, fmt.Errorf("vmnet: %w", err)
 	}

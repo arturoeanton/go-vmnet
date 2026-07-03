@@ -16,6 +16,7 @@ type Machine struct {
 	ResolveType         TypeResolver
 	ResolveExplicitImpl ExplicitImplResolver
 	ResolveEnum         EnumResolver
+	ResolveFieldBytes   FieldBytesResolver
 	Limits              Limits
 
 	// cctorsRunning tracks static constructors currently executing on
@@ -71,6 +72,47 @@ func (m *Machine) Invoke(method *runtime.Method, args []runtime.Value) (result r
 func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
 	if m.Limits.MaxCallDepth > 0 && depth > m.Limits.MaxCallDepth {
 		return runtime.Value{}, ErrCallDepthExceeded
+	}
+
+	// Assembly-scoped resolution (Fase 3.27): method's own IR references
+	// names ("Namespace.Type::Method", "Namespace.Type") meaningful only
+	// against the specific Assembly whose metadata produced it — not
+	// necessarily the entry-point assembly Call() was originally invoked
+	// on. A multi-assembly dependency chain can have the SAME type name
+	// in more than one assembly (found running real Jint: both Jint.dll
+	// and Esprima.dll have their own compiler-generated
+	// `<PrivateImplementationDetails>`) — resolving against the wrong one
+	// silently returns the wrong type's static fields instead of erroring,
+	// which is worse than a crash. Swapping Machine's active resolvers to
+	// match whichever method is currently executing, for the duration of
+	// that call, keeps every nested resolution (a call target, a field's
+	// owning type, ...) scoped to the right assembly automatically — a
+	// Machine is never shared across goroutines (see call.go's
+	// asm.machine()), so this mutate-then-restore is safe with no locking.
+	if method.Resolvers != nil {
+		prevResolve, prevResolveType := m.Resolve, m.ResolveType
+		prevResolveExplicitImpl, prevResolveEnum := m.ResolveExplicitImpl, m.ResolveEnum
+		prevResolveFieldBytes := m.ResolveFieldBytes
+		if method.Resolvers.Resolve != nil {
+			m.Resolve = method.Resolvers.Resolve
+		}
+		if method.Resolvers.ResolveType != nil {
+			m.ResolveType = method.Resolvers.ResolveType
+		}
+		if method.Resolvers.ResolveExplicitImpl != nil {
+			m.ResolveExplicitImpl = method.Resolvers.ResolveExplicitImpl
+		}
+		if method.Resolvers.ResolveEnum != nil {
+			m.ResolveEnum = method.Resolvers.ResolveEnum
+		}
+		if method.Resolvers.ResolveFieldBytes != nil {
+			m.ResolveFieldBytes = method.Resolvers.ResolveFieldBytes
+		}
+		defer func() {
+			m.Resolve, m.ResolveType = prevResolve, prevResolveType
+			m.ResolveExplicitImpl, m.ResolveEnum = prevResolveExplicitImpl, prevResolveEnum
+			m.ResolveFieldBytes = prevResolveFieldBytes
+		}()
 	}
 
 	// Each call needs its own independent locals, not shared aliases into
@@ -360,6 +402,17 @@ func (m *Machine) runFrame(frame *Frame, method *runtime.Method, depth int, inst
 			}
 			frame.push(t.StaticField(idx))
 
+		case ir.LoadStaticFieldAddr:
+			t, err := m.staticType(in.TypeFullName, depth, instrCount)
+			if err != nil {
+				return runtime.Value{}, err
+			}
+			idx := t.StaticFieldIndex(in.FieldName)
+			if idx < 0 {
+				return runtime.Value{}, fmt.Errorf("interpreter: %s has no static field %q", in.TypeFullName, in.FieldName)
+			}
+			frame.push(runtime.RefTo(t.StaticFieldAddr(idx)))
+
 		case ir.StoreStaticField:
 			val := frame.pop()
 			t, err := m.staticType(in.TypeFullName, depth, instrCount)
@@ -392,7 +445,25 @@ func (m *Machine) runFrame(frame *Frame, method *runtime.Method, depth int, inst
 			if m.Limits.MaxArrayLength > 0 && int(lenVal.I4) > m.Limits.MaxArrayLength {
 				return runtime.Value{}, ErrArrayTooLarge
 			}
-			frame.push(runtime.ArrRef(runtime.NewArray(int(lenVal.I4))))
+			arr := runtime.NewArray(int(lenVal.I4))
+			// A value-type array element is never actually null in real
+			// CLR semantics — e.g. Jint's StringDictionarySlim<T> indexes
+			// straight into a `new Entry[capacity]` and reads .key off an
+			// element with no null check, because that's guaranteed safe
+			// for a real struct array. runtime.NewArray seeds every slot
+			// with a blanket Null() regardless of element type, so a
+			// struct/enum element type needs its slots reseeded with a
+			// real zero-valued default (Fase 3.27).
+			if in.TypeFullName != "" {
+				if def := m.defaultValueFor(in.TypeFullName); def.Kind != runtime.KindNull {
+					for i := range arr.Elems {
+						// Each element needs its own *Struct — def.Clone()
+						// deep-copies (Int32(0) clones to itself, harmless).
+						arr.Elems[i] = def.Clone()
+					}
+				}
+			}
+			frame.push(runtime.ArrRef(arr))
 
 		case ir.LoadLen:
 			v := frame.pop()
@@ -478,6 +549,13 @@ func (m *Machine) runFrame(frame *Frame, method *runtime.Method, depth int, inst
 
 		case ir.LoadTypeToken:
 			frame.push(bcl.NewTypeValue(in.TypeFullName))
+
+		case ir.LoadFieldToken:
+			// No real Value of its own (see LoadFieldToken's doc comment)
+			// — a plain string encoding is all RuntimeHelpers.
+			// InitializeArray (the only real consumer) needs to look the
+			// field back up via Machine.ResolveFieldBytes.
+			frame.push(runtime.String(in.TypeFullName + "::" + in.FieldName))
 
 		case ir.Leave:
 			if finallys := handlersLeaving(method, frame.IP, in.Target); len(finallys) > 0 {

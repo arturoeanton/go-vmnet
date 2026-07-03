@@ -611,3 +611,34 @@ métodos casi siempre llaman también algo del bloque grande de reflexión
 todavía pendiente, así que siguen contando como "método con hallazgos".
 Confirma con más fuerza que el único camino real hacia ~97% pasa ahora
 por `MethodInfo`/`PropertyInfo`/invocación dinámica.
+
+Fase 3.27 (resolución multi-ensamblado + demo real de
+`Jint.Engine.Evaluate()`) completa — el cambio de arquitectura más grande
+desde Fase 3. `Call()` solo invocaba métodos estáticos de un único
+ensamblado; correr Jint de verdad necesita resolver símbolos a través de
+su propia cadena de dependencias NuGet (Jint → Esprima → System.Memory →
+...). `Assembly.deps []*Assembly` + `WithDependencies`, `vm.LoadPackage`
+cargando el grafo transitivo completo automáticamente, y
+`runtime.Resolvers` (5 resolvers agrupados por `*runtime.Method`,
+intercambiados en `Machine.invoke` durante cada llamada) para que cada
+método resuelva contra el ensamblado real que lo produjo — no el punto
+de entrada original — evitando colisiones de nombre entre ensamblados
+(`<PrivateImplementationDetails>` existe por separado en `Jint.dll` y
+`Esprima.dll`). Además: resolución real de overloads por aridad + Kind +
+nombre de tipo exacto/subtipo (`pickMethodOverload`/`scoreParamMatch`,
+`assembly.go`) con un descalificador duro para combinaciones de forma
+imposibles en CIL real (`hasHardShapeMismatch`: un `KindObject` nunca
+puede ser un `SigValueType` sin una conversión visible en el IL);
+despacho virtual real que prueba el tipo concreto del receptor primero y
+sube por toda la cadena de herencia, no solo como fallback tras un "no
+resuelto"; `newarr` sembrando arrays de value type con su default real en
+vez de `Null()` ciego; y un bug de aliasing real en `newObj`/
+`runtime.NewStruct` (copiaban los defaults de campo con `copy()` —
+superficial para un default `KindStruct`, cuyo `Value.Struct` es un
+puntero compartido entre toda instancia del tipo hasta la primera
+escritura). Cada uno de estos fue encontrado ejecutando el pipeline
+completo contra los DLLs reales de Jint/Esprima, no en un fixture propio.
+Resultado: `examples/jint-demo/` corre JavaScript real de punta a punta
+(`Engine.Evaluate("1 + 2")` → `"3"`, `Engine.SetValue` + variables → `7`)
+a través del motor Jint 3.1.3 sin modificar — ver `docs/ROADMAP.md` para
+el desglose completo bug por bug.

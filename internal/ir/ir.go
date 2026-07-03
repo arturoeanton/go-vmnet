@@ -172,7 +172,14 @@ type Throw struct{}
 // NewArr pops a length and pushes a new zero-initialized array (spec
 // §11.2 newarr; only SZARRAY — single-dimensional, zero-based — is
 // modeled, matching the vast majority of real-world array usage).
-type NewArr struct{}
+// TypeFullName is the element type (empty if unresolvable, e.g. a generic
+// parameter) — needed so the interpreter can seed a value-type element
+// array with zero-valued structs/enums rather than a blanket Null(),
+// matching real CLR array semantics where a value-type array element is
+// never actually null.
+type NewArr struct {
+	TypeFullName string
+}
 
 // LoadLen pops an array reference and pushes its length (ldlen).
 type LoadLen struct{}
@@ -194,6 +201,15 @@ type LoadArgAddr struct{ Index int }
 type LoadLocalAddr struct{ Index int }
 type LoadElemAddr struct{}
 type LoadFieldAddr struct {
+	TypeFullName string
+	FieldName    string
+}
+
+// LoadStaticFieldAddr implements ldsflda (Fase 3.27) — same shape as
+// LoadFieldAddr but for a static field's shared storage on the Type
+// itself, not an instance. Runs the owning type's .cctor first, same as
+// LoadStaticField (Fase 3.5).
+type LoadStaticFieldAddr struct {
 	TypeFullName string
 	FieldName    string
 }
@@ -244,6 +260,19 @@ type CastClass struct{ TypeFullName string }
 // together behave exactly like the real two-step sequence without vmnet
 // needing an intermediate handle representation at all.
 type LoadTypeToken struct{ TypeFullName string }
+
+// LoadFieldToken implements ldtoken (spec §III.4.16) when its operand is
+// a Field token — the RuntimeHelpers.InitializeArray pattern behind an
+// array literal initializer's blob (`ldtoken <RVA-backed field>` +
+// `call RuntimeHelpers.InitializeArray(array, fldHandle)`, Fase 3.27).
+// Unlike LoadTypeToken, this doesn't produce a real Value on its own —
+// RuntimeHelpers.InitializeArray (internal/interpreter, Machine-aware:
+// it needs the owning Assembly's raw PE bytes) is the only real consumer,
+// so this just carries enough to name the field again at that call site.
+type LoadFieldToken struct {
+	TypeFullName string
+	FieldName    string
+}
 
 // LoadFtn implements ldftn/ldvirtftn (spec §III.4.19/4.20): push an
 // unbound delegate target (runtime.KindFunc) referencing FullName.

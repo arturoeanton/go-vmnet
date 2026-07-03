@@ -28,6 +28,13 @@ func init() {
 	register("System.Double::Equals", true, doubleEquals)
 	register("System.Globalization.CultureInfo::get_CurrentCulture", true, cultureInfoInvariant)
 	register("System.Globalization.CultureInfo::get_Name", true, cultureInfoName)
+	// TimeZoneInfo.Local/Utc: vmnet has no real timezone database (same
+	// "no locale/culture data anywhere" limitation as CultureInfo above)
+	// — both return the same stub object, offset-less, matching the
+	// existing UTC-identity treatment DateTime.ToUniversalTime/
+	// ToLocalTime already has (Fase 3.23).
+	register("System.TimeZoneInfo::get_Local", true, cultureInfoInvariant)
+	register("System.TimeZoneInfo::get_Utc", true, cultureInfoInvariant)
 }
 
 func cultureInfoName(args []runtime.Value) (runtime.Value, error) {

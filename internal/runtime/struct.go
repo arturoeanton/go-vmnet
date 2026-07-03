@@ -17,10 +17,23 @@ type Struct struct {
 
 // NewStruct builds a zero-valued (default(T)) instance of a value type,
 // seeding each field from t.FieldDefaults exactly like a class instance's
-// initial Fields — see internal/interpreter's InitObj handling.
+// initial Fields — see internal/interpreter's InitObj handling. Each
+// default is Clone()'d, not just copied: a plain copy() only duplicates
+// the runtime.Value struct itself, and for a KindStruct default (a
+// nested value-type field, e.g. Esprima's AdditionalDataSlot embedded in
+// every AST node) that Value's Struct field is a pointer — every
+// instance built from the same t.FieldDefaults would otherwise share the
+// exact same *Struct, so a field write through one instance leaks into
+// every other instance of the type until first overwritten. Found the
+// hard way running real Jint/Esprima (Fase 3.27): two distinct Literal
+// AST nodes ended up sharing one AdditionalDataSlot, so caching Jint's
+// compiled expression for the "1" literal made "2" spuriously read back
+// as "1" too (`1 + 2` evaluated to 2).
 func NewStruct(t *Type) *Struct {
 	fields := make([]Value, len(t.FieldDefaults))
-	copy(fields, t.FieldDefaults)
+	for i, def := range t.FieldDefaults {
+		fields[i] = def.Clone()
+	}
 	return &Struct{Type: t, Fields: fields}
 }
 

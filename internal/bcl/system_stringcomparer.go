@@ -20,6 +20,12 @@ type nativeStringComparer struct {
 }
 
 func init() {
+	// StringComparer is abstract in real .NET — its protected constructor
+	// only ever runs via base-constructor chaining from a plugin's own
+	// subclass (found running real Jint: Jint.Runtime.Interop.TypeResolver
+	// declares one, DefaultMemberNameComparer : StringComparer). A no-op,
+	// same reasoning as System.Object::.ctor/System.Exception::.ctor.
+	register("System.StringComparer::.ctor", false, objectCtorNoop)
 	register("System.StringComparer::get_Ordinal", true, stringComparerOrdinal)
 	register("System.StringComparer::get_OrdinalIgnoreCase", true, stringComparerOrdinalIgnoreCase)
 	register("System.StringComparer::get_InvariantCulture", true, stringComparerOrdinal)

@@ -61,7 +61,7 @@ func TestInvoke_MaxStackDepth(t *testing.T) {
 
 func TestInvoke_CallDepthExceeded(t *testing.T) {
 	// A method that calls itself recursively forever.
-	resolve := func(fullName string) (*runtime.Method, error) {
+	resolve := func(fullName string, args []runtime.Value) (*runtime.Method, error) {
 		return &runtime.Method{
 			FullName:  fullName,
 			HasReturn: false,
@@ -72,7 +72,7 @@ func TestInvoke_CallDepthExceeded(t *testing.T) {
 		}, nil
 	}
 
-	method, err := resolve("Broken::Recurse")
+	method, err := resolve("Broken::Recurse", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

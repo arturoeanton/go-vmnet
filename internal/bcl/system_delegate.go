@@ -7,6 +7,8 @@ import (
 func init() {
 	register("System.Delegate::Combine", true, delegateCombine)
 	register("System.Delegate::Remove", true, delegateRemove)
+	register("System.Delegate::op_Equality", true, delegateEquality)
+	register("System.Delegate::op_Inequality", true, delegateInequality)
 }
 
 // delegateFuncs flattens a runtime.Func (plus its Chain, Fase 3.24) into
@@ -73,6 +75,29 @@ func delegateRemove(args []runtime.Value) (runtime.Value, error) {
 		}
 	}
 	return funcsToValue(source), nil
+}
+
+// delegateEquality backs Delegate.op_Equality(Delegate, Delegate) —
+// real semantics: both null, or both non-null with the exact same
+// invocation list (same length, same targets in the same order), unlike
+// delegateRemove's funcsEqualRun use which only needs a matching sub-run.
+func delegateEquality(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 2 {
+		return runtime.Bool(false), nil
+	}
+	a, b := delegateFuncs(args[0]), delegateFuncs(args[1])
+	if len(a) != len(b) {
+		return runtime.Bool(false), nil
+	}
+	return runtime.Bool(funcsEqualRun(a, b)), nil
+}
+
+func delegateInequality(args []runtime.Value) (runtime.Value, error) {
+	v, err := delegateEquality(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	return runtime.Bool(!v.Truthy()), nil
 }
 
 func funcsEqualRun(a, b []*runtime.Func) bool {

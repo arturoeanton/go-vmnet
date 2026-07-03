@@ -200,6 +200,9 @@ func resolvableMethod(md *metadata.Metadata, fullName string) bool {
 	if reflectionMachineTargets[fullName] {
 		return true
 	}
+	if fullName == "System.Runtime.CompilerServices.RuntimeHelpers::InitializeArray" {
+		return true
+	}
 	return isLocalMethod(md, fullName)
 }
 

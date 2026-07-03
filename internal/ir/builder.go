@@ -339,6 +339,14 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool, ehClaus
 			}
 			out = append(out, LoadFieldAddr{TypeFullName: typeFullName, FieldName: fieldName})
 
+		case "ldsflda":
+			token := instr.Operand.(uint32)
+			typeFullName, fieldName, err := resolveFieldTarget(md, token)
+			if err != nil {
+				return nil, nil, fmt.Errorf("ir: ldsflda at IL offset %d: %w", instr.Offset, err)
+			}
+			out = append(out, LoadStaticFieldAddr{TypeFullName: typeFullName, FieldName: fieldName})
+
 		case "box", "unbox.any":
 			// vmnet's runtime.Value is already a uniform tagged union —
 			// boxing a value type doesn't need a representation change.
@@ -349,7 +357,12 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool, ehClaus
 			out = append(out, Throw{})
 
 		case "newarr":
-			out = append(out, NewArr{})
+			token := instr.Operand.(uint32)
+			typeFullName, err := resolveTypeTokenOrGeneric(md, token)
+			if err != nil {
+				return nil, nil, fmt.Errorf("ir: newarr at IL offset %d: %w", instr.Offset, err)
+			}
+			out = append(out, NewArr{TypeFullName: typeFullName})
 		case "ldlen":
 			out = append(out, LoadLen{})
 		case "ldelem.i1", "ldelem.u1", "ldelem.i2", "ldelem.u2", "ldelem.i4", "ldelem.u4",
@@ -443,13 +456,10 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool, ehClaus
 
 		case "ldtoken":
 			// ldtoken targets a type (typeof(T): TypeDef/TypeRef/TypeSpec —
-			// what this handles), a field (RuntimeFieldHandle, the
+			// LoadTypeToken), a field (RuntimeFieldHandle, the
 			// RuntimeHelpers.InitializeArray pattern behind an array
-			// literal's blob initializer), or a method (RuntimeMethodHandle,
-			// far rarer). Only the type case is supported (Fase 3.14) — the
-			// other two fall through to the same "unsupported opcode" error
-			// as before, since resolveTypeTokenOrGeneric only understands
-			// type tokens anyway.
+			// literal's blob initializer — LoadFieldToken, Fase 3.27), or a
+			// method (RuntimeMethodHandle, far rarer, still unsupported).
 			token := metadata.Token(instr.Operand.(uint32))
 			switch token.Table() {
 			case metadata.TableTypeRef, metadata.TableTypeDef:
@@ -471,6 +481,12 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool, ehClaus
 					return nil, nil, fmt.Errorf("ir: ldtoken at IL offset %d: %w", instr.Offset, err)
 				}
 				out = append(out, LoadTypeToken{TypeFullName: typeFullName})
+			case metadata.TableField:
+				typeFullName, fieldName, err := resolveFieldTarget(md, uint32(token))
+				if err != nil {
+					return nil, nil, fmt.Errorf("ir: ldtoken at IL offset %d: %w", instr.Offset, err)
+				}
+				out = append(out, LoadFieldToken{TypeFullName: typeFullName, FieldName: fieldName})
 			default:
 				return nil, nil, &UnsupportedOpcodeError{OpCode: name, Offset: instr.Offset}
 			}
@@ -867,6 +883,16 @@ func resolveTypeTokenOrGeneric(md *metadata.Metadata, token uint32) (string, err
 		return "", nil
 	case metadata.SigGenericInst, metadata.SigClass, metadata.SigValueType:
 		return resolveTypeToken(md, t.Token)
+	case metadata.SigSZArray:
+		// `isinst T[]`/`is T[]` (Fase 3.27, found running real Jint/
+		// Esprima) — vmnet's isAssignableTo (internal/interpreter/
+		// typecheck.go) already collapses every array to the single
+		// name "System.Array" regardless of element type (a documented
+		// simplification since Fase 3.5: KindArray only ever matches
+		// that literal string), so resolving here to anything more
+		// specific would just never match anyway; this keeps the two
+		// consistent.
+		return "System.Array", nil
 	default:
 		return "", fmt.Errorf("unsupported initobj/ldobj/stobj TypeSpec kind %d", t.Kind)
 	}

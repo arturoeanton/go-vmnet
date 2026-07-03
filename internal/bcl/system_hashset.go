@@ -32,6 +32,8 @@ func init() {
 	})
 	register("System.Collections.Generic.HashSet`1::Add", true, hashSetAdd)
 	register("System.Collections.Generic.HashSet`1::Contains", true, hashSetContains)
+	register("System.Collections.Generic.HashSet`1::Remove", true, hashSetRemove)
+	register("System.Collections.Generic.HashSet`1::Clear", false, hashSetClear)
 	register("System.Collections.Generic.HashSet`1::get_Count", true, hashSetCount)
 	register("System.Collections.Generic.HashSet`1::GetEnumerator", true, hashSetGetEnumerator)
 	register("System.Collections.Generic.HashSet`1+Enumerator::MoveNext", true, hashSetEnumeratorMoveNext)
@@ -82,6 +84,32 @@ func hashSetContains(args []runtime.Value) (runtime.Value, error) {
 		}
 	}
 	return runtime.Bool(false), nil
+}
+
+func hashSetRemove(args []runtime.Value) (runtime.Value, error) {
+	hs, err := asHashSet(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("bcl: HashSet.Remove expects 1 argument")
+	}
+	for i, item := range hs.items {
+		if valuesEqual(item, args[1]) {
+			hs.items = append(hs.items[:i], hs.items[i+1:]...)
+			return runtime.Bool(true), nil
+		}
+	}
+	return runtime.Bool(false), nil
+}
+
+func hashSetClear(args []runtime.Value) (runtime.Value, error) {
+	hs, err := asHashSet(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	hs.items = nil
+	return runtime.Value{}, nil
 }
 
 func hashSetCount(args []runtime.Value) (runtime.Value, error) {

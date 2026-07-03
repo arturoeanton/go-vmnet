@@ -88,3 +88,33 @@ func LookupValueTypeCtor(typeFullName string) (fn NativeValueTypeCtor, ok bool) 
 	fn, ok = valueTypeCtorRegistry[typeFullName]
 	return fn, ok
 }
+
+// staticFieldHostRegistry holds synthetic runtime.Type descriptors for
+// BCL types that need real static-field storage (ldsfld/stsfld) despite
+// NOT being value types (Fase 3.27) — found running real Jint/Esprima
+// code: `string.Empty` compiles to `ldsfld System.String::Empty`, but
+// System.String is a KindString primitive-shaped Value in vmnet (Fase
+// 1), never a KindStruct, so it can't go through valueTypeRegistry
+// (LookupValueType) the way TimeSpan.Zero did (Fase 3.23) — critically,
+// classifyTypeByName (Fase 3.25, Type.IsValueType) treats anything found
+// in valueTypeRegistry as a real value type, which System.String is not.
+// A separate, narrower registry keeps that classification correct while
+// still giving resolveTypeByFullName somewhere to find "Empty"'s slot.
+var staticFieldHostRegistry = map[string]*runtime.Type{}
+
+func registerStaticFieldHost(t *runtime.Type) {
+	fullName := t.Name
+	if t.Namespace != "" {
+		fullName = t.Namespace + "." + t.Name
+	}
+	staticFieldHostRegistry[fullName] = t
+}
+
+// LookupStaticFieldHost returns the synthetic Type descriptor for a BCL
+// type's static-field storage (ldsfld/stsfld), if any — a narrower
+// sibling of LookupValueType for reference-shaped BCL types (Fase 3.27,
+// e.g. System.String::Empty).
+func LookupStaticFieldHost(typeFullName string) (*runtime.Type, bool) {
+	t, ok := staticFieldHostRegistry[typeFullName]
+	return t, ok
+}

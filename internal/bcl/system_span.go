@@ -31,6 +31,18 @@ func init() {
 
 	register("System.MemoryExtensions::AsSpan", true, memoryExtensionsAsSpan)
 	register("System.MemoryExtensions::AsMemory", true, memoryExtensionsAsMemory)
+	// ReadOnlySpan<T>(void* pointer, int length): the "unsafe" ctor real
+	// code uses to wrap a compiler-embedded RVA data blob with zero
+	// copying (found running real Jint/Esprima: Character.s_characterData,
+	// a 32KB Unicode table literal) — the *only* ReadOnlySpan<T> ctor
+	// shape vmnet has ever needed against real IL so far, so this is
+	// deliberately narrow rather than a general pointer-arithmetic
+	// implementation vmnet has no way to support anyway (no raw memory
+	// model). "pointer" arrives as a managed pointer (KindRef) to
+	// whatever Value the RVA-backed static field itself was built as
+	// (Fase 3.27, assembly.go's rvaFieldBytes/bytesToInt32Array) — always
+	// a real KindArray in every case seen so far.
+	registerValueTypeCtor("System.ReadOnlySpan`1", readOnlySpanFromPointerCtor)
 
 	for _, prefix := range []string{"System.Span`1", "System.ReadOnlySpan`1"} {
 		register(prefix+"::get_Length", true, spanLength)
@@ -44,6 +56,29 @@ func init() {
 		register(prefix+"::get_Length", true, spanLength)
 		register(prefix+"::get_Span", true, memoryGetSpan)
 	}
+}
+
+func readOnlySpanFromPointerCtor(args []runtime.Value) (*runtime.Struct, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("bcl: ReadOnlySpan<T>(void*, int) expects 2 arguments")
+	}
+	ptr := args[0]
+	if ptr.Kind != runtime.KindRef || ptr.Ref == nil {
+		return nil, fmt.Errorf("bcl: ReadOnlySpan<T>(void*, int): first argument is not a managed pointer")
+	}
+	backing := *ptr.Ref
+	if backing.Kind != runtime.KindArray {
+		return nil, fmt.Errorf("bcl: ReadOnlySpan<T>(void*, int): unsupported backing shape (vmnet has no raw memory model beyond an RVA-backed static array)")
+	}
+	length := args[1]
+	if length.Kind != runtime.KindI4 {
+		return nil, fmt.Errorf("bcl: ReadOnlySpan<T>(void*, int): second argument is not an int32 length")
+	}
+	s := runtime.NewStruct(readOnlySpanType)
+	s.Fields[0] = backing
+	s.Fields[1] = runtime.Int32(0)
+	s.Fields[2] = length
+	return s, nil
 }
 
 // memoryExtensionsAsSpan backs every AsSpan overload — extension methods

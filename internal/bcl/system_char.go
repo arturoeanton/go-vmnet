@@ -30,11 +30,38 @@ func init() {
 	register("System.Char::ToLowerInvariant", true, charTransform(unicode.ToLower))
 }
 
+// charArg accepts both real overload shapes these predicates/transforms
+// have in the actual BCL — Char.IsWhiteSpace(char) and the (string,
+// index) sibling every one of these methods also has (e.g.
+// Char.IsWhiteSpace(string s, int index)), found running real Jint code.
+// bcl's native registry is a flat name->func map with no arity awareness
+// at all (unlike the metadata-driven overload resolution assembly.go's
+// pickMethodOverload does for a plugin's own methods, Fase 3.27) — every
+// multi-shape BCL native in this project already disambiguates by
+// inspecting args itself; this is that same pattern.
 func charArg(args []runtime.Value) (rune, error) {
-	if len(args) < 1 || args[0].Kind != runtime.KindI4 {
-		return 0, fmt.Errorf("bcl: System.Char method expects a char argument")
+	if len(args) >= 1 && args[0].Kind == runtime.KindRef && args[0].Ref != nil {
+		// `constrained.`-prefixed calls (a generic type parameter bound to
+		// char) and some real overloads (Char.IsWhiteSpace(ref
+		// ReadOnlySpan-ish shapes)) pass their char argument by managed
+		// pointer rather than by value — same deref-before-use pattern as
+		// every struct receiver elsewhere in this project.
+		deref := append([]runtime.Value{}, args...)
+		deref[0] = *args[0].Ref
+		args = deref
 	}
-	return rune(args[0].I4), nil
+	if len(args) == 1 && args[0].Kind == runtime.KindI4 {
+		return rune(args[0].I4), nil
+	}
+	if len(args) == 2 && args[0].Kind == runtime.KindString && args[1].Kind == runtime.KindI4 {
+		idx := int(args[1].I4)
+		s := args[0].Str
+		if idx < 0 || idx >= len(s) {
+			return 0, &runtime.ManagedException{TypeName: "System.ArgumentOutOfRangeException", Message: "index"}
+		}
+		return rune(s[idx]), nil
+	}
+	return 0, fmt.Errorf("bcl: System.Char method expects a char argument")
 }
 
 func charPredicate(f func(rune) bool) Native {
