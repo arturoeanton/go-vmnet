@@ -21,6 +21,13 @@ func init() {
 	// every other vmnet-produced string, e.g. StringBuilder.AppendLine,
 	// already uses).
 	register("System.Environment::get_NewLine", true, environmentNewLine)
+	// Always "not set" — vmnet has no host-environment permission model
+	// yet (Fase 4), so a sandboxed plugin doesn't get to see real host
+	// environment variables; every real caller found so far (NPOI's own
+	// IOUtils..cctor, reading a size-limit override) already handles a
+	// null/missing variable gracefully by falling back to its own
+	// built-in default.
+	register("System.Environment::GetEnvironmentVariable", true, environmentGetEnvironmentVariableNull)
 	register("System.Convert::ToInt32", true, convertToInt32)
 	register("System.Convert::ToInt64", true, convertToInt64)
 	register("System.Double::ToString", true, doubleToString)
@@ -42,6 +49,29 @@ func init() {
 	register("System.Boolean::GetHashCode", true, boolGetHashCode)
 	register("System.Convert::ToString", true, convertToString)
 	register("System.Char::ConvertFromUtf32", true, charConvertFromUtf32)
+	// System.IO.FileSystemInfo (FileInfo/DirectoryInfo's real BCL base):
+	// vmnet has no arbitrary-disk-file permissions model yet (Fase 4),
+	// and registers no FileInfo/DirectoryInfo constructor at all — these
+	// three exist only so a real package's own code that *checks*
+	// FileSystemInfo state along a path this loop's target packages
+	// never actually take (found in NPOI's own POIFS temp-file fallback
+	// machinery) doesn't hard-crash the interpreter outright; they never
+	// touch a real filesystem.
+	register("System.IO.FileSystemInfo::get_FullName", true, fileSystemInfoEmptyString)
+	register("System.IO.FileSystemInfo::get_Exists", true, fileSystemInfoFalse)
+	register("System.IO.FileSystemInfo::Delete", false, fileSystemInfoNoop)
+}
+
+func fileSystemInfoEmptyString(args []runtime.Value) (runtime.Value, error) {
+	return runtime.String(""), nil
+}
+
+func fileSystemInfoFalse(args []runtime.Value) (runtime.Value, error) {
+	return runtime.Bool(false), nil
+}
+
+func fileSystemInfoNoop(args []runtime.Value) (runtime.Value, error) {
+	return runtime.Value{}, nil
 }
 
 func doubleCompareTo(args []runtime.Value) (runtime.Value, error) {
@@ -219,6 +249,10 @@ func environmentThreadID(args []runtime.Value) (runtime.Value, error) {
 
 func environmentNewLine(args []runtime.Value) (runtime.Value, error) {
 	return runtime.String("\n"), nil
+}
+
+func environmentGetEnvironmentVariableNull(args []runtime.Value) (runtime.Value, error) {
+	return runtime.Null(), nil
 }
 
 // convertToInt32 covers the string/double/int64/bool/object-typed

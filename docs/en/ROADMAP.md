@@ -3445,6 +3445,95 @@ go test ./... -race -count=5
 /tmp/vmnet-cli check package ClosedXML@0.105.0 --profile=netstandard-lite
 ```
 
+### Fase 3.39 — `examples/npoi-demo` (work in progress): 5 real interpreter/overload bugs found building it
+
+Both packages had crossed the point of diminishing returns on checker-findings-chasing (Fase
+3.29-3.37: NPOI 91.3%→97.0%, ClosedXML 87.2%→93.9%), so this phase moved to the actual deliverable
+the whole loop was building toward: a real demo reading a real legacy `.xls`. Same methodology as
+the Jint demo (Fase 3.27/3.28) — build the real thing, fix whatever real gap breaks next, not
+guess ahead of time. A real `.xls` fixture was generated via the actual NPOI 2.8.0 package (dev-only
+`dotnet` step, `examples/npoi-demo/generate/`) and committed (`examples/npoi-demo/testdata/
+sample.xls`) — the demo itself needs no dotnet SDK at runtime, per the project's standing
+"generate once, load pure-Go forever" fixture pattern.
+
+Constructing `new HSSFWorkbook(stream)` against that real file surfaced five real, general bugs —
+not NPOI-specific workarounds, all independent of any missing BCL method:
+
+- [x] **RVA-backed field reader too narrow** (`assembly.go`'s `rvaFieldBytes`): only recognized a
+      compiler-synthesized `ClassLayout`-sized struct field backing an array literal — real
+      Roslyn output for a *short* (≤8-byte) array literal instead declares the field as a plain
+      `int`/`long`, relying on the primitive's own natural size, no `ClassLayout` row at all.
+      `NPOI.POIFS.Common.POIFSConstants.OOXML_FILE_HEADER` — a real 4-byte array literal — hit
+      this exactly. Fixed by also accepting `SigI4`/`SigU4` (size 4) and `SigI8`/`SigU8` (size 8)
+      field types, using the field's own primitive width instead of requiring `ClassLayout`.
+- [x] **Shift operators wrongly required same-Kind operands** (`internal/interpreter/
+      arithmetic.go`'s `evalBinOp`): every other binary numeric operator does need matching
+      operand widths, but ECMA-335 III.1.5 Table 2 ("Shift Operations") is the one explicit
+      exception — the shift amount is always `int32` regardless of the shifted value's own width,
+      and the compiler emits no widening `conv.i8` on it. POIFS's own block-offset arithmetic
+      shifts an `int64` by a plain `int` bit count this way. Fixed by special-casing `OpShl`/
+      `OpShr` to widen an `int32` shift amount to the shifted value's own width instead of
+      rejecting the mismatch outright.
+- [x] **Overload resolution couldn't recognize a native type's real BCL base class**
+      (`assembly.go`'s `valueIsAssignableToTypeName`): a native-backed value (no `TypeDef`, e.g.
+      `System.IO.MemoryStream`) always returned "not assignable" to anything, since there's no
+      `BaseTypeFullName` chain to walk. `NPOI.POIFS.FileSystem.POIFSFileSystem`/`NPOIFSFileSystem`
+      declare a same-arity constructor set over completely unrelated reference types
+      (`FileInfo`/`FileStream`/`Stream`) — every candidate tied at the coarse Kind-only score for
+      a `MemoryStream` argument, and the tie broke by declaration order, silently running the
+      wrong (file-based) constructor instead of the `Stream`-based one. Fixed with a new
+      `bcl.NativeBaseTypeName` — a small hand-maintained table (currently just `MemoryStream` →
+      `Stream`) mirroring `bcl.NativeTypeName`, consulted when `Obj.Type == nil`.
+- [x] **`Dictionary<K,V>` was string-keys-only** (`internal/bcl/system_collections.go`): widened to
+      also support `int32`/`int64`/object-reference keys (`nativeDict.m` now stores a `dictEntry{
+      key, value}` pair per encoded key, so `get_Keys`/enumeration hand back the real original key,
+      not vmnet's internal string encoding of it). Two real, load-bearing cases needed this just to
+      construct an `HSSFWorkbook` at all: `NPOI.SS.Formula.Eval.ErrorEval` keys a `Dictionary` by
+      `FormulaError`'s own static singleton instances — a real C# "smart enum" pattern, correctly
+      handled via Go pointer identity on the underlying `*runtime.Object` (the same semantics
+      `EqualityComparer<TKey>.Default` would give a reference type with no `Equals`/`GetHashCode`
+      override, not an approximation of it).
+- [x] **`Encoding.GetString`/`GetBytes` only accepted `CallBytes`/`CallJSON`'s `KindBytes`
+      shape** (`internal/bcl/system_text.go`), not a real interpreted `byte[]`
+      (`KindArray`) — the shape real code, including NPOI's own internal string decoding, actually
+      produces and consumes. Fixed to accept either shape on input and always return a real
+      `KindArray` on output (matching what `newarr`/every other array-producing native already
+      returns) — which in turn required generalizing `CallBytes`'s own strict `KindBytes`-only
+      output check (`call.go`) to also accept a `KindArray` result, since the `Rules.Eval` test
+      fixture's own `Encoding.GetBytes(...)` return value is exactly this shape now.
+- [x] Also along the way: `System.Random` (`internal/bcl/system_random.go`, new — a real,
+      load-bearing case: `NPOI.SS.Formula.Atp.RandBetween`'s static constructor does `new
+      Random()`/`.NextDouble()`, and merely touching NPOI's formula-function registry — not
+      anything the demo's own cells use — reaches it), `System.IO.FileSystemInfo::get_FullName`/
+      `get_Exists`/`Delete` and `System.Environment::GetEnvironmentVariable` as safe no-op/
+      "not set" stubs (POIFS's disk-backed temp-file fallback path and a size-limit override check
+      neither one is on vmnet's `MemoryStream`-only path, but both still needed *something*
+      registered to not hard-crash the interpreter outright), a new public `vmnet.ByteArray([]byte)
+      Value` (`value.go` — the public API had no way to construct a real `byte[]` argument at all,
+      needed for `New("System.IO.MemoryStream", vmnet.ByteArray(data))`), and `Value`'s own
+      `KindArray` handling on the return side (previously silently dropped to `nil`).
+
+**Still open**: `NPOI.Util.IOUtils.PeekFirstNBytes` — the file-magic-detection stream-peeking
+logic `HSSFWorkbook`'s constructor runs before anything else — currently makes
+`FileMagicContainer.ValueOf` misclassify a confirmed-well-formed real OLE2 file (`file`/`xxd`
+verify `testdata/sample.xls` starts with the correct `D0CF11E0A1B11AE1` signature) as something
+else, throwing `NotOLE2FileException`. `System.IO.MemoryStream` itself was independently verified
+correct in isolation (a direct probe: construct, write, seek, read back — exact bytes round-trip).
+`PeekFirstNBytes` is a straight port of Java's `InputStream.mark()/reset()` idiom layered through
+several of NPOI's own C# classes (`ByteArrayInputStream`/`BoundedInputStream`/
+`ByteArrayOutputStream`/`IOUtils.Copy`) — all interpreted C#, not `System.IO` native code — so the
+bug is most likely somewhere in vmnet's execution of *that* chain specifically, not yet isolated to
+one root cause. Continuing in the next phase rather than guessing further blind.
+
+### How to verify Fase 3.39
+
+```bash
+go build ./...
+go vet ./...
+go test ./... -race -count=5
+cd examples/npoi-demo && go run .   # currently still fails with NotOLE2FileException — see above
+```
+
 ---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 

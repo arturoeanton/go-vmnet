@@ -69,10 +69,26 @@ func (asm *Assembly) CallBytes(typeName, methodName string, input []byte) ([]byt
 	if !method.HasReturn {
 		return nil, nil
 	}
-	if result.Kind != runtime.KindBytes {
+	switch result.Kind {
+	case runtime.KindBytes:
+		return result.Bytes, nil
+	case runtime.KindArray:
+		// A real CIL byte[] (KindArray of KindI4 elements, each 0-255) —
+		// what interpreted code actually produces returning a genuine
+		// `byte[]` (e.g. via Encoding.GetBytes), as opposed to KindBytes
+		// (a value only ever constructed on the Go side of this exact
+		// bridge, never something interpreted code itself can produce).
+		if result.Arr == nil {
+			return nil, nil
+		}
+		out := make([]byte, len(result.Arr.Elems))
+		for i, e := range result.Arr.Elems {
+			out[i] = byte(e.I4)
+		}
+		return out, nil
+	default:
 		return nil, fmt.Errorf("vmnet: %s.%s did not return byte[]", typeName, methodName)
 	}
-	return result.Bytes, nil
 }
 
 // CallJSON is CallBytes with JSON marshaling on both sides (spec §25.4):

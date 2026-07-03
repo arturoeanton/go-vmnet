@@ -131,6 +131,7 @@ func init() {
 		"System.OverflowException",
 		"System.NotImplementedException",
 		"System.Environment::get_NewLine",
+		"System.Environment::GetEnvironmentVariable",
 		"System.Double::",
 		"System.Threading.Interlocked::CompareExchange",
 		"System.StringComparer::",
@@ -180,6 +181,8 @@ func init() {
 		"System.Xml.Linq.XName::",
 		"System.Collections.ArrayList::",
 		"System.Collections.Hashtable::",
+		"System.Random::",
+		"System.IO.FileSystemInfo::",
 	)
 	// netstandard-lite currently promises exactly the same BCL surface as
 	// rules (System.Type moved into `rules` in Fase 3.14, System.Convert

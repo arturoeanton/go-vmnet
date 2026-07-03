@@ -3478,6 +3478,109 @@ go test ./... -race -count=5
 /tmp/vmnet-cli check package ClosedXML@0.105.0 --profile=netstandard-lite
 ```
 
+### Fase 3.39 — `examples/npoi-demo` (en progreso): 5 bugs reales de intérprete/overload encontrados construyéndolo
+
+Ambos paquetes ya habían cruzado el punto de retornos decrecientes persiguiendo findings del
+checker (Fase 3.29-3.37: NPOI 91.3%→97.0%, ClosedXML 87.2%→93.9%), así que esta fase pasó al
+entregable real hacia el que apuntaba todo el loop: un demo real leyendo un `.xls` legacy real.
+Misma metodología que el demo de Jint (Fase 3.27/3.28) — construir la cosa real, arreglar
+cualquier hueco real que rompa a continuación, no adivinar de antemano. Se generó un fixture
+`.xls` real vía el paquete NPOI 2.8.0 real (paso `dotnet` solo-de-dev,
+`examples/npoi-demo/generate/`) y se commiteó (`examples/npoi-demo/testdata/sample.xls`) — el demo
+mismo no necesita el SDK de dotnet en runtime, siguiendo el patrón ya establecido del proyecto de
+"generar una vez, cargar en Go puro para siempre".
+
+Construir `new HSSFWorkbook(stream)` contra ese archivo real sacó a la luz cinco bugs reales y
+generales — no workarounds específicos de NPOI, todos independientes de cualquier método BCL
+faltante:
+
+- [x] **El lector de campos respaldados por RVA era demasiado angosto** (`rvaFieldBytes` de
+      `assembly.go`): solo reconocía un campo struct sintetizado por el compilador con
+      `ClassLayout` de tamaño fijo, respaldando un literal de array — la salida real de Roslyn para
+      un literal de array *corto* (≤8 bytes) en cambio declara el campo como un `int`/`long` plano,
+      confiando en el tamaño natural del primitivo, sin ninguna fila `ClassLayout` en absoluto.
+      `NPOI.POIFS.Common.POIFSConstants.OOXML_FILE_HEADER` — un literal de array real de 4 bytes —
+      pegó justo con esto. Arreglado aceptando también tipos de campo `SigI4`/`SigU4` (tamaño 4) y
+      `SigI8`/`SigU8` (tamaño 8), usando el ancho primitivo propio del campo en vez de requerir
+      `ClassLayout`.
+- [x] **Los operadores de shift requerían incorrectamente operandos del mismo Kind**
+      (`evalBinOp` de `internal/interpreter/arithmetic.go`): cualquier otro operador numérico
+      binario sí necesita anchos de operando coincidentes, pero ECMA-335 III.1.5 Tabla 2
+      ("Operaciones de Shift") es la única excepción explícita — la cantidad de shift siempre es
+      `int32` sin importar el ancho propio del valor desplazado, y el compilador no emite ningún
+      `conv.i8` ensanchador sobre ella. La propia aritmética de offset de bloque de POIFS desplaza
+      un `int64` por una cantidad de bits `int` plana de esta forma. Arreglado tratando
+      especialmente `OpShl`/`OpShr` para ensanchar una cantidad de shift `int32` al ancho propio
+      del valor desplazado en vez de rechazar el desajuste directamente.
+- [x] **La resolución de overloads no podía reconocer la clase base BCL real de un tipo nativo**
+      (`valueIsAssignableToTypeName` de `assembly.go`): un valor respaldado nativamente (sin
+      `TypeDef`, ej. `System.IO.MemoryStream`) siempre devolvía "no asignable" a cualquier cosa, ya
+      que no hay cadena `BaseTypeFullName` para recorrer. `NPOI.POIFS.FileSystem.POIFSFileSystem`/
+      `NPOIFSFileSystem` declaran un conjunto de constructores de misma aridad sobre tipos de
+      referencia completamente no relacionados (`FileInfo`/`FileStream`/`Stream`) — cada candidato
+      empataba en el score de solo-Kind grueso para un argumento `MemoryStream`, y el empate se
+      resolvía por orden de declaración, corriendo silenciosamente el constructor equivocado
+      (basado en archivo) en vez del basado en `Stream`. Arreglado con un nuevo
+      `bcl.NativeBaseTypeName` — una tabla chica mantenida a mano (por ahora solo `MemoryStream` →
+      `Stream`) que espeja a `bcl.NativeTypeName`, consultada cuando `Obj.Type == nil`.
+- [x] **`Dictionary<K,V>` era solo-claves-string** (`internal/bcl/system_collections.go`):
+      ampliado para también soportar claves `int32`/`int64`/referencia-a-objeto (`nativeDict.m`
+      ahora guarda un par `dictEntry{key, value}` por clave codificada, así que
+      `get_Keys`/enumeración devuelven la clave original real, no la codificación de string interna
+      de vmnet). Dos casos reales, con peso real, necesitaron esto solo para construir un
+      `HSSFWorkbook` en absoluto: `NPOI.SS.Formula.Eval.ErrorEval` clavea un `Dictionary` por las
+      propias instancias singleton estáticas de `FormulaError` — un patrón real de "enum
+      inteligente" de C#, manejado correctamente vía identidad de puntero de Go sobre el
+      `*runtime.Object` subyacente (la misma semántica que `EqualityComparer<TKey>.Default` le
+      daría a un tipo de referencia sin override de `Equals`/`GetHashCode`, no una aproximación de
+      eso).
+- [x] **`Encoding.GetString`/`GetBytes` solo aceptaban la forma `KindBytes` de
+      `CallBytes`/`CallJSON`** (`internal/bcl/system_text.go`), no un `byte[]` interpretado real
+      (`KindArray`) — la forma que el código real, incluida la propia decodificación interna de
+      strings de NPOI, realmente produce y consume. Arreglado para aceptar cualquiera de las dos
+      formas en la entrada y devolver siempre un `KindArray` real en la salida (coincidiendo con lo
+      que `newarr`/cualquier otro nativo productor de arrays ya devuelve) — lo que a su vez
+      requirió generalizar el chequeo estricto de salida solo-`KindBytes` del propio `CallBytes`
+      (`call.go`) para también aceptar un resultado `KindArray`, ya que el valor de retorno del
+      propio `Encoding.GetBytes(...)` del fixture de test `Rules.Eval` ahora tiene exactamente esta
+      forma.
+- [x] También en el camino: `System.Random` (`internal/bcl/system_random.go`, nuevo — un caso
+      real con peso real: el constructor estático de `NPOI.SS.Formula.Atp.RandBetween` hace `new
+      Random()`/`.NextDouble()`, y con solo tocar el registro de funciones de fórmula de NPOI — no
+      algo que las propias celdas del demo usen — se llega ahí), `System.IO.FileSystemInfo::
+      get_FullName`/`get_Exists`/`Delete` y `System.Environment::GetEnvironmentVariable` como
+      stubs seguros no-op/"no seteado" (el camino de fallback a archivo temporal en disco de POIFS
+      y un chequeo de override de límite de tamaño, ninguno de los dos está en el camino
+      solo-`MemoryStream` de vmnet, pero ambos igual necesitaban *algo* registrado para no hacer
+      crashear el intérprete directamente), un nuevo `vmnet.ByteArray([]byte) Value` público
+      (`value.go` — la API pública no tenía ninguna forma de construir un argumento `byte[]` real
+      en absoluto, necesario para `New("System.IO.MemoryStream", vmnet.ByteArray(data))`), y el
+      propio manejo de `KindArray` de `Value` en el lado de retorno (antes se descartaba
+      silenciosamente a `nil`).
+
+**Todavía abierto**: `NPOI.Util.IOUtils.PeekFirstNBytes` — la lógica de espiar el stream para
+detección de magic-bytes que el constructor de `HSSFWorkbook` corre antes que cualquier otra cosa —
+actualmente hace que `FileMagicContainer.ValueOf` clasifique mal un archivo OLE2 real confirmado
+como bien formado (`file`/`xxd` verifican que `testdata/sample.xls` empieza con la firma correcta
+`D0CF11E0A1B11AE1`) como otra cosa, lanzando `NotOLE2FileException`. El propio
+`System.IO.MemoryStream` fue verificado correcto de forma independiente en aislamiento (un probe
+directo: construir, escribir, hacer seek, releer — los bytes exactos hacen round-trip
+correctamente). `PeekFirstNBytes` es un port directo del idioma `InputStream.mark()/reset()` de
+Java, en capas a través de varias clases propias de NPOI en C#
+(`ByteArrayInputStream`/`BoundedInputStream`/`ByteArrayOutputStream`/`IOUtils.Copy`) — todo C#
+interpretado, no código nativo de `System.IO` — así que el bug está más probablemente en algún
+lugar de la ejecución de vmnet de *esa* cadena específicamente, todavía no aislado a una única
+causa raíz. Continúa en la próxima fase en vez de seguir adivinando a ciegas.
+
+### Cómo verificar Fase 3.39
+
+```bash
+go build ./...
+go vet ./...
+go test ./... -race -count=5
+cd examples/npoi-demo && go run .   # todavía falla con NotOLE2FileException — ver arriba
+```
+
 ---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")

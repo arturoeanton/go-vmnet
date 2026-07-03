@@ -19,6 +19,28 @@ func evalBinOp(in ir.BinOp, a, b runtime.Value) (runtime.Value, error) {
 			return runtime.Bool(refGreater(b, a)), nil
 		}
 	}
+	// Shift operations are the one binary numeric op ECMA-335 (III.1.5,
+	// Table 2 "Shift Operations") allows a genuine width mismatch for:
+	// the shift amount is always int32 regardless of the shifted
+	// value's own width, and the compiler emits no widening `conv.i8`
+	// on it — unlike every other binary numeric operator, which does
+	// require same-width operands. Found via a real case: NPOI's own
+	// POIFS block-offset arithmetic shifts an int64 by a plain int
+	// bit-count with no conversion in between.
+	if (in.Op == ir.OpShl || in.Op == ir.OpShr) && a.Kind != b.Kind && b.Kind == runtime.KindI4 {
+		switch a.Kind {
+		case runtime.KindI4:
+			if in.Unsigned {
+				return evalBinOpUint(in.Op, uint32(a.I4), uint32(b.I4), func(v uint32) runtime.Value { return runtime.Int32(int32(v)) })
+			}
+			return evalBinOpInt(in.Op, a.I4, b.I4, runtime.Int32)
+		case runtime.KindI8:
+			if in.Unsigned {
+				return evalBinOpUint(in.Op, uint64(a.I8), uint64(b.I4), func(v uint64) runtime.Value { return runtime.Int64(int64(v)) })
+			}
+			return evalBinOpInt(in.Op, a.I8, int64(b.I4), runtime.Int64)
+		}
+	}
 	if a.Kind != b.Kind {
 		return runtime.Value{}, fmt.Errorf("interpreter: binary op on mismatched value kinds (%d, %d)", a.Kind, b.Kind)
 	}

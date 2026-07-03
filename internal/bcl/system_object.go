@@ -115,6 +115,28 @@ func NativeTypeName(native any) (string, bool) {
 	}
 }
 
+// nativeBaseTypeNames maps a native-backed type's own name (NativeTypeName)
+// to its immediate real BCL base type, if any — a native type has no
+// TypeDef/BaseTypeFullName chain to walk (Fase 3.39), so overload
+// resolution's assignability check (assembly.go's
+// valueIsAssignableToTypeName) has no other way to learn e.g. "a
+// MemoryStream IS-A Stream". Found via a real bug: NPOI's own
+// POIFSFileSystem declares same-arity constructor overloads over
+// unrelated reference types (FileInfo/FileStream/Stream); without this,
+// a MemoryStream argument scored an exact tie against all of them and
+// silently ran the wrong (file-based) one, picked by declaration order.
+var nativeBaseTypeNames = map[string]string{
+	"System.IO.MemoryStream": "System.IO.Stream",
+}
+
+// NativeBaseTypeName returns typeName's immediate base type per
+// nativeBaseTypeNames, if any — chain it (repeatedly looking up the
+// result) to walk further than one level.
+func NativeBaseTypeName(typeName string) (string, bool) {
+	base, ok := nativeBaseTypeNames[typeName]
+	return base, ok
+}
+
 // objectEquals/objectGetHashCode back Object::Equals/GetHashCode — the
 // other pair of virtual methods (besides ToString) the `constrained.`
 // prefix commonly precedes on a generic type parameter or value type

@@ -13,11 +13,23 @@ type nativeList struct {
 	items []runtime.Value
 }
 
-// nativeDict backs Dictionary<TKey,TValue>. Fase 2 only supports string
-// keys (spec §17.1 lists Dictionary<string,string>/<string,object> as the
-// initial cases) — a documented, not accidental, limitation.
+// nativeDict backs Dictionary<TKey,TValue>. Keys are any of
+// string/int32/int64 (Fase 3.38 widened this from Fase 2's
+// string-only scope — found via a real, load-bearing case: NPOI's own
+// FormulaError..cctor builds a Dictionary keyed by an int error-code
+// enum, needed just to construct an HSSFWorkbook at all, not something
+// specific to reading formulas). dictEntry keeps the real, original key
+// Value alongside the map's own canonical string encoding
+// (encodeDictKey) so enumeration (get_Keys/GetEnumerator) can hand back
+// the real key — an int-keyed Dictionary's .Keys must yield ints, not
+// vmnet's internal string encoding of them.
 type nativeDict struct {
-	m map[string]runtime.Value
+	m map[string]dictEntry
+}
+
+type dictEntry struct {
+	key   runtime.Value
+	value runtime.Value
 }
 
 // keyValuePairType backs System.Collections.Generic.KeyValuePair`2 — what
@@ -73,7 +85,7 @@ func init() {
 	register("System.Collections.Generic.List`1+Enumerator::get_Current", true, listEnumeratorGetCurrent)
 
 	registerCtor("System.Collections.Generic.Dictionary`2", func([]runtime.Value) (*runtime.Object, error) {
-		return &runtime.Object{Native: &nativeDict{m: map[string]runtime.Value{}}}, nil
+		return &runtime.Object{Native: &nativeDict{m: map[string]dictEntry{}}}, nil
 	})
 	register("System.Collections.Generic.Dictionary`2::Add", false, dictAdd)
 	register("System.Collections.Generic.Dictionary`2::get_Item", true, dictGetItem)
@@ -136,7 +148,7 @@ func init() {
 	// wired up: no real IL in this loop's target packages was found
 	// enumerating a Hashtable, only indexer-style access.
 	registerCtor("System.Collections.Hashtable", func([]runtime.Value) (*runtime.Object, error) {
-		return &runtime.Object{Native: &nativeDict{m: map[string]runtime.Value{}}}, nil
+		return &runtime.Object{Native: &nativeDict{m: map[string]dictEntry{}}}, nil
 	})
 	register("System.Collections.Hashtable::get_Item", true, hashtableGetItem)
 	register("System.Collections.Hashtable::set_Item", false, dictSetItem)
@@ -189,13 +201,18 @@ func NativeListItems(native any) ([]runtime.Value, bool) {
 	return l.items, true
 }
 
-// NewDictValue wraps pairs as a real Dictionary<string,V>-shaped value
-// (string keys only — see nativeDict's doc comment) — used by LINQ's
+// NewDictValue wraps pairs (string keys, LINQ's ToDictionary own scope)
+// as a real Dictionary<string,V>-shaped value — used by LINQ's
 // ToDictionary (internal/interpreter/linq.go, Fase 3.32), which needs to
 // build a real Dictionary instance without importing bcl's own
-// unexported nativeDict type.
+// unexported nativeDict/dictEntry types.
 func NewDictValue(pairs map[string]runtime.Value) runtime.Value {
-	return runtime.ObjRef(&runtime.Object{Native: &nativeDict{m: pairs}})
+	m := make(map[string]dictEntry, len(pairs))
+	for k, v := range pairs {
+		encoded, _ := encodeDictKey(runtime.String(k)) // a string key always encodes
+		m[encoded] = dictEntry{key: runtime.String(k), value: v}
+	}
+	return runtime.ObjRef(&runtime.Object{Native: &nativeDict{m: m}})
 }
 
 // derefStructReceiver unwraps a struct instance method's receiver: it
@@ -296,10 +313,13 @@ func dictEnumeratorGetCurrent(args []runtime.Value) (runtime.Value, error) {
 	if idx < 0 || idx >= len(keys) {
 		return runtime.Value{}, fmt.Errorf("bcl: Dictionary.Enumerator.Current: index %d out of range", idx)
 	}
-	key := keys[idx].Str
+	entry, ok := d.m[keys[idx].Str]
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: Dictionary.Enumerator.Current: key no longer present (mutated during enumeration?)")
+	}
 	kv := runtime.NewStruct(keyValuePairType)
-	kv.Fields[0] = runtime.String(key)
-	kv.Fields[1] = d.m[key]
+	kv.Fields[0] = entry.key
+	kv.Fields[1] = entry.value
 	return runtime.StructVal(kv), nil
 }
 
@@ -532,11 +552,63 @@ func asDict(args []runtime.Value) (*nativeDict, error) {
 	return d, nil
 }
 
-func dictKey(args []runtime.Value, i int) (string, error) {
-	if len(args) <= i || args[i].Kind != runtime.KindString {
-		return "", fmt.Errorf("bcl: Dictionary key must be a string (Fase 2 limitation)")
+// dictKeyValue reads args[i] as a Dictionary key argument, dereferencing
+// a managed pointer if needed (a struct-shaped key, e.g. a value-type
+// enum, could in principle arrive that way — no real case found in this
+// loop, but cheap to handle uniformly with every other by-ref-tolerant
+// native).
+func dictKeyValue(args []runtime.Value, i int) (runtime.Value, error) {
+	if len(args) <= i {
+		return runtime.Value{}, fmt.Errorf("bcl: Dictionary key argument missing")
 	}
-	return args[i].Str, nil
+	v := args[i]
+	if v.Kind == runtime.KindRef && v.Ref != nil {
+		v = *v.Ref
+	}
+	return v, nil
+}
+
+// encodeDictKey turns a real key Value into nativeDict.m's internal map
+// key — string/int32/int64/object (Fase 3.38; widened from Fase 2's
+// string-only scope by two real, load-bearing cases found opening a
+// real NPOI workbook: an int-keyed and an object-keyed Dictionary, both
+// in static field initializers that run just from touching the formula
+// registry, not from anything the caller's own code does). Prefixed by
+// kind so a string key can never collide with a numeric one that
+// happens to format the same way.
+//
+// KindObject keys use Go pointer identity on the underlying
+// *runtime.Object, not a called Equals()/GetHashCode() override — real
+// Dictionary<TKey,TValue> would use EqualityComparer<TKey>.Default,
+// which for a reference type with no override IS reference equality
+// anyway, and the one real case found (NPOI.SS.Formula.Eval.ErrorEval
+// keying by NPOI.SS.UserModel.FormulaError's static singleton
+// instances — a common C# "smart enum" pattern) inserts and looks up
+// using the exact same cached object reference every time, so pointer
+// identity is the correct semantics here, not an approximation of it.
+func encodeDictKey(v runtime.Value) (string, error) {
+	switch v.Kind {
+	case runtime.KindString:
+		return "s:" + v.Str, nil
+	case runtime.KindI4:
+		return fmt.Sprintf("i:%d", v.I4), nil
+	case runtime.KindI8:
+		return fmt.Sprintf("l:%d", v.I8), nil
+	case runtime.KindObject:
+		return fmt.Sprintf("o:%p", v.Obj), nil
+	default:
+		return "", fmt.Errorf("bcl: Dictionary key kind %v is not supported", v.Kind)
+	}
+}
+
+// dictKey reads and encodes args[i] as a Dictionary key in one step —
+// what every read/write accessor below actually needs.
+func dictKey(args []runtime.Value, i int) (string, error) {
+	v, err := dictKeyValue(args, i)
+	if err != nil {
+		return "", err
+	}
+	return encodeDictKey(v)
 }
 
 func dictAdd(args []runtime.Value) (runtime.Value, error) {
@@ -544,14 +616,18 @@ func dictAdd(args []runtime.Value) (runtime.Value, error) {
 	if err != nil {
 		return runtime.Value{}, err
 	}
-	key, err := dictKey(args, 1)
+	kv, err := dictKeyValue(args, 1)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	key, err := encodeDictKey(kv)
 	if err != nil {
 		return runtime.Value{}, err
 	}
 	if _, exists := d.m[key]; exists {
 		return runtime.Value{}, fmt.Errorf("bcl: Dictionary already contains key %q", key)
 	}
-	d.m[key] = args[2]
+	d.m[key] = dictEntry{key: kv, value: args[2]}
 	return runtime.Value{}, nil
 }
 
@@ -564,11 +640,11 @@ func dictGetItem(args []runtime.Value) (runtime.Value, error) {
 	if err != nil {
 		return runtime.Value{}, err
 	}
-	v, ok := d.m[key]
+	e, ok := d.m[key]
 	if !ok {
 		return runtime.Value{}, fmt.Errorf("bcl: Dictionary has no key %q", key)
 	}
-	return v, nil
+	return e.value, nil
 }
 
 // hashtableGetItem backs Hashtable's indexer, unlike Dictionary<K,V>'s:
@@ -583,11 +659,11 @@ func hashtableGetItem(args []runtime.Value) (runtime.Value, error) {
 	if err != nil {
 		return runtime.Value{}, err
 	}
-	v, ok := d.m[key]
+	e, ok := d.m[key]
 	if !ok {
 		return runtime.Null(), nil
 	}
-	return v, nil
+	return e.value, nil
 }
 
 func dictSetItem(args []runtime.Value) (runtime.Value, error) {
@@ -595,11 +671,15 @@ func dictSetItem(args []runtime.Value) (runtime.Value, error) {
 	if err != nil {
 		return runtime.Value{}, err
 	}
-	key, err := dictKey(args, 1)
+	kv, err := dictKeyValue(args, 1)
 	if err != nil {
 		return runtime.Value{}, err
 	}
-	d.m[key] = args[2]
+	key, err := encodeDictKey(kv)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	d.m[key] = dictEntry{key: kv, value: args[2]}
 	return runtime.Value{}, nil
 }
 
@@ -633,7 +713,8 @@ func dictTryGetValue(args []runtime.Value) (runtime.Value, error) {
 	if len(args) < 3 || args[2].Kind != runtime.KindRef || args[2].Ref == nil {
 		return runtime.Value{}, fmt.Errorf("bcl: Dictionary.TryGetValue expects an out parameter")
 	}
-	v, ok := d.m[key]
+	e, ok := d.m[key]
+	v := e.value
 	if !ok {
 		v = runtime.Null()
 	}
@@ -669,8 +750,8 @@ func dictGetValues(args []runtime.Value) (runtime.Value, error) {
 		return runtime.Value{}, err
 	}
 	values := make([]runtime.Value, 0, len(d.m))
-	for _, v := range d.m {
-		values = append(values, v)
+	for _, e := range d.m {
+		values = append(values, e.value)
 	}
 	return NewListValue(values), nil
 }
@@ -681,8 +762,8 @@ func dictGetKeys(args []runtime.Value) (runtime.Value, error) {
 		return runtime.Value{}, err
 	}
 	keys := make([]runtime.Value, 0, len(d.m))
-	for k := range d.m {
-		keys = append(keys, runtime.String(k))
+	for _, e := range d.m {
+		keys = append(keys, e.key)
 	}
 	return NewListValue(keys), nil
 }

@@ -364,8 +364,30 @@ func (asm *Assembly) valueIsAssignableToTypeName(v runtime.Value, targetName str
 	if v.Kind == runtime.KindRef && v.Ref != nil {
 		v = *v.Ref
 	}
-	if v.Kind != runtime.KindObject || v.Obj == nil || v.Obj.Type == nil {
+	if v.Kind != runtime.KindObject || v.Obj == nil {
 		return false
+	}
+	if v.Obj.Type == nil {
+		// A native-backed object (no TypeDef) has no BaseTypeFullName
+		// chain to walk — fall back to bcl's own small hand-maintained
+		// native-base-type table (Fase 3.39: MemoryStream IS-A Stream).
+		// See NativeBaseTypeName's doc comment for the real bug this
+		// closes (a same-arity overload set over unrelated reference
+		// types silently picking the wrong one for a native argument).
+		name, ok := bcl.NativeTypeName(v.Obj.Native)
+		if !ok {
+			return false
+		}
+		for {
+			if name == targetName {
+				return true
+			}
+			base, ok := bcl.NativeBaseTypeName(name)
+			if !ok {
+				return false
+			}
+			name = base
+		}
 	}
 	for t := v.Obj.Type; t != nil; {
 		if qualifiedOrPlainName(t) == targetName {
@@ -1078,12 +1100,29 @@ func (asm *Assembly) rvaFieldBytes(fieldRID uint32, sig metadata.SigType) ([]byt
 	if err != nil || !ok {
 		return nil, false, err
 	}
-	if sig.Kind != metadata.SigValueType || sig.Token.Table() != metadata.TableTypeDef {
+	var size uint32
+	switch {
+	case sig.Kind == metadata.SigValueType && sig.Token.Table() == metadata.TableTypeDef:
+		// The common case for a longer array literal: a compiler-
+		// synthesized `<PrivateImplementationDetails>/__StaticArrayInit
+		// TypeSize=N` value type with an explicit [StructLayout(Size=N)],
+		// N read from the ClassLayout table.
+		size, ok, err = asm.md.ClassLayout(sig.Token.RID())
+		if err != nil || !ok {
+			return nil, false, err
+		}
+	case sig.Kind == metadata.SigI4 || sig.Kind == metadata.SigU4:
+		// A short (<=4-byte) array literal: the compiler skips the
+		// custom-struct/ClassLayout dance entirely and declares the
+		// field as a plain int — its own natural 4-byte size doubles as
+		// the blob's declared length, with no ClassLayout row needed at
+		// all (found via a real case: NPOI's own POIFSConstants.
+		// OOXML_FILE_HEADER, a 4-byte array literal).
+		size = 4
+	case sig.Kind == metadata.SigI8 || sig.Kind == metadata.SigU8:
+		size = 8
+	default:
 		return nil, false, nil
-	}
-	size, ok, err := asm.md.ClassLayout(sig.Token.RID())
-	if err != nil || !ok {
-		return nil, false, err
 	}
 	data, err := asm.file.RVA(rva)
 	if err != nil {
