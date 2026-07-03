@@ -463,3 +463,28 @@ solo (`Int32.Parse`/`TryParse` son su superficie central). Con el
 objetivo ya revisado a ~97% ("100% puede ser 97%", BCL endurecido,
 documentación al día), la secuencia de sub-fases continúa más allá de
 este cruce.
+
+Fase 3.22 (`async`/`await`, modelo síncrono) completa — el salto más
+grande de toda la secuencia 3.6-3.22. Un análisis de techo (arreglar
+TODO lo no-async) dio un techo de 89.6%/89.3% con Jint, por debajo del
+objetivo de ~97% — con async explicando la mayoría de lo que quedaba en
+`Newtonsoft.Json`/`System.Text.Json`/`SimpleBase`, se revisó la decisión
+de dejarlo permanentemente afuera. Decisión de diseño: cada `Task` que
+cualquier native produce está completado desde que se crea (vmnet no
+tiene scheduler real) — consecuencia clave: el `MoveNext()` que el
+compilador genera para cualquier `async` revisa `awaiter.IsCompleted` en
+cada `await`, y como siempre da `true` en este modelo, el branch que
+suspende nunca se toma en la práctica. Una sola llamada a `MoveNext()`
+corre el método completo de punta a punta, sin importar cuántos
+`await`s tenga. No hizo falta tocar el intérprete: el cuerpo de
+`MoveNext()` es IL común (campos, branches, un try/catch/finally real),
+ya soportado desde Fase 1/3.10 — todo el trabajo fue superficie de BCL
+(`AsyncTaskMethodBuilder`, `Task`/`TaskAwaiter`, `Task.FromResult`/
+`Run`). Los cuatro casos del fixture (awaits secuenciales, excepción
+tras un await, método void, cadena anidada) funcionaron de punta a
+punta en el primer intento contra IL real, sin ningún bug encontrado
+durante la verificación — a diferencia de casi todas las fases
+anteriores. Certificación: 85.1% a **88.1%** (85.3% a **88.0%** con
+Jint) — `SimpleBase` (+8.5) y `Newtonsoft.Json` (+6.2) confirman la
+hipótesis del análisis de techo. Con 88.0% el objetivo de ~97% todavía
+no se alcanza.

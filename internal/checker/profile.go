@@ -124,6 +124,16 @@ func init() {
 		"System.Text.RegularExpressions.GroupCollection::",
 		"System.Text.RegularExpressions.Group::",
 		"System.Text.RegularExpressions.Capture::",
+		"System.Threading.Tasks.Task::",
+		"System.Threading.Tasks.Task`1::",
+		"System.Runtime.CompilerServices.AsyncTaskMethodBuilder::",
+		"System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1::",
+		"System.Runtime.CompilerServices.TaskAwaiter::",
+		"System.Runtime.CompilerServices.TaskAwaiter`1::",
+		"System.Runtime.CompilerServices.ConfiguredTaskAwaitable::",
+		"System.Runtime.CompilerServices.ConfiguredTaskAwaitable`1::",
+		"System.Runtime.CompilerServices.ConfiguredTaskAwaitable+ConfiguredTaskAwaiter::",
+		"System.Runtime.CompilerServices.ConfiguredTaskAwaitable`1+ConfiguredTaskAwaiter::",
 	)
 	// netstandard-lite currently promises exactly the same BCL surface as
 	// rules (System.Type moved into `rules` in Fase 3.14, System.Convert

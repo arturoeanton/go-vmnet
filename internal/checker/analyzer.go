@@ -193,7 +193,24 @@ func resolvableMethod(md *metadata.Metadata, fullName string) bool {
 	if fullName == "System.Type::IsAssignableFrom" || fullName == "System.Lazy`1::get_Value" {
 		return true
 	}
+	if asyncMachineTargets[fullName] {
+		return true
+	}
 	return isLocalMethod(md, fullName)
+}
+
+// asyncMachineTargets lists the async-related methods resolved through
+// the Machine-aware registry (Fase 3.22, internal/interpreter/async.go)
+// rather than bcl.Lookup — AsyncTaskMethodBuilder.Start/
+// AwaitUnsafeOnCompleted need to invoke the compiler-generated state
+// machine's own MoveNext() method, and Task.Run needs to invoke a
+// delegate argument, neither available to a plain bcl.Native.
+var asyncMachineTargets = map[string]bool{
+	"System.Runtime.CompilerServices.AsyncTaskMethodBuilder::Start":                    true,
+	"System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1::Start":                  true,
+	"System.Runtime.CompilerServices.AsyncTaskMethodBuilder::AwaitUnsafeOnCompleted":   true,
+	"System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1::AwaitUnsafeOnCompleted": true,
+	"System.Threading.Tasks.Task::Run":                                                 true,
 }
 
 // linqTargets lists the System.Linq.Enumerable methods the interpreter

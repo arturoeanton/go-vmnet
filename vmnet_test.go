@@ -1377,3 +1377,53 @@ func TestCheapWins3(t *testing.T) {
 		})
 	}
 }
+
+// TestAsync exercises async/await (Fase 3.22): a real compiler-generated
+// state machine run synchronously to completion via
+// AsyncTaskMethodBuilder.Start — including two sequential awaits, an
+// exception thrown after an await propagating out through
+// GetAwaiter().GetResult() to a synchronous catch, a void async method,
+// and awaiting another async method's own Task (nested async chains).
+func TestAsync(t *testing.T) {
+	asm := loadFixture(t)
+
+	t.Run("two sequential awaits", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.AsyncTest", "RunSync")
+		if err != nil {
+			t.Fatalf("RunSync() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 30 {
+			t.Errorf("RunSync() = %d, want 30", got)
+		}
+	})
+
+	t.Run("exception after an await propagates to a sync catch", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.AsyncTest", "RunThrowing")
+		if err != nil {
+			t.Fatalf("RunThrowing() error = %v", err)
+		}
+		if got := out.Native().(string); got != "caught:boom" {
+			t.Errorf("RunThrowing() = %q, want %q", got, "caught:boom")
+		}
+	})
+
+	t.Run("void async method", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.AsyncTest", "RunVoid")
+		if err != nil {
+			t.Fatalf("RunVoid() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 42 {
+			t.Errorf("RunVoid() = %d, want 42", got)
+		}
+	})
+
+	t.Run("nested async call chain", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.AsyncTest", "RunNested")
+		if err != nil {
+			t.Fatalf("RunNested() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 60 {
+			t.Errorf("RunNested() = %d, want 60", got)
+		}
+	})
+}

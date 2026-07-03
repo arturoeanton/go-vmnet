@@ -2134,6 +2134,115 @@ go test ./... -race -count=3
 go test ./ -run TestCheapWins3 -v
 ```
 
+### Fase 3.22 — `async`/`await` (modelo síncrono) — el salto más grande de la secuencia
+
+Un análisis de techo corrido antes de esta fase (arreglar TODO lo no-async, dejando async
+permanentemente afuera como decía el registro de riesgos hasta ahora) dio un techo de **89.6%**
+(7 paquetes) / **89.3%** con Jint — por debajo del nuevo objetivo de ~97%. Con async
+representando la mayor parte de lo que quedaba sin cubrir en `Newtonsoft.Json`/
+`System.Text.Json`/`SimpleBase` específicamente, llegar cerca de 97% sin tocarlo era
+matemáticamente inviable. Se revisó la decisión de "fuera de alcance permanente" registrada desde
+el principio del proyecto.
+
+**Decisión de diseño — todo `Task` está completado por construcción**: vmnet no tiene scheduler
+ni thread pool real, así que en vez de intentar modelar concurrencia cooperativa genuina, cada
+`Task`/`Task<T>` que cualquier native produce (`Task.FromResult`, `AsyncTaskMethodBuilder.
+SetResult`/`SetException`, `Task.Run`) está **completado desde el momento en que se crea**. Esto
+tiene una consecuencia arquitectónica clave: el método `MoveNext()` que el compilador genera para
+cualquier `async` (una máquina de estados real, con su propia región try/catch/finally para
+enrutar excepciones) revisa `awaiter.IsCompleted` en cada `await` — y como esa propiedad siempre
+da `true` en este modelo, el branch que suspende (`AwaitUnsafeOnCompleted` + `return`) nunca se
+toma en la práctica. Una sola llamada a `MoveNext()` corre el método `async` completo de punta a
+punta, incluyendo cualquier cantidad de `await`s encadenados o anidados. **No hizo falta tocar el
+intérprete en absoluto** para el cuerpo de `MoveNext()` en sí — es IL común y corriente (campos,
+branches, un try/catch/finally real), ya soportado íntegramente desde Fase 1/3.10. Todo el trabajo
+de esta fase fue superficie de BCL.
+
+**Tareas**
+
+- [x] `AsyncTaskMethodBuilder`/`AsyncTaskMethodBuilder`1` (`internal/bcl/system_task.go`, archivo
+      nuevo) como value types sintéticos de un campo (una referencia al `Task` que están
+      construyendo, para que sobreviva a que la struct contenedora se copie): `Create` (estático),
+      `SetStateMachine` (no-op — solo importa para boxear una máquina de estados basada en struct
+      que necesite sobrevivir una suspensión real, que en este modelo nunca ocurre),
+      `SetResult`/`SetException`, `get_Task`.
+- [x] `AsyncTaskMethodBuilder::Start`/`AwaitUnsafeOnCompleted` (`internal/interpreter/async.go`,
+      archivo nuevo, generalizando el `machineRegistry` de Fase 3.15/3.16 una vez más) — necesitan
+      `Machine` para invocar el `MoveNext()` de la máquina de estados generada por el compilador
+      (tipo sin acotar, resuelto por tipo real del receptor vía `receiverTypeName`, el mismo
+      mecanismo que el despacho por interfaz de Fase 3.13 ya usa). `AwaitUnsafeOnCompleted` en la
+      práctica nunca se ejecuta (el branch que lo invoca nunca se toma, ver arriba) — se dejó como
+      fallback defensivo que igual continúa la máquina de estados en vez de fallar, por si algún
+      caso futuro sí llega a necesitarlo.
+- [x] `Task`/`Task<T>` como la misma instancia actuando también como su propio *awaiter* —
+      `TaskAwaiter`/`ConfiguredTaskAwaitable(+Awaiter)` no tienen miembros propios más allá de
+      `GetAwaiter`/`get_IsCompleted`/`GetResult`, así que asignar un wrapper separado en cada caso
+      no habría cambiado nada observable. `Task::ConfigureAwait` es la función identidad (vmnet no
+      tiene contexto de sincronización entre el cual saltar).
+- [x] `Task.FromResult<T>`, `Task.CompletedTask`, `Task.Delay` (ignora la espera real, ya
+      completado de inmediato — documentado, no una decisión escondida), `Task.Run` (invoca el
+      delegate ahora mismo de forma síncrona — necesita `Machine`, va también en
+      `internal/interpreter/async.go`; no desenvuelve un `Task` anidado si el delegate mismo es
+      async, una simplificación documentada no medida como necesaria por el probe).
+- [x] Checker: `asyncMachineTargets` (allowlist, mismo patrón que `linqTargets`/
+      `interfaceDispatchTargets`) para los targets Machine-aware; prefijos de perfil para
+      `System.Threading.Tasks.Task(`1)::`, `AsyncTaskMethodBuilder(`1)::`,
+      `TaskAwaiter(`1)::`, `ConfiguredTaskAwaitable(`1)(+ConfiguredTaskAwaiter)::`.
+
+**Fixtures y tests**
+
+- [x] `Async.cs` / `TestAsync` — dos `await`s secuenciales (`ComputeAsync`), una excepción lanzada
+      **después** de un `await` propagando correctamente a través de
+      `GetAwaiter().GetResult()` hasta un `catch` síncrono (confirma que `SetException` +
+      el re-throw de `GetResult` funcionan, no solo el camino feliz), un método `async Task` void,
+      y una cadena de `await` sobre **otro método `async`** (no solo `Task.FromResult`,
+      confirmando que las cadenas anidadas de verdad encadenan) — los cuatro casos funcionaron de
+      punta a punta en el primer intento real contra IL real, sin ningún bug encontrado durante la
+      verificación (a diferencia de casi todas las fases anteriores).
+
+### Lo que se dejó explícitamente afuera de esta fase
+
+```txt
+- Concurrencia cooperativa real: Task.Delay no espera de verdad, Task.Run no usa un thread pool
+  real (corre el delegate ya mismo, síncronamente), no hay Task.WhenAll/WhenAny reales con
+  paralelismo — todo delegado a "ya está completo", correcto para el patrón dominante real (un
+  plugin que usa async por conveniencia de API, no por I/O genuinamente concurrente) pero no un
+  modelo de concurrencia real. Documentado en el roadmap post-v1.0 como "async/Task cooperativo
+  real" si alguna vez hace falta.
+- Task.Run(Func<Task<T>>) (un delegate que él mismo devuelve un Task) no desenvuelve el resultado
+  anidado — produce un Task<Task<T>>, no el Task<T> aplanado real. No medido como necesario por
+  el probe.
+- IAsyncEnumerable<T>/await foreach — superficie distinta (enumeración asincrónica), no
+  medida con volumen en el probe.
+```
+
+### Re-certificación contra los mismos 8 targets (7 paquetes + Jint)
+
+| Paquete | % limpio Fase 3.21 | % limpio Fase 3.22 |
+|---|---|---|
+| `Ardalis.GuardClauses@5.0.0` | 93.7% | 96.8% |
+| `FluentValidation@11.9.2` | 88.3% | 91.5% |
+| `System.Text.Json@8.0.5` | 82.1% | 82.4% |
+| `Newtonsoft.Json@13.0.3` | 72.4% | **78.6%** |
+| `Semver@2.3.0` | 90.8% | 90.8% |
+| `SimpleBase@4.0.0` | 75.6% | **84.1%** |
+| `Humanizer.Core@2.14.1` | 92.6% | 92.6% |
+| **Promedio (7 paquetes)** | **85.1%** | **88.1%** |
+| `Jint@3.1.3` | 86.8% | 86.8% |
+| **Promedio (7 paquetes + Jint)** | **85.3%** | **88.0%** |
+
+**+3.0 puntos en los 7 paquetes (+2.7 con Jint) — el salto más grande de toda la secuencia
+3.6-3.22.** `SimpleBase` (+8.5) y `Newtonsoft.Json` (+6.2) confirman exactamente la hipótesis del
+análisis de techo: eran los paquetes con más superficie async real. Con 88.0% el nuevo objetivo de
+~97% todavía no se alcanza, pero el salto confirma que atacar async era la decisión correcta.
+
+### Cómo verificar Fase 3.22
+
+```bash
+go test ./... -race -count=5
+go test ./ -run TestAsync -v
+```
+
 ---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
@@ -2209,7 +2318,13 @@ securizado y es multiplataforma. Está listo para un piloto de integración real
 - v1.5 — backend híbrido (`pure-go` / `coreclr` fallback / `worker` process) — spec §39
 - `vmnet transpile` — codegen IL → Go source (migración C# → Go) — spec §38
 - Ampliación de perfil `netstandard-lite` más allá de los paquetes certificados iniciales
-- Reflection completa, async/Task cooperativo más allá de `Task.FromResult`/`CompletedTask`
+- Reflection completa (`Type.MakeGenericType`/`GetMethod`/`Assembly.GetType`, reflection de
+  atributos/parámetros)
+- async/Task **cooperativo real** (scheduler, continuaciones que genuinamente suspenden,
+  `Task.Delay` con espera real, paralelismo) — Fase 3.22 ya cubre el patrón dominante real
+  (`async`/`await` modelado íntegramente síncrono: todo `Task` que cualquier native produce ya
+  está completado por construcción, así que el propio `MoveNext()` generado por el compilador
+  corre de punta a punta en una sola llamada) sin necesitar ninguna de estas piezas
 
 ## Criterios de aceptación de referencia
 
