@@ -1993,6 +1993,75 @@ go test ./... -race -count=3
 go test ./ -run TestCollectionsExtra -v
 ```
 
+### Fase 3.20 — `System.Text.RegularExpressions`
+
+Decisión de diseño ya anotada como pendiente desde Fase 3.13: vmnet compila patrones con el motor
+RE2 de Go (`regexp`), no el motor real de .NET — los dos dialectos coinciden en la enorme mayoría
+de uso real (clases de caracteres, cuantificadores, anclas, grupos, alternancia), pero RE2 no
+tiene backreferences ni lookaround (`(?=...)`/`(?<=...)`/`(?!...)`); un patrón que los use falla
+al compilar con un error claro (`ArgumentException`), no un resultado plausible-pero-incorrecto —
+la misma disciplina de "nunca una respuesta silenciosamente equivocada" que el resto del proyecto
+ya sigue.
+
+**Tareas**
+
+- [x] `Regex` (`internal/bcl/system_regex.go`, archivo nuevo): constructor (compila el patrón vía
+      `regexp.Compile`), `IsMatch`/`Match` en sus formas estática (`Regex.IsMatch(input,
+      pattern)`) e instancia (`regex.IsMatch(input)`), distinguidas por la forma de los argumentos
+      igual que cualquier otro native multi-sobrecarga de este paquete. El match corre entero y
+      eager en el momento de `Match()` (no hay `Match` perezoso real) — misma simplificación ya
+      hecha para LINQ (Fase 3.15).
+- [x] **Bug real encontrado y arreglado — sorpresa de jerarquía real confirmada contra IL**: la
+      primera versión registró `Match::get_Success`/`Match::get_Value` directamente y nunca se
+      llamaban en absoluto. La jerarquía real es `Capture -> Group -> Match`: `Value` lo declara
+      `Capture`, `Success` lo declara `Group`, y `Match` **hereda ambos sin sobreescribirlos** —
+      así que `m.Success`/`m.Value` sobre una instancia de `Match` compilan a `callvirt
+      Group::get_Success`/`callvirt Capture::get_Value`, nunca contra `Match::` directamente.
+      Encontrado corriendo el fixture real y viendo el error "receiver is not a Group/Capture,
+      got *nativeMatchVal" — no asumido de antemano. Arreglado con un único accesor compartido
+      (`asSuccessValue`) que lee `(Success, Value)` tanto de un `*nativeGroupVal` (un grupo de
+      captura) como de un `*nativeMatchVal` (Grupo 0, el match completo), registrado una sola vez
+      bajo los nombres reales `Group::get_Success`/`Capture::get_Value`.
+- [x] `Match.Groups[i]` vía `GroupCollection::get_Item`/`get_Count` — `Groups[0]` es siempre el
+      match completo (semántica real de Grupo 0), `Groups[1:]` los grupos de captura del patrón
+      en orden. Se usa `FindStringSubmatchIndex` (pares de índices), no `FindStringSubmatch`
+      (strings planos): así se distingue un grupo opcional que no participó del match (`Success =
+      false`) de uno que capturó una cadena vacía — ambos serían `""` con la API de strings.
+      `Match.Groups` en sí no asigna un objeto `GroupCollection` separado: como sus únicos dos
+      miembros leen exactamente el mismo slice de grupos que el propio `Match` ya tiene, se
+      reusa el mismo objeto Match/Native en vez de asignar un wrapper sin diferencia observable.
+
+**Fixtures y tests**
+
+- [x] `Regex.cs` / `TestRegex` — `IsMatch` estático (match y no-match), `Match` con grupos de
+      captura (`(\w+)@(\w+)\.com`, match y no-match), `Regex` de instancia + `Match`
+
+### Re-certificación contra los mismos 8 targets (7 paquetes + Jint)
+
+| Paquete | % limpio Fase 3.19 | % limpio Fase 3.20 |
+|---|---|---|
+| `Ardalis.GuardClauses@5.0.0` | 93.3% | 93.7% |
+| `FluentValidation@11.9.2` | 87.5% | 88.1% |
+| `System.Text.Json@8.0.5` | 81.8% | 81.8% |
+| `Newtonsoft.Json@13.0.3` | 71.7% | 71.8% |
+| `Semver@2.3.0` | 84.6% | 84.9% |
+| `SimpleBase@4.0.0` | 75.6% | 75.6% |
+| `Humanizer.Core@2.14.1` | 89.9% | 90.2% |
+| **Promedio (7 paquetes)** | **83.5%** | **83.7%** |
+| `Jint@3.1.3` | 84.8% | 84.8% |
+| **Promedio (7 paquetes + Jint)** | **83.7%** | **83.9%** |
+
+Movimiento chico (+0.2/+0.2) — regex casi nunca es el único obstáculo de un método en estos
+paquetes reales (el mismo patrón visto en LINQ, Fase 3.15). Con 83.9% el criterio de cierre firme
+de 85% todavía no se alcanza; falta ~1.1-1.3 puntos.
+
+### Cómo verificar Fase 3.20
+
+```bash
+go test ./... -race -count=3
+go test ./ -run TestRegex -v
+```
+
 ---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")

@@ -430,3 +430,23 @@ registrado también como `call` plano para la asignación directa a un
 local — esta vez anticipado por el patrón ya conocido, no descubierto
 por sorpresa. Certificación: 83.3% a 83.5% (83.5% a 83.7% con Jint).
 Falta ~1.3-1.5 puntos para el 85%.
+
+Fase 3.20 (`System.Text.RegularExpressions`) completa. Compila patrones
+con el motor RE2 de Go, no el motor real de .NET — coinciden en la
+enorme mayoría de uso real, pero RE2 no tiene backreferences ni
+lookaround; un patrón que los use falla al compilar con un error claro,
+no un resultado plausible-pero-incorrecto. Bug real encontrado al correr
+el fixture: la jerarquía real es `Capture -> Group -> Match`, y `Match`
+hereda `Success`/`Value` de `Group`/`Capture` sin sobreescribirlos —
+`m.Success`/`m.Value` compilan a `callvirt Group::get_Success`/`callvirt
+Capture::get_Value`, nunca contra `Match::` directamente. La primera
+versión registró `Match::get_Success`/`get_Value` y nunca se llamaban en
+absoluto; arreglado con un único accesor compartido que lee
+`(Success, Value)` tanto de un grupo de captura como del match completo
+(Grupo 0), registrado bajo los nombres reales. `Match.Groups[i]` usa
+`FindStringSubmatchIndex` (pares de índices), no `FindStringSubmatch`
+(strings planos), para distinguir un grupo opcional que no participó
+(`Success = false`) de uno que capturó una cadena vacía. Certificación:
+83.5% a 83.7% (83.7% a 83.9% con Jint) — regex casi nunca es el único
+obstáculo de un método real, mismo patrón que LINQ. Falta ~1.1-1.3
+puntos para el 85%.

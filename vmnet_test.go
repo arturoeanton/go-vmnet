@@ -744,6 +744,61 @@ func TestCollectionsExtra(t *testing.T) {
 	}
 }
 
+// TestRegex exercises System.Text.RegularExpressions (Fase 3.20):
+// static and instance IsMatch/Match, and Match.Groups[i].Value — which
+// confirmed a real hierarchy surprise against actual IL: .Success/.Value
+// compile to Group::get_Success/Capture::get_Value even when called on a
+// Match (Capture -> Group -> Match inherits both, overrides neither).
+func TestRegex(t *testing.T) {
+	asm := loadFixture(t)
+
+	t.Run("static IsMatch", func(t *testing.T) {
+		yes, err := asm.Call("Vmnet.Fixtures.RegexTest", "IsMatchTest", String("12345"))
+		if err != nil {
+			t.Fatalf("IsMatchTest(\"12345\") error = %v", err)
+		}
+		if got := yes.Native().(int32); got == 0 {
+			t.Errorf("IsMatchTest(\"12345\") = %d, want nonzero", got)
+		}
+
+		no, err := asm.Call("Vmnet.Fixtures.RegexTest", "IsMatchTest", String("abc"))
+		if err != nil {
+			t.Fatalf("IsMatchTest(\"abc\") error = %v", err)
+		}
+		if got := no.Native().(int32); got != 0 {
+			t.Errorf("IsMatchTest(\"abc\") = %d, want 0", got)
+		}
+	})
+
+	t.Run("Match with capture groups", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.RegexTest", "MatchGroupTest", String("user@domain.com"))
+		if err != nil {
+			t.Fatalf("MatchGroupTest() error = %v", err)
+		}
+		if got := out.Native().(string); got != "user|domain" {
+			t.Errorf("MatchGroupTest() = %q, want %q", got, "user|domain")
+		}
+
+		noMatch, err := asm.Call("Vmnet.Fixtures.RegexTest", "MatchGroupTest", String("no-at-sign"))
+		if err != nil {
+			t.Fatalf("MatchGroupTest(no match) error = %v", err)
+		}
+		if got := noMatch.Native().(string); got != "no-match" {
+			t.Errorf("MatchGroupTest(no match) = %q, want %q", got, "no-match")
+		}
+	})
+
+	t.Run("instance Regex.Match", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.RegexTest", "InstanceRegexTest", String("abc123def"))
+		if err != nil {
+			t.Fatalf("InstanceRegexTest() error = %v", err)
+		}
+		if got := out.Native().(string); got != "123" {
+			t.Errorf("InstanceRegexTest() = %q, want %q", got, "123")
+		}
+	})
+}
+
 // TestLinq exercises System.Linq.Enumerable (Fase 3.15): a chained
 // Where().Select().ToList() over a List<int>, Any/All predicates,
 // FirstOrDefault, and Select/ToArray over an int[] source — the eager,

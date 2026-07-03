@@ -42,3 +42,4 @@ Output: `tests/fixtures/csharp/bin/Release/netstandard2.0/Vmnet.Fixtures.dll`
 | `Lazy.cs` | `LazyTest` | `System.Lazy<T>` (factory invoked exactly once, cached on repeat `.Value` access, `IsValueCreated`) | Fase 3.17 |
 | `CheapWins2.cs` | `CheapWins2` | `String.Contains`/`.ctor(char[])`, `Environment.NewLine`, `Convert.ToInt32`, `Double.ToString`, `List.RemoveAt`/`Insert`, `Dictionary.Clear`, `FormatException`, `Interlocked.CompareExchange`, `StringComparer.Ordinal` | Fase 3.18 |
 | `CollectionsExtra.cs` | `CollectionsExtra` | `HashSet<T>` (`Add`/`Contains`/`foreach`), `Stack<T>` (`Push`/`Pop`/`Count`), `TimeSpan` (ctor, `FromSeconds`, component properties) | Fase 3.19 |
+| `Regex.cs` | `RegexTest` | `System.Text.RegularExpressions` (`Regex.IsMatch` static/instance, `Regex.Match`, capture groups via `Match.Groups[i].Value`) | Fase 3.20 |

@@ -112,6 +112,11 @@ func init() {
 		"System.Collections.Generic.HashSet`1+Enumerator::",
 		"System.Collections.Generic.Stack`1::",
 		"System.TimeSpan::",
+		"System.Text.RegularExpressions.Regex::",
+		"System.Text.RegularExpressions.Match::",
+		"System.Text.RegularExpressions.GroupCollection::",
+		"System.Text.RegularExpressions.Group::",
+		"System.Text.RegularExpressions.Capture::",
 	)
 	// netstandard-lite currently promises exactly the same BCL surface as
 	// rules (System.Type moved into `rules` in Fase 3.14, System.Convert
