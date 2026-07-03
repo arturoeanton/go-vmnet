@@ -1,6 +1,6 @@
 // Command vmnet is the CLI for the vmnet IL/CIL runtime. Fase 1 ships
 // inspect/il/run; check/add/restore/packages land in Fase 3 (see
-// docs/ROADMAP.md).
+// docs/en/ROADMAP.md).
 package main
 
 import (

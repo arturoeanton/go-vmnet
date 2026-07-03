@@ -39,5 +39,5 @@ responsabilidades que la spec define.
   bajo nivel de spec §6.3, `ResolveMethod`/`NewFrame`/`Invoke`) se agrega
   deliberadamente al paquete raíz `vmnet`, no reexportando `internal/*`
   directamente.
-- `docs/spec.md` mantiene el layout original como referencia; esta ADR es
+- `docs/es/spec.md` mantiene el layout original como referencia; esta ADR es
   la nota de la única desviación deliberada.

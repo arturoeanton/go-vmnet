@@ -12,7 +12,7 @@ import (
 // System.Buffers, System.Numerics.Vectors,
 // System.Runtime.CompilerServices.Unsafe) — not a vmnet-specific fixture.
 // See examples/jint-demo/ for the standalone runnable version and
-// docs/ROADMAP.md, Fase 3.27, for the architecture work this needed
+// docs/en/ROADMAP.md, Fase 3.27, for the architecture work this needed
 // (multi-assembly resolution, real virtual dispatch across inheritance
 // chains, generic-method and struct-vs-class overload disambiguation).
 //

@@ -1,6 +1,6 @@
 // Command hello is the smallest possible vmnet example: load a compiled
 // C# assembly and call two of its static methods from Go. It's the Go
-// side of the Fase 1 demo (see docs/ROADMAP.md) and reuses the fixture DLL
+// side of the Fase 1 demo (see docs/en/ROADMAP.md) and reuses the fixture DLL
 // from tests/fixtures/csharp, since that's the only assembly vmnet has
 // today — real examples arrive with more of the profile in later fases.
 package main

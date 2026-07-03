@@ -12,7 +12,7 @@ import (
 // endpoint. A real NuGet client discovers this (and everything else) by
 // querying https://api.nuget.org/v3/index.json first; vmnet hardcodes it
 // instead — a deliberate v1 simplification (documented in
-// docs/ROADMAP.md) that trades private-feed/mirror support for a much
+// docs/en/ROADMAP.md) that trades private-feed/mirror support for a much
 // smaller client.
 const defaultFlatContainerBase = "https://api.nuget.org/v3-flatcontainer"
 

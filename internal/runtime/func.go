@@ -12,7 +12,7 @@ package runtime
 // target) into one of these. Detecting that shape structurally
 // (internal/interpreter/calls.go's newObj) means Action<T>/Func<T,TResult>
 // / any custom delegate all work without per-type registration — see
-// docs/ROADMAP.md Fase 3.9.
+// docs/en/ROADMAP.md Fase 3.9.
 //
 // A closure (a lambda capturing outer locals) needs no special handling
 // beyond this: the C# compiler itself lowers the capture into a

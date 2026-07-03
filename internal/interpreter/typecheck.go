@@ -198,7 +198,7 @@ var exceptionBaseType = map[string]string{
 // resolving MyException's own TypeDef and following its base chain back
 // into the hand-maintained map once it reaches a real BCL name.
 // Anything else (List/Dictionary/StringBuilder) has no interface
-// modeling yet — a documented gap (docs/ROADMAP.md Fase 3.8), not a
+// modeling yet — a documented gap (docs/en/ROADMAP.md Fase 3.8), not a
 // silent wrong answer, since it only ever returns false (isinst -> null,
 // castclass -> throws), never a false positive.
 func (m *Machine) nativeMatches(native any, target string) bool {

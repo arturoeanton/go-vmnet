@@ -2,7 +2,7 @@
 
 ## Antes de nada
 
-Lee `docs/spec.md` (qué construimos y por qué) y `docs/ROADMAP.md` (en qué
+Lee `docs/es/spec.md` (qué construimos y por qué) y `docs/es/ROADMAP.md` (en qué
 fase estamos y qué tareas quedan). Un PR que agrega algo fuera del alcance
 de la fase activa probablemente deba esperar — ver "No objetivos" en la
 spec (§3) antes de proponer soporte para reflection, async, P/Invoke, etc.
@@ -45,8 +45,8 @@ agregá primero la fixture C# correspondiente en
 
 ## Commits y PRs
 
-- Un PR por tarea de `docs/ROADMAP.md` cuando sea posible; referenciá la
+- Un PR por tarea de `docs/es/ROADMAP.md` cuando sea posible; referenciá la
   fase y el módulo en la descripción (ej. "Fase 1 · /pe: RVA→offset").
 - Agregá tests junto con el código, no en un PR aparte.
 - Si el PR introduce una decisión de arquitectura no trivial, documentala
-  como ADR en `docs/adr/`.
+  como ADR en `docs/es/adr/`.

@@ -5,9 +5,12 @@ creciente de paquetes NuGet reales — dentro de un programa Go, sin
 necesidad de tener el runtime de .NET instalado en el host.
 
 ```txt
-Estado: Fase 3.5 completa (checker + NuGet + endurecimiento). Sigue la
-Fase 4 (listo para producción: benchmarks, sandbox completo, docs
-finales). Ver docs/ROADMAP.md.
+Estado: Fase 3.28 completa (checker + NuGet + despacho virtual real +
+resolución multi-ensamblado + una API de instancias de objetos). Corre el
+motor de JavaScript Jint 3.1.3 real, sin modificar, de punta a punta —
+ver examples/jint-demo y examples/jint-nowrapper. Sigue la Fase 4 (listo
+para producción: benchmarks, sandbox completo, docs finales). Ver
+docs/es/ROADMAP.md.
 ```
 
 *[Read it in English →](README.md)*
@@ -24,29 +27,55 @@ para:
   escribe en C#)
 - Migración incremental .NET → Go, un assembly a la vez
 - Reusar paquetes NuGet "puros" ya publicados (sin P/Invoke, sin
-  reflection pesada, sin ASP.NET Core/EF Core/WPF) sin depender de CoreCLR
+  reflection pesada, sin ASP.NET Core/EF Core/WPF) sin depender de
+  CoreCLR — incluso paquetes genuinamente complejos:
+  [`examples/jint-demo`](examples/jint-demo) corre el motor de JavaScript
+  Jint real, construyendo objetos, llamando métodos virtuales a través de
+  cadenas de herencia reales, y evaluando JavaScript de verdad
 
 Antes de cargar un assembly de terceros, `vmnet check` dice exactamente
 qué métodos van a correr y cuáles no —con una razón concreta para cada
-falta— en vez de fallar a mitad de la ejecución.
+falta— en vez de fallar a mitad de la ejecución. Promediando 7 paquetes
+NuGet reales y populares más Jint, hoy ~89% de los métodos corren limpio
+bajo el perfil `netstandard-lite` de vmnet (ver
+[`docs/es/ROADMAP.md`](docs/es/ROADMAP.md) para el desglose por paquete y
+la metodología).
 
-La especificación técnica completa está en [`docs/spec.md`](docs/spec.md).
+La especificación técnica completa está en [`docs/es/spec.md`](docs/es/spec.md).
 
 ## Qué funciona hoy de verdad
 
 - **Ejecución de IL**: métodos static e instancia, aritmética (con y sin
   signo — los opcodes `.un` tienen semántica correcta y distinta),
-  branches, loops, `newobj`/`callvirt`/campos de instancia (resolución
-  directa, todavía sin vtable), `System.Array` (`SZARRAY` —
-  `newarr`/`ldelem`/`stelem`/`ldlen`), punteros administrados para
+  branches, loops/`switch`, `try`/`catch`/`finally` real, value types
+  (`initobj`/`constrained.`/`Nullable<T>`), despacho virtual real
+  (`callvirt` resuelve a través del tipo concreto real del receptor y
+  toda su cadena de herencia, no solo el tipo declarado), `isinst`/
+  `castclass` contra jerarquías reales de clases/interfaces, delegates/
+  closures (`ldftn`/`Action`/`Func`/multicast), `System.Array` (`SZARRAY`
+  — `newarr`/`ldelem`/`stelem`/`ldlen`, correctamente inicializado en
+  cero para elementos de value type), punteros administrados para
   parámetros `ref`/`out`, campos estáticos con `.cctor` perezoso, y
   `throw` no manejado propagado como error Go tipado
   (`vmnet.ManagedException`).
-- **BCL parcial**: `List<T>`, `Dictionary<string,V>`, lo básico de
-  `System.String`/`System.Math`/`System.Text.Encoding`, constructores de
-  excepciones.
+- **Construcción de objetos y llamadas de instancia desde Go**:
+  `Assembly.New` + `Instance.Call` construyen un objeto real y manejan su
+  API de instancia directamente desde Go — sin necesidad de un ensamblado
+  glue en C# compilado para el caso común (ver
+  [`examples/jint-nowrapper`](examples/jint-nowrapper)).
+- **Resolución multi-ensamblado**: `vm.LoadPackage` carga automáticamente
+  el grafo completo de dependencias transitivas de un paquete NuGet, con
+  resolución de símbolos con ámbito de ensamblado por método (sin
+  colisiones de nombres entre ensamblados).
+- **LINQ, `async`/`await`** (modelado de forma síncrona), reflection-lite
+  (introspección de `typeof`/`GetType`/`System.Type`, `Enum.GetValues`/
+  `HasFlag`), `DateTime`/`Span<T>`/`ReadOnlySpan<T>`, `System.Text.
+  RegularExpressions`, `HashSet<T>`/`Stack<T>`/`ConcurrentDictionary`, y
+  una porción amplia y en crecimiento constante de `System.String`/
+  `System.Math`/`System.Text.Encoding`/`StringBuilder`.
 - **Bridge Go↔C#**: llamar un método directamente con argumentos tipados
-  (`Assembly.Call`), o pasar/devolver `byte[]`/JSON crudo
+  (`Assembly.Call`), construir y manejar un grafo de objetos
+  (`Assembly.New`/`Instance.Call`), o pasar/devolver `byte[]`/JSON crudo
   (`CallBytes`/`CallJSON`) para formas arbitrarias.
 - **Checker de compatibilidad**: `vmnet check <dll>` reutiliza el pipeline
   de ejecución *real* para reportar, método por método, qué corre y qué no
@@ -61,11 +90,12 @@ La especificación técnica completa está en [`docs/spec.md`](docs/spec.md).
   código interpretado se recupera en el borde de la API — un plugin roto
   o adversarial no puede tirar abajo el proceso host.
 
-Ver [`docs/ROADMAP.md`](docs/ROADMAP.md) para el historial completo fase
-por fase — incluidos dos bugs de correctitud reales (comparación con/sin
-signo, un deadlock de reentrancia en un `.cctor`) y un par de bugs de
-"drift" en el checker que se encontraron y arreglaron en el camino, no se
-escondieron.
+Ver [`docs/es/ROADMAP.md`](docs/es/ROADMAP.md) para el historial completo fase
+por fase — incluido cada bug de correctitud real encontrado y arreglado en
+el camino (comparación con/sin signo, un deadlock de reentrancia en un
+`.cctor`, un bug de aliasing en el default de un campo struct que hacía
+que `1 + 2` evaluara a `2` dentro de Jint real, y más), nada escondido
+bajo la alfombra.
 
 ## Empezar rápido
 
@@ -104,6 +134,17 @@ func main() {
 el plugin, nunca una dependencia en tiempo de ejecución del programa Go
 que lo carga.
 
+Para una API orientada a objetos (construir una instancia, llamar sus
+métodos, usar lo que devuelven), `Assembly.New`/`Instance.Call` funcionan
+igual sin necesidad de ningún wrapper de método estático:
+
+```go
+engine, _ := jintAsm.New("Jint.Engine")
+result, _ := engine.Call("Evaluate", vmnet.String("1 + 2"), vmnet.String(""))
+str, _ := result.(*vmnet.Instance).Call("ToString")
+fmt.Println(str.Native()) // "3"
+```
+
 Ejemplos corribles y documentados en [`examples/`](examples/):
 
 | Ejemplo | Muestra |
@@ -111,6 +152,8 @@ Ejemplos corribles y documentados en [`examples/`](examples/):
 | [`examples/hello`](examples/hello) | El `LoadFile` + `Call` más simple posible |
 | [`examples/rules`](examples/rules) | Objetos, `List`/`Dictionary`, bridge JSON, excepciones managed, el sandbox de instrucciones frenando un plugin descontrolado |
 | [`examples/nuget-basic`](examples/nuget-basic) | Agregar y restaurar un paquete NuGet real publicado, y llamar una función real de ese paquete |
+| [`examples/jint-demo`](examples/jint-demo) | Ejecución de JavaScript real vía el paquete NuGet Jint real + toda su cadena de dependencias, manejado a través de un pequeño wrapper compilado en C# |
+| [`examples/jint-nowrapper`](examples/jint-nowrapper) | El mismo demo de Jint sin ningún wrapper de C# — `Assembly.New`/`Instance.Call` manejando `Jint.Engine` directamente desde Go |
 
 ## CLI
 
@@ -133,9 +176,9 @@ vmnet packages
 
 La API pública y el CLI viven en la raíz del repo; todo lo demás es
 detalle de implementación bajo `internal/`. Ver
-[`docs/architecture.md`](docs/architecture.md) para el pipeline completo,
+[`docs/es/architecture.md`](docs/es/architecture.md) para el pipeline completo,
 el layout de paquetes, y notas del estado actual, y
-[`docs/adr/`](docs/adr) para las decisiones de diseño ya tomadas (por qué
+[`docs/es/adr/`](docs/es/adr) para las decisiones de diseño ya tomadas (por qué
 Go puro, por qué el layout de paquetes se desvía de la spec original,
 ...).
 

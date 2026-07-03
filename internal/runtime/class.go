@@ -12,7 +12,7 @@ import "sync"
 // Static fields (Fase 3.5) live on the Type itself rather than on any one
 // Object, since unlike instance fields they're genuinely shared, mutable
 // state across every caller — including concurrent goroutines calling the
-// same *Assembly (see docs/ROADMAP.md Fase 2.5). statics is guarded by
+// same *Assembly (see docs/en/ROADMAP.md Fase 2.5). statics is guarded by
 // staticsMu; cctorOnce ensures the type initializer runs exactly once
 // however many goroutines race to trigger it.
 type Type struct {

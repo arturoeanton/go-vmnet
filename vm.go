@@ -11,8 +11,8 @@ import (
 )
 
 // VM is the vmnet entry point: it loads assemblies and runs methods from
-// them. See docs/spec.md §6. Fase 1 has no configurable options yet
-// (profiles, limits, permissions land in Fase 2-4 — see docs/ROADMAP.md).
+// them. See docs/en/spec.md §6. Fase 1 has no configurable options yet
+// (profiles, limits, permissions land in Fase 2-4 — see docs/en/ROADMAP.md).
 type VM struct{}
 
 // New creates a VM.

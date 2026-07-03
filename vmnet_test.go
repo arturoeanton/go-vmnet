@@ -24,7 +24,7 @@ func loadFixture(t *testing.T) *Assembly {
 	return asm
 }
 
-// TestFase1Demo exercises exactly the three methods docs/ROADMAP.md's
+// TestFase1Demo exercises exactly the three methods docs/en/ROADMAP.md's
 // Fase 1 demo script calls out: SimpleMath.Add, Strings.Hello, Loops.Sum.
 func TestFase1Demo(t *testing.T) {
 	asm := loadFixture(t)
@@ -76,7 +76,7 @@ func TestCall_UnknownMethod(t *testing.T) {
 	}
 }
 
-// TestFase2Demo exercises exactly what docs/ROADMAP.md's Fase 2 demo
+// TestFase2Demo exercises exactly what docs/en/ROADMAP.md's Fase 2 demo
 // script calls out: a realistic Rules.Eval (objects, callvirt property
 // accessors, List<T>, Dictionary<string,V>) driven through the JSON
 // bridge, a managed exception surfacing as a clean Go error, and a
@@ -219,7 +219,7 @@ func TestArrays(t *testing.T) {
 // TestByRef exercises the managed-pointer support added in Fase 3.5
 // (ldarga.s/ldloca.s/ldind.i4/stind.i4) via `out`/`ref` parameters — the
 // single largest real-world blocker found during Fase 3 certification
-// (docs/ROADMAP.md).
+// (docs/en/ROADMAP.md).
 func TestByRef(t *testing.T) {
 	asm := loadFixture(t)
 

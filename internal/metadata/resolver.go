@@ -6,7 +6,7 @@ import (
 )
 
 // Typed row accessors for the Fase 1 core table subset (spec §10.2,
-// docs/ROADMAP.md). Every other table still parses (tables.go) but is only
+// docs/en/ROADMAP.md). Every other table still parses (tables.go) but is only
 // reachable through the untyped Table API for now.
 
 type ModuleRow struct {

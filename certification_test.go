@@ -12,7 +12,7 @@ import (
 // third-party .NET code, not just its own test fixtures (spec §36).
 //
 // It hits the network, so it's opt-in: set VMNET_NETWORK_TESTS=1. See
-// docs/ROADMAP.md Fase 3 for the full certification methodology (which
+// docs/en/ROADMAP.md Fase 3 for the full certification methodology (which
 // packages were tried, what `vmnet check package` said about each, and
 // why these three specific functions were picked).
 func TestCertifiedNuGetPackages(t *testing.T) {
@@ -53,7 +53,7 @@ func TestCertifiedNuGetPackages(t *testing.T) {
 			// ' ' (0x20) regression-tests the signed/unsigned comparison
 			// fix: '0'-48 underflows to a huge value under ble.un, and this
 			// exact call site is what first caught the bug (see
-			// docs/ROADMAP.md Fase 3).
+			// docs/en/ROADMAP.md Fase 3).
 			{' ', false},
 		}
 		for _, tt := range tests {

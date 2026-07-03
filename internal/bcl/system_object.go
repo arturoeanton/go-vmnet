@@ -223,7 +223,7 @@ func valueHash(v runtime.Value) int32 {
 // hashPointer gives a stable, if not identity-strong, hash for a
 // reference-typed Value backed by a Go pointer, without resorting to the
 // unsafe package (out of step with vmnet's pure-Go, no-tricks philosophy —
-// see docs/adr/0001-pure-go-core.md) to read the pointer bits directly.
+// see docs/en/adr/0001-pure-go-core.md) to read the pointer bits directly.
 func hashPointer(p any) int32 {
 	h := fnv.New32a()
 	fmt.Fprintf(h, "%p", p)

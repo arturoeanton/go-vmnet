@@ -26,7 +26,7 @@ existir como backend *opcional* futuro (`vmnet.BackendCoreCLR`, ver spec
   que el intérprete soporta. Esto se comunica explícitamente (spec §3.3,
   §33.3) y se hace verificable con `vmnet check` (Fase 3).
 - El mayor riesgo del proyecto pasa a ser la BCL (`System.*`), no el hosting
-  de runtime — ver registro de riesgos en `docs/ROADMAP.md`.
+  de runtime — ver registro de riesgos en `docs/es/ROADMAP.md`.
 - CI puede validarse en Linux/macOS/Windows sin instalar el SDK de .NET en
   los runners que construyen `vmnet` (el SDK de .NET solo hace falta para
   generar los DLL de fixtures de test, un paso de desarrollo aparte).

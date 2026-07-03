@@ -1,7 +1,7 @@
 // Command nuget-basic is the Fase 3 NuGet demo: add a real, published
 // package as a dependency, restore it (downloading + resolving from
 // nuget.org for real), and call one of its functions from Go. See
-// docs/ROADMAP.md, "Demo de cierre de Fase 3", and docs/ROADMAP.md's
+// docs/en/ROADMAP.md, "Demo de cierre de Fase 3", and docs/en/ROADMAP.md's
 // certification section for why SimpleBase was picked (small, zero
 // dependencies, and known to fully execute under vmnet's current
 // profile).

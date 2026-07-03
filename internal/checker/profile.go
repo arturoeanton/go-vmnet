@@ -2,7 +2,7 @@
 // compatibility profile (minimal, rules, netstandard-lite) and reports
 // which opcodes, BCL calls, generics, reflection or async usages are
 // unsupported, with actionable reasons instead of a raw crash. See
-// docs/ROADMAP.md, Fase 3, module "/checker".
+// docs/en/ROADMAP.md, Fase 3, module "/checker".
 package checker
 
 import "github.com/arturoeanton/go-vmnet/internal/ir"

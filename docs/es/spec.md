@@ -1,9 +1,9 @@
 <!--
   Especificación técnica original de vmnet/gocil, tal como fue provista para
   arrancar el proyecto (2026-07-02). Es la referencia canónica que
-  docs/ROADMAP.md cita como "spec §N". Las decisiones que se apartan de este
+  docs/es/ROADMAP.md cita como "spec §N". Las decisiones que se apartan de este
   documento (p. ej. layout de paquetes con /internal) están documentadas por
-  separado en docs/adr/.
+  separado en docs/es/adr/.
 -->
 
 # Especificación técnica — `vmnet` / `gocil`
@@ -478,7 +478,7 @@ Estructura de carpetas recomendada:
   golden
 ```
 
-> **Nota de implementación (ver `docs/adr/0002-package-layout.md`):** el repo
+> **Nota de implementación (ver `docs/es/adr/0002-package-layout.md`):** el repo
 > implementa esta misma separación de responsabilidades, pero pone `/vmnet`
 > en la raíz del módulo (paquete público `vmnet`, `import "github.com/arturoeanton/go-vmnet"`)
 > y mueve `/pe /metadata /il /ir /interpreter /runtime /bcl /nuget /checker`
@@ -1965,7 +1965,7 @@ Avoid reflection invoke or enable coreclr fallback.
 
 > El roadmap original (v0.1 → v1.5, incremental por versión) fue reorganizado
 > en 4 fases con demo de cierre para conseguir aprobación por etapas — ver
-> `docs/ROADMAP.md`. El mapeo es: v0.1 → Fase 1; v0.2+v0.3 → Fase 2;
+> `docs/es/ROADMAP.md`. El mapeo es: v0.1 → Fase 1; v0.2+v0.3 → Fase 2;
 > v0.4+v0.5+v0.6 → Fase 3; v1.0 → Fase 4; v1.5 queda fuera de las 4 fases
 > como roadmap posterior. El contenido de cada versión se conserva abajo
 > como referencia de alcance.

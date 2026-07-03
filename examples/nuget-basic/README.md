@@ -4,7 +4,7 @@ Adds a real, published NuGet package (`SimpleBase@4.0.0`, zero
 dependencies of its own) as a dependency, restores it for real from
 nuget.org (resolving its own transitive dependencies too), and calls one
 of its functions from Go via `vm.LoadPackage`. This is the Fase 3 demo —
-see `docs/ROADMAP.md`.
+see `docs/en/ROADMAP.md`.
 
 Needs network access to nuget.org.
 
@@ -27,5 +27,5 @@ SimpleBase.Base32.getAllocationByteCountForDecoding(1000) = 625
 
 Running it writes `vmnet.json`, `vmnet.lock.json` and `.vmnet/packages/`
 (the package cache) into this directory — the first two are meant to be
-committed in a real project (see `docs/ROADMAP.md`), the cache is not
+committed in a real project (see `docs/en/ROADMAP.md`), the cache is not
 (`.gitignore`).

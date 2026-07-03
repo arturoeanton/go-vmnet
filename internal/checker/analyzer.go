@@ -430,7 +430,7 @@ func suggestionFor(opcode string) string {
 	case "filter (catch-when)":
 		return "exception filter clauses (catch (T) when (cond)) are not supported yet — catch (T) without the filter is"
 	default:
-		return "not yet implemented — see docs/ROADMAP.md"
+		return "not yet implemented — see docs/en/ROADMAP.md"
 	}
 }
 

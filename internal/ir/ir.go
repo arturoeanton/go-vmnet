@@ -2,7 +2,7 @@
 // that lowers decoded IL (internal/il) into it. The IR exists so the
 // interpreter, the compatibility checker and any future codegen backend
 // work against one simplified, validated instruction set instead of raw
-// CIL. See docs/ROADMAP.md, Fase 1, module "/ir".
+// CIL. See docs/en/ROADMAP.md, Fase 1, module "/ir".
 package ir
 
 // Instr is one IR instruction. Concrete types below are the Fase 1+2
@@ -116,7 +116,7 @@ type BranchCompare struct {
 // Call invokes either a BCL native (internal/bcl) or another method in the
 // same assembly, resolved to FullName at IR-build time. Virtual marks a
 // callvirt: the interpreter null-checks the receiver before dispatching.
-// Fase 2 resolves callvirt directly (no vtable) — see docs/ROADMAP.md.
+// Fase 2 resolves callvirt directly (no vtable) — see docs/en/ROADMAP.md.
 type Call struct {
 	FullName  string
 	ArgCount  int // explicit IL args, not counting an implicit `this`
@@ -166,7 +166,7 @@ type StoreStaticField struct {
 
 // Throw pops the top of stack (an exception object) and aborts execution
 // with it. Fase 2 only supports unhandled throw — try/catch/finally are
-// deferred (docs/ROADMAP.md).
+// deferred (docs/en/ROADMAP.md).
 type Throw struct{}
 
 // NewArr pops a length and pushes a new zero-initialized array (spec
@@ -233,7 +233,7 @@ type StoreIndirect struct{}
 // there's no way to know the real T — the interpreter falls back to
 // KindNull, which is only wrong if T is later bound to a value type, a
 // narrower gap than getting it right would be worth the complexity of
-// tracking generic instantiations (docs/ROADMAP.md Fase 3.7).
+// tracking generic instantiations (docs/en/ROADMAP.md Fase 3.7).
 type InitObj struct{ TypeFullName string }
 
 // IsInst/CastClass implement isinst/castclass (spec §III.4.6/4.6): pop an

@@ -1,6 +1,6 @@
 # Arquitectura
 
-Ver `docs/spec.md` (especificación completa) y `docs/ROADMAP.md` (plan de
+Ver `docs/es/spec.md` (especificación completa) y `docs/es/ROADMAP.md` (plan de
 entrega en 4 fases). Este documento es el mapa rápido de "qué vive dónde" en
 el repo tal como está implementado hoy — se amplía a medida que cada fase
 agrega comportamiento real.
@@ -43,11 +43,11 @@ segundo analiza metadata/IR antes de ejecutar para reportar compatibilidad
 ```
 
 Por qué `/internal` en vez del layout plano de la spec: ver
-`docs/adr/0002-package-layout.md`.
+`docs/es/adr/0002-package-layout.md`.
 
 ## Por qué pure-Go (sin CoreCLR en el núcleo)
 
-Ver `docs/adr/0001-pure-go-core.md`.
+Ver `docs/es/adr/0001-pure-go-core.md`.
 
 ## Estado actual
 
@@ -63,7 +63,7 @@ directa), `List<T>` / `Dictionary<string,V>` con backing nativo Go,
 `throw` no manejado (propagado como error Go tipado,
 `vmnet.ManagedException`), y el bridge `byte[]`/JSON. Interface/vtable
 dispatch, `try/catch/finally`, generics más allá de List/Dictionary, y
-`DateTime`/`Guid` quedan para fases siguientes (`docs/ROADMAP.md`) — el IR
+`DateTime`/`Guid` quedan para fases siguientes (`docs/es/ROADMAP.md`) — el IR
 builder reporta cualquier opcode no soportado explícitamente en vez de
 ejecutarlo mal. (`System.Array` se agregó en Fase 3.5 — ver más abajo.)
 
@@ -83,7 +83,7 @@ assembly es `compatible`/`partial`/`unsupported` por perfil
 transitivas contra `api.nuget.org` (highest-version-wins, documentado como
 simplificación), cachea en `.vmnet/packages/` y expone
 `vm.NuGet().Add/Restore/Packages()` + `vm.LoadPackage(id)`. Certificado
-contra 7 paquetes NuGet reales y populares (ver `docs/ROADMAP.md` para la
+contra 7 paquetes NuGet reales y populares (ver `docs/es/ROADMAP.md` para la
 tabla completa); 3 de ellos tienen una función real ejecutando
 correctamente a través de vmnet. El proceso de certificación encontró y
 corrigió dos gaps reales: resolución de `MethodSpec` (llamadas a métodos
@@ -98,7 +98,7 @@ modelados como un `*runtime.Value` de Go apuntando dentro de un slice de
 tamaño fijo, sin ningún caso especial en `Call`/`NewObj`) y campos
 estáticos con `.cctor` perezoso (`ldsfld`/`stsfld`, `sync.Once` por
 `Type`). Re-certificado contra los mismos 7 paquetes de Fase 3: el
-promedio de métodos limpios subió de ~45.5% a ~56.8% (`docs/ROADMAP.md`
+promedio de métodos limpios subió de ~45.5% a ~56.8% (`docs/es/ROADMAP.md`
 tiene la tabla completa por paquete). El proceso encontró y corrigió tres
 bugs reales de concurrencia/correctitud que no existían como riesgo antes
 de que `runtime.Type` empezara a cargar estado mutable: un deadlock de
@@ -113,7 +113,7 @@ arrays/static fields como debía, y `sigShapeFindings` seguía marcando
 atrapados por el propio test de dogfood del checker.
 
 Fase 3.6 (primera sub-fase del camino a 85% de compatibilidad, ver
-`docs/ROADMAP.md`) completa: opcode `switch` (ya decodificado desde Fase 1
+`docs/es/ROADMAP.md`) completa: opcode `switch` (ya decodificado desde Fase 1
 pero nunca bajado a IR) y una tanda de nativos BCL de alto alcance
 (`StringBuilder`, `String.Format`/`Substring`/indexador/`Equals`,
 `Array.Empty`, `Double.IsNaN`, stubs de `CultureInfo`/`Environment`).
@@ -640,7 +640,7 @@ escritura). Cada uno de estos fue encontrado ejecutando el pipeline
 completo contra los DLLs reales de Jint/Esprima, no en un fixture propio.
 Resultado: `examples/jint-demo/` corre JavaScript real de punta a punta
 (`Engine.Evaluate("1 + 2")` → `"3"`, `Engine.SetValue` + variables → `7`)
-a través del motor Jint 3.1.3 sin modificar — ver `docs/ROADMAP.md` para
+a través del motor Jint 3.1.3 sin modificar — ver `docs/es/ROADMAP.md` para
 el desglose completo bug por bug.
 
 Fase 3.28 (API de instancias: `Assembly.New`/`Instance.Call`) completa.

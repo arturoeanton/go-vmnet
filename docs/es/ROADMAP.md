@@ -49,7 +49,7 @@ No es una fase "vendible" pero es prerequisito técnico.
       **Nota importante**: el SDK de .NET es una dependencia *solo de desarrollo* (para generar
       los binarios de test), nunca del runtime de `vmnet` — esto hay que comunicarlo claro para
       no confundir a stakeholders.
-- [ ] `docs/architecture.md` esqueleto (referencia a esta spec), `CONTRIBUTING.md`
+- [ ] `docs/es/architecture.md` esqueleto (referencia a esta spec), `CONTRIBUTING.md`
 - [ ] ADR corto documentando la decisión de "pure Go, no cgo, no hostfxr" como núcleo
 
 ---
@@ -420,7 +420,7 @@ de Fase 3, incluye las correcciones de `MethodSpec` y sin-signo):
 
 Ninguno certifica "compatible" al 100% — esperado y honesto: son librerías reales que usan
 arrays, campos estáticos y reflection extensivamente, nada de lo cual está en el alcance actual
-(`docs/ROADMAP.md` ya lo documenta como diferido). El valor del checker es exactamente mostrar
+(`docs/es/ROADMAP.md` ya lo documenta como diferido). El valor del checker es exactamente mostrar
 esto con precisión método por método, no inflar el resultado.
 
 **Pero además, `vmnet` ejecuta funciones reales de 3 de esos paquetes**, sin modificar el
@@ -1089,7 +1089,7 @@ La pieza arquitectónicamente más grande del camino a 85%: manejo de excepcione
   la excepción interna en vez de restaurarse a la externa. Edge case raro, documentado.
 - Tipos de excepción definidos por el usuario (clases que heredan de Exception con campos
   propios): las excepciones siguen siendo solo los tipos nativos que vmnet ya registra
-  (docs/ROADMAP.md Fase 2) — el mecanismo de catch-por-jerarquía funciona iguales para
+  (docs/es/ROADMAP.md Fase 2) — el mecanismo de catch-por-jerarquía funciona iguales para
   cualquier tipo que sí resuelva, pero construir una excepción custom con `newobj` todavía
   necesita que su `.ctor` sea interpretable, que hoy no está especialmente ejercitado.
 ```
@@ -3007,7 +3007,7 @@ con benchmarks — el paquete completo para que un equipo de ingeniería apruebe
 
 **Documentación (spec §33)**
 - [ ] README completo (qué es / qué no es, quickstart, perfiles, límites conocidos)
-- [ ] `docs/architecture.md`, `supported-il.md`, `supported-bcl.md`, `nuget-support.md`,
+- [ ] `docs/es/architecture.md`, `supported-il.md`, `supported-bcl.md`, `nuget-support.md`,
       `compatibility-profile.md`, `security.md`, `roadmap.md`
 - [ ] `/examples`: hello, rules, calculator, nuget-basic — ejecutables y documentados
 

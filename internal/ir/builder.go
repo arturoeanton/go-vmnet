@@ -590,7 +590,7 @@ type UnsupportedOpcodeError struct {
 }
 
 func (e *UnsupportedOpcodeError) Error() string {
-	return fmt.Sprintf("ir: unsupported opcode %q at IL offset %d (not yet implemented — see docs/ROADMAP.md)", e.OpCode, e.Offset)
+	return fmt.Sprintf("ir: unsupported opcode %q at IL offset %d (not yet implemented — see docs/en/ROADMAP.md)", e.OpCode, e.Offset)
 }
 
 func operandIndex(operand any) int {

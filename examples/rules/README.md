@@ -4,7 +4,7 @@ Business-rules plugin example: a `Rules.Eval` C# method (objects, property
 accessors, `List<int>`, `Dictionary<string,int>`) called from a Go host via
 `Assembly.CallJSON`/`CallBytes`, plus a managed exception and a runaway
 plugin caught by the instruction sandbox. This is the Fase 2 demo — see
-`docs/ROADMAP.md`.
+`docs/en/ROADMAP.md`.
 
 ```bash
 dotnet build ../../tests/fixtures/csharp/Fixtures.csproj -c Release

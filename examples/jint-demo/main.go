@@ -4,7 +4,7 @@
 // dependency chain (Esprima, System.Memory, ...) via vm.LoadPackage, then
 // calls into a small compiled C# wrapper (JintWrapper.dll, built from
 // JintWrapper.cs in this directory) that drives Jint's own
-// Engine.Evaluate API. See docs/ROADMAP.md, Fase 3.27, for the
+// Engine.Evaluate API. See docs/en/ROADMAP.md, Fase 3.27, for the
 // architecture work (multi-assembly resolution, real virtual dispatch,
 // generic-method overload disambiguation) this needed.
 package main

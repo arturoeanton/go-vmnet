@@ -9,7 +9,7 @@ System.Numerics.Vectors, System.Runtime.CompilerServices.Unsafe) via
 (`JintWrapper.cs` in this directory) that drives Jint's own
 `Engine.Evaluate`/`Engine.SetValue` API directly.
 
-This is the Fase 3.27 demo — see `docs/ROADMAP.md` for the architecture
+This is the Fase 3.27 demo — see `docs/en/ROADMAP.md` for the architecture
 work it needed (multi-assembly resolution across a real NuGet dependency
 graph, real virtual dispatch across inheritance chains, generic-method
 and struct-vs-class overload disambiguation, all found and fixed by
