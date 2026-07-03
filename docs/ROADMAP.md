@@ -25,7 +25,7 @@ NuGet arbitrario, backend CoreCLR. Estos quedan como roadmap post-v1.0 (v1.5 "hy
 | 2.5 | Endurecimiento *(gate interno, sin demo de venta)* | 2–3 días | El intérprete no crashea el host bajo input adversarial ni concurrencia | `go test ./... -race` + fuzzing (~16.8M ejecuciones, 0 panics) |
 | 3 | Checker + ecosistema NuGet | 6–9 sem | Adopción de bajo riesgo + reuso de librerías existentes | 7 paquetes NuGet reales chequeados, 3 con funciones ejecutando de verdad |
 | 3.5 | Endurecimiento + compatibilidad real *(gate interno, sin demo de venta)* | 3–4 días | El motor cubre el patrón de código C# real más común (arrays, `ref`/`out`, static fields), no solo lo que estaba fácil | Re-certificación de los mismos 7 paquetes: promedio de métodos limpios sube de ~45% a ~57% |
-| 3.6+ | Camino a 85% + demo Jint *(multi-fase, criterio de cierre firme: 85%)* | varias semanas | El motor corre una porción realmente grande de código C# real, no solo casos curados — validado contra un motor JS completo (Jint), no solo librerías chicas | 85%+ de métodos limpios promedio en 7 paquetes + Jint; `Engine().SetValue(...).Execute(...)` corriendo de verdad |
+| 3.6+ | Camino a 85% + demo Jint *(multi-fase; 85% alcanzado en Fase 3.21, objetivo revisado a ~97%)* | varias semanas | El motor corre una porción realmente grande de código C# real, no solo casos curados — validado contra un motor JS completo (Jint), no solo librerías chicas | 85%+ alcanzado (85.1%/85.3% con Jint); ~97% en curso; `Engine().SetValue(...).Execute(...)` corriendo de verdad |
 | 4 | v1.0 producción | 5–7 sem | Listo para pilotos reales | Benchmarks, seguridad, docs, CI multiplataforma, 5 min a "hello world" |
 
 **Riesgo mayor del proyecto**: no es el parser IL, es la BCL (`System.*`). Por eso las 4 fases
@@ -647,12 +647,17 @@ go test ./internal/metadata/... -run '^$' -fuzz '^FuzzParseSignatures$' -fuzztim
 
 ## Fase 3.6+ — Camino a 85% de compatibilidad real + demo Jint
 
-**Objetivo:** antes de Fase 4, subir la compatibilidad real medida a **por lo menos 85%** promedio
-(criterio de cierre firme, no aspiracional) sobre los 7 paquetes ya certificados **más Jint**
-(motor de JavaScript completo para .NET, ~5400 métodos), y validar un demo real de "lenguaje
-dinámico corriendo dentro de vmnet" ejecutando el patrón `new Engine().SetValue(...).Execute(...)`
-de punta a punta — no solo el número agregado. Se descartó explícitamente un demo de ASP.NET
-Core/MVC (fuera de alcance documentado, spec §3).
+**Objetivo original:** antes de Fase 4, subir la compatibilidad real medida a **por lo menos 85%**
+promedio (criterio de cierre firme, no aspiracional) sobre los 7 paquetes ya certificados **más
+Jint** (motor de JavaScript completo para .NET, ~5400 métodos), y validar un demo real de
+"lenguaje dinámico corriendo dentro de vmnet" ejecutando el patrón
+`new Engine().SetValue(...).Execute(...)` de punta a punta — no solo el número agregado. Se
+descartó explícitamente un demo de ASP.NET Core/MVC (fuera de alcance documentado, spec §3).
+
+**El 85% se alcanzó en Fase 3.21** (85.1%/85.3% con Jint — ver esa sección). El objetivo se
+revisó al alza en el momento: el nuevo criterio de cierre es un BCL endurecido apuntando a
+**~97%** ("100% puede ser 97%"), con toda la documentación mantenida al día en cada sub-fase —
+la secuencia de sub-fases abajo continúa bajo ese objetivo, no se detiene en 85%.
 
 Dado el tamaño real de la brecha, esto **no es una sola fase**: es una secuencia de sub-fases,
 cada una con su propia medición, tests, docs y commit/tag/push — igual que Fase 2.5/3.5, pero
@@ -2060,6 +2065,73 @@ de 85% todavía no se alcanza; falta ~1.1-1.3 puntos.
 ```bash
 go test ./... -race -count=3
 go test ./ -run TestRegex -v
+```
+
+### Fase 3.21 — Tercer paquete de wins baratos: **cruza el 85%** 🎯
+
+Tercera ronda de hallazgos concentrados y baratos del probe. Esta fase cruza el criterio de
+cierre firme original de la Fase 3.6+ (85%) — ver la nota al principio de esta sección sobre el
+objetivo revisado a ~97%.
+
+**Tareas**
+
+- [x] `System.NotImplementedException` agregada al registro de excepciones construibles (mismo
+      patrón que las demás desde Fase 2), con su entrada en `exceptionBaseType`.
+- [x] `System.Double::IsInfinity`/`IsPositiveInfinity`/`IsNegativeInfinity`, `System.Math::Floor`.
+- [x] `System.String::EndsWith`.
+- [x] `List<T>::Clear`, `Dictionary<K,V>::Remove`.
+- [x] `System.Int32::Parse`/`TryParse`/`CompareTo` — `TryParse`'s `out int` usa el mismo mecanismo
+      de puntero administrado que cualquier `ref`/`out` primitivo desde Fase 3.5.
+- [x] `System.DateTime::get_Kind` — necesitó agregar un segundo campo (`kind`, un
+      `System.DateTimeKind` como `int32`) al value type sintético de `DateTime` (Fase 3.12), antes
+      de un solo campo `ticks`. Solo `get_Now`/`get_UtcNow`/`get_Today` lo setean a algo distinto
+      de `Unspecified` (el único lugar donde vmnet tiene una distinción real Utc-vs-local que
+      reportar) — `Add*`/`get_Date` no propagan el `Kind` del original, una simplificación
+      documentada (no medida como necesaria: ningún hallazgo del probe pedía fidelidad de `Kind`
+      a través de aritmética, solo la propiedad en sí).
+- [x] `KeyValuePair<K,V>` gana también el registro `call` plano (`.ctor`) además de
+      `registerValueTypeCtor` — mismo patrón de "asignación directa a un local" que
+      `DateTime`/`Nullable`1`/`TimeSpan` ya necesitaron, esta vez anticipado por el patrón
+      conocido y confirmado contra IL real antes de escribir el fixture.
+- [x] `IList<T>::get_Item`/`set_Item`, `IReadOnlyList<T>::get_Item`,
+      `IReadOnlyCollection<T>::get_Count`, `IEqualityComparer<T>::Equals`/`GetHashCode` agregados
+      al allowlist de despacho por interfaz de Fase 3.13 — el runtime ya los resolvía gratis
+      reusando los natives de `List`1`/`EqualityComparer`1` existentes, mismo patrón que
+      `ICollection`1`/`IDictionary`2` en fases anteriores.
+- [x] `System.Double::`/`System.Int32::` promovidos a prefijos amplios en el perfil `rules` (antes
+      solo entradas puntuales) — con natives reales cubriendo la superficie común, listar cada
+      miembro por separado ya no aportaba nada sobre el prefijo completo.
+
+**Fixtures y tests**
+
+- [x] `CheapWins3.cs` / `TestCheapWins3` — un caso por cada native de la lista de arriba, incluido
+      `IList<T>`/`IReadOnlyCollection<T>` sobre la misma instancia concreta de `List<T>`
+
+### Re-certificación contra los mismos 8 targets (7 paquetes + Jint)
+
+| Paquete | % limpio Fase 3.20 | % limpio Fase 3.21 |
+|---|---|---|
+| `Ardalis.GuardClauses@5.0.0` | 93.7% | 93.7% |
+| `FluentValidation@11.9.2` | 88.1% | 88.3% |
+| `System.Text.Json@8.0.5` | 81.8% | 82.1% |
+| `Newtonsoft.Json@13.0.3` | 71.8% | 72.4% |
+| `Semver@2.3.0` | 84.9% | **90.8%** |
+| `SimpleBase@4.0.0` | 75.6% | 75.6% |
+| `Humanizer.Core@2.14.1` | 90.2% | 92.6% |
+| **Promedio (7 paquetes)** | **83.7%** | **85.1%** |
+| `Jint@3.1.3` | 84.8% | 86.8% |
+| **Promedio (7 paquetes + Jint)** | **83.9%** | **85.3%** |
+
+**Se cruza el criterio de cierre firme original de 85%** (85.1% en 7 paquetes, 85.3% con Jint).
+`Semver` salta +5.9 puntos por sí solo (Int32.Parse/TryParse y comparación de versiones son su
+superficie central); `Humanizer.Core` y `Jint` también suben con volumen real. Con el objetivo ya
+revisado a ~97% (ver nota al principio de esta sección), la secuencia de sub-fases continúa.
+
+### Cómo verificar Fase 3.21
+
+```bash
+go test ./... -race -count=3
+go test ./ -run TestCheapWins3 -v
 ```
 
 ---

@@ -66,6 +66,7 @@ func init() {
 	register("System.Collections.Generic.List`1::Contains", true, listContains)
 	register("System.Collections.Generic.List`1::RemoveAt", false, listRemoveAt)
 	register("System.Collections.Generic.List`1::Insert", false, listInsert)
+	register("System.Collections.Generic.List`1::Clear", false, listClear)
 	register("System.Collections.Generic.List`1::GetEnumerator", true, listGetEnumerator)
 	register("System.Collections.Generic.List`1+Enumerator::MoveNext", true, listEnumeratorMoveNext)
 	register("System.Collections.Generic.List`1+Enumerator::get_Current", true, listEnumeratorGetCurrent)
@@ -80,12 +81,19 @@ func init() {
 	register("System.Collections.Generic.Dictionary`2::TryGetValue", true, dictTryGetValue)
 	register("System.Collections.Generic.Dictionary`2::get_Count", true, dictCount)
 	register("System.Collections.Generic.Dictionary`2::Clear", false, dictClear)
+	register("System.Collections.Generic.Dictionary`2::Remove", true, dictRemove)
+	registerValueTypeCtor("System.Collections.Generic.KeyValuePair`2", keyValuePairCtor)
 	register("System.Collections.Generic.Dictionary`2::GetEnumerator", true, dictGetEnumerator)
 	register("System.Collections.Generic.Dictionary`2+Enumerator::MoveNext", true, dictEnumeratorMoveNext)
 	register("System.Collections.Generic.Dictionary`2+Enumerator::get_Current", true, dictEnumeratorGetCurrent)
 
 	register("System.Collections.Generic.KeyValuePair`2::get_Key", true, keyValuePairGetKey)
 	register("System.Collections.Generic.KeyValuePair`2::get_Value", true, keyValuePairGetValue)
+	// `var kv = new KeyValuePair<K,V>(k, v);` assigned straight to a
+	// local compiles as `ldloca`+`call .ctor`, not `newobj` — the same
+	// compiler optimization DateTime/Nullable`1/TimeSpan already needed
+	// their own entry point for.
+	register("System.Collections.Generic.KeyValuePair`2::.ctor", false, keyValuePairCtorInPlace)
 
 	// foreach's implicit Dispose() on its enumerator (compiled into a
 	// finally block regardless of whether the enumerator type actually
@@ -243,6 +251,29 @@ func keyValuePairGetValue(args []runtime.Value) (runtime.Value, error) {
 	return s.Fields[1], nil
 }
 
+func keyValuePairCtor(args []runtime.Value) (*runtime.Struct, error) {
+	kv := runtime.NewStruct(keyValuePairType)
+	if len(args) > 0 {
+		kv.Fields[0] = args[0]
+	}
+	if len(args) > 1 {
+		kv.Fields[1] = args[1]
+	}
+	return kv, nil
+}
+
+func keyValuePairCtorInPlace(args []runtime.Value) (runtime.Value, error) {
+	if len(args) == 0 || args[0].Kind != runtime.KindRef || args[0].Ref == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: KeyValuePair constructor called without a receiver")
+	}
+	s, err := keyValuePairCtor(args[1:])
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	*args[0].Ref = runtime.StructVal(s)
+	return runtime.Value{}, nil
+}
+
 func asList(args []runtime.Value) (*nativeList, error) {
 	if len(args) == 0 || args[0].Kind != runtime.KindObject || args[0].Obj == nil {
 		return nil, fmt.Errorf("bcl: List method called without a receiver")
@@ -391,6 +422,15 @@ func listInsert(args []runtime.Value) (runtime.Value, error) {
 	return runtime.Value{}, nil
 }
 
+func listClear(args []runtime.Value) (runtime.Value, error) {
+	l, err := asList(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	l.items = l.items[:0]
+	return runtime.Value{}, nil
+}
+
 func asDict(args []runtime.Value) (*nativeDict, error) {
 	if len(args) == 0 || args[0].Kind != runtime.KindObject || args[0].Obj == nil {
 		return nil, fmt.Errorf("bcl: Dictionary method called without a receiver")
@@ -498,6 +538,20 @@ func dictCount(args []runtime.Value) (runtime.Value, error) {
 		return runtime.Value{}, err
 	}
 	return runtime.Int32(int32(len(d.m))), nil
+}
+
+func dictRemove(args []runtime.Value) (runtime.Value, error) {
+	d, err := asDict(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	key, err := dictKey(args, 1)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	_, existed := d.m[key]
+	delete(d.m, key)
+	return runtime.Bool(existed), nil
 }
 
 func dictClear(args []runtime.Value) (runtime.Value, error) {

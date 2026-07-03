@@ -12,6 +12,33 @@ func init() {
 	register("System.Math::Min", true, mathMin)
 	register("System.Math::Max", true, mathMax)
 	register("System.Double::IsNaN", true, doubleIsNaN)
+	register("System.Double::IsInfinity", true, doubleInfinityPredicate(func(f float64) bool { return math.IsInf(f, 0) }))
+	register("System.Double::IsPositiveInfinity", true, doubleInfinityPredicate(func(f float64) bool { return math.IsInf(f, 1) }))
+	register("System.Double::IsNegativeInfinity", true, doubleInfinityPredicate(func(f float64) bool { return math.IsInf(f, -1) }))
+	register("System.Math::Floor", true, mathFloor)
+}
+
+func doubleInfinityPredicate(pred func(float64) bool) Native {
+	return func(args []runtime.Value) (runtime.Value, error) {
+		if len(args) != 1 {
+			return runtime.Value{}, fmt.Errorf("bcl: System.Double infinity check expects 1 argument")
+		}
+		switch v := args[0]; v.Kind {
+		case runtime.KindR8:
+			return runtime.Bool(pred(v.R8)), nil
+		case runtime.KindR4:
+			return runtime.Bool(pred(float64(v.R4))), nil
+		default:
+			return runtime.Value{}, fmt.Errorf("bcl: System.Double infinity check: unsupported argument kind")
+		}
+	}
+}
+
+func mathFloor(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 1 || args[0].Kind != runtime.KindR8 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Math.Floor expects a double argument")
+	}
+	return runtime.Float64(math.Floor(args[0].R8)), nil
 }
 
 func mathMin(args []runtime.Value) (runtime.Value, error) { return mathMinMax(args, false) }

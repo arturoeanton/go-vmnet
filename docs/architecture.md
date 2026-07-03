@@ -450,3 +450,16 @@ absoluto; arreglado con un único accesor compartido que lee
 83.5% a 83.7% (83.7% a 83.9% con Jint) — regex casi nunca es el único
 obstáculo de un método real, mismo patrón que LINQ. Falta ~1.1-1.3
 puntos para el 85%.
+
+Fase 3.21 (tercer paquete de wins baratos) completa — **cruza el 85%**.
+`DateTime.Kind` necesitó agregar un segundo campo (`kind`,
+`DateTimeKind` como `int32`) al value type sintético de un campo que
+existía desde Fase 3.12. `IList<T>`/`IReadOnlyList<T>`/
+`IReadOnlyCollection<T>`/`IEqualityComparer<T>` se agregan al allowlist
+de despacho por interfaz de Fase 3.13 sin código nuevo. Certificación:
+83.7% a **85.1%** (83.9% a **85.3%** con Jint) — se cruza el criterio de
+cierre firme original de la Fase 3.6+. `Semver` salta +5.9 puntos por sí
+solo (`Int32.Parse`/`TryParse` son su superficie central). Con el
+objetivo ya revisado a ~97% ("100% puede ser 97%", BCL endurecido,
+documentación al día), la secuencia de sub-fases continúa más allá de
+este cruce.

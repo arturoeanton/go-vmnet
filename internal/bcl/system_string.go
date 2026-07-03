@@ -35,6 +35,14 @@ func init() {
 	register("System.String::Replace", true, stringReplace)
 	register("System.String::Trim", true, stringTrim)
 	register("System.String::Contains", true, stringContains)
+	register("System.String::EndsWith", true, stringEndsWith)
+}
+
+func stringEndsWith(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 2 || args[0].Kind != runtime.KindString || args[1].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.EndsWith expects a string argument")
+	}
+	return runtime.Bool(strings.HasSuffix(args[0].Str, args[1].Str)), nil
 }
 
 // NewStringFromCtor backs `new string(...)` — called directly from

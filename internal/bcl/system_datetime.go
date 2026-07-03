@@ -12,10 +12,21 @@ import (
 // own internal representation closely enough that every other member
 // (Year, AddDays, ...) is just arithmetic over it via Go's time.Time,
 // converting at the boundary rather than reimplementing calendar math.
+// "kind" is a System.DateTimeKind (Unspecified=0/Utc=1/Local=2) — only
+// get_Now/get_UtcNow/get_Today set it to anything but the Unspecified
+// default (matching real DateTime: an explicit constructor never infers
+// a kind), since that's the only place vmnet has a real Utc-vs-local
+// distinction to report at all (Fase 3.21).
 var dateTimeType = runtime.NewValueType(
 	"System", "DateTime",
-	[]string{"ticks"},
-	[]runtime.Value{runtime.Int64(0)},
+	[]string{"ticks", "kind"},
+	[]runtime.Value{runtime.Int64(0), runtime.Int32(0)},
+)
+
+const (
+	dateTimeKindUnspecified int32 = 0
+	dateTimeKindUtc         int32 = 1
+	dateTimeKindLocal       int32 = 2
 )
 
 // unixEpochTicks is DateTime(1970,1,1).Ticks — the well-known constant
@@ -73,6 +84,7 @@ func init() {
 	register("System.DateTime::get_DayOfWeek", true, dateTimeField(func(t time.Time) int32 { return int32(t.Weekday()) }))
 
 	register("System.DateTime::get_Ticks", true, dateTimeGetTicks)
+	register("System.DateTime::get_Kind", true, dateTimeGetKind)
 	register("System.DateTime::get_Date", true, dateTimeGetDate)
 
 	register("System.DateTime::AddDays", true, dateTimeAdd(func(f float64) time.Duration { return time.Duration(f * float64(24*time.Hour)) }))
@@ -136,22 +148,27 @@ func dateTimeCtorInPlace(args []runtime.Value) (runtime.Value, error) {
 }
 
 func dateTimeFromTime(t time.Time) runtime.Value {
+	return dateTimeFromTimeKind(t, dateTimeKindUnspecified)
+}
+
+func dateTimeFromTimeKind(t time.Time, kind int32) runtime.Value {
 	s := runtime.NewStruct(dateTimeType)
 	s.Fields[0] = runtime.Int64(timeToTicks(t))
+	s.Fields[1] = runtime.Int32(kind)
 	return runtime.StructVal(s)
 }
 
 func dateTimeNow(args []runtime.Value) (runtime.Value, error) {
-	return dateTimeFromTime(time.Now()), nil
+	return dateTimeFromTimeKind(time.Now(), dateTimeKindLocal), nil
 }
 
 func dateTimeUtcNow(args []runtime.Value) (runtime.Value, error) {
-	return dateTimeFromTime(time.Now().UTC()), nil
+	return dateTimeFromTimeKind(time.Now().UTC(), dateTimeKindUtc), nil
 }
 
 func dateTimeToday(args []runtime.Value) (runtime.Value, error) {
 	now := time.Now()
-	return dateTimeFromTime(time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())), nil
+	return dateTimeFromTimeKind(time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()), dateTimeKindLocal), nil
 }
 
 func asDateTime(args []runtime.Value) (time.Time, *runtime.Struct, error) {
@@ -178,6 +195,14 @@ func dateTimeGetTicks(args []runtime.Value) (runtime.Value, error) {
 		return runtime.Value{}, err
 	}
 	return s.Fields[0], nil
+}
+
+func dateTimeGetKind(args []runtime.Value) (runtime.Value, error) {
+	_, s, err := asDateTime(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	return s.Fields[1], nil
 }
 
 func dateTimeGetDate(args []runtime.Value) (runtime.Value, error) {

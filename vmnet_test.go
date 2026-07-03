@@ -3,6 +3,7 @@ package vmnet
 import (
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"testing"
 	"time"
@@ -1327,5 +1328,52 @@ func TestStaticsConcurrentCctor(t *testing.T) {
 				t.Errorf("Statics.GetInitValue() = %d, want 42", got)
 			}
 		}
+	}
+}
+
+// TestCheapWins3 exercises the Fase 3.21 cheap-win BCL bundle:
+// NotImplementedException, Double.IsInfinity family, String.EndsWith,
+// Math.Floor, List.Clear, Int32.Parse/TryParse/CompareTo,
+// Dictionary.Remove, DateTime.Kind, KeyValuePair<K,V> direct-local
+// construction, and IList<T>/IReadOnlyCollection<T> interface dispatch.
+func TestCheapWins3(t *testing.T) {
+	asm := loadFixture(t)
+
+	inf := Float64(math.Inf(1))
+	neginf := Float64(math.Inf(-1))
+	finite := Float64(3.5)
+
+	cases := []struct {
+		method string
+		args   []Value
+		want   any
+	}{
+		{"NotImplTest", nil, "nope"},
+		{"InfinityTest", []Value{inf}, int32(1)},
+		{"InfinityTest", []Value{finite}, int32(0)},
+		{"PosInfTest", []Value{inf}, int32(1)},
+		{"NegInfTest", []Value{neginf}, int32(1)},
+		{"EndsWithTest", []Value{String("Hello")}, int32(1)},
+		{"FloorTest", []Value{Float64(3.7)}, float64(3)},
+		{"ListClearTest", nil, int32(0)},
+		{"ParseTest", nil, int32(42)},
+		{"TryParseTest", []Value{String("99")}, int32(99)},
+		{"TryParseTest", []Value{String("nope")}, int32(-1)},
+		{"CompareToTest", []Value{Int32(5), Int32(10)}, int32(-1)},
+		{"DictRemoveTest", nil, int32(1)},
+		{"DateTimeKindTest", nil, int32(1)},
+		{"KeyValuePairCtorTest", nil, "k=42"},
+		{"InterfaceCollectionTest", nil, int32(23)},
+	}
+	for i, tc := range cases {
+		t.Run(fmt.Sprintf("%s#%d", tc.method, i), func(t *testing.T) {
+			out, err := asm.Call("Vmnet.Fixtures.CheapWins3", tc.method, tc.args...)
+			if err != nil {
+				t.Fatalf("%s() error = %v", tc.method, err)
+			}
+			if got := out.Native(); got != tc.want {
+				t.Errorf("%s() = %#v, want %#v", tc.method, got, tc.want)
+			}
+		})
 	}
 }
