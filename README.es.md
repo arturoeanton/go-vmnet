@@ -4,13 +4,46 @@ Un intérprete de IL/CIL puro en Go para correr plugins C# — y un conjunto
 creciente de paquetes NuGet reales — dentro de un programa Go, sin
 necesidad de tener el runtime de .NET instalado en el host.
 
+## Esto corre un motor de JavaScript real. Dentro de un binario Go. Sin CGo.
+
+```go
+vm := vmnet.New()
+vm.NuGet().Add("Jint", "3.1.3")
+vm.NuGet().Restore()
+jintAsm, _ := vm.LoadPackage("Jint")
+
+engine, _ := jintAsm.New("Jint.Engine")
+result, _ := engine.Call("Evaluate", vmnet.String("1 + 2"), vmnet.String(""))
+str, _ := result.(*vmnet.Instance).Call("ToString")
+fmt.Println(str.Native())
+```
+
 ```txt
-Estado: Fase 3.28 completa (checker + NuGet + despacho virtual real +
-resolución multi-ensamblado + una API de instancias de objetos). Corre el
-motor de JavaScript Jint 3.1.3 real, sin modificar, de punta a punta —
-ver examples/jint-demo y examples/jint-nowrapper. Sigue la Fase 4 (listo
-para producción: benchmarks, sandbox completo, docs finales). Ver
-docs/es/ROADMAP.md.
+$ go run .
+3
+```
+
+Eso es [Jint](https://github.com/sebastienros/jint) 3.1.3 — un motor de
+JavaScript en C# real, popular y **sin modificar**, bajado directo de
+nuget.org junto con toda su cadena de dependencias transitivas (Esprima,
+System.Memory, System.Buffers, ...) — parseando JavaScript de verdad,
+construyendo un AST real, despachando métodos virtuales a través de su
+jerarquía de clases real, y evaluando el resultado. Sin subproceso, sin
+`dotnet` instalado en el host, sin un shim escrito a mano simulando la
+librería real. `vmnet` está ejecutando el IL compilado real de Jint, byte
+por byte.
+
+Probalo vos mismo: [`examples/jint-nowrapper`](examples/jint-nowrapper)
+(Go puro, sin ningún paso de compilación más allá de `go run`) y
+[`examples/jint-demo`](examples/jint-demo) (lo mismo manejado a través de
+un wrapper compilado en C# chiquito, para APIs que dependen de azúcar
+sintáctico exclusivo de C#).
+
+```txt
+Estado: Fase 3.28 completa — checker + NuGet + despacho virtual real +
+resolución multi-ensamblado + una API de instancias de objetos
+(Assembly.New / Instance.Call). Sigue la Fase 4 (listo para producción:
+benchmarks, sandbox completo, docs finales). Ver docs/es/ROADMAP.md.
 ```
 
 *[Read it in English →](README.md)*
@@ -28,10 +61,9 @@ para:
 - Migración incremental .NET → Go, un assembly a la vez
 - Reusar paquetes NuGet "puros" ya publicados (sin P/Invoke, sin
   reflection pesada, sin ASP.NET Core/EF Core/WPF) sin depender de
-  CoreCLR — incluso paquetes genuinamente complejos:
-  [`examples/jint-demo`](examples/jint-demo) corre el motor de JavaScript
-  Jint real, construyendo objetos, llamando métodos virtuales a través de
-  cadenas de herencia reales, y evaluando JavaScript de verdad
+  CoreCLR — Jint de arriba es la prueba de que esto escala a código real
+  genuinamente no trivial y orientado a objetos, no solo librerías chicas
+  de métodos estáticos
 
 Antes de cargar un assembly de terceros, `vmnet check` dice exactamente
 qué métodos van a correr y cuáles no —con una razón concreta para cada
@@ -136,7 +168,8 @@ que lo carga.
 
 Para una API orientada a objetos (construir una instancia, llamar sus
 métodos, usar lo que devuelven), `Assembly.New`/`Instance.Call` funcionan
-igual sin necesidad de ningún wrapper de método estático:
+igual sin necesidad de ningún wrapper de método estático — así es
+exactamente como funciona el demo de Jint de arriba:
 
 ```go
 engine, _ := jintAsm.New("Jint.Engine")
