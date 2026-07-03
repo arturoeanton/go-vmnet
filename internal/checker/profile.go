@@ -64,6 +64,10 @@ func init() {
 		"System.Collections.Generic.ICollection`1::Add",
 		"System.Collections.Generic.ICollection`1::get_Count",
 		"System.Collections.ICollection::get_Count",
+		"System.Collections.Generic.IDictionary`2::set_Item",
+		"System.Collections.Generic.IDictionary`2::get_Item",
+		"System.Collections.Generic.IDictionary`2::TryGetValue",
+		"System.Collections.Generic.IDictionary`2::ContainsKey",
 		"System.Char::",
 		"System.Int32::",
 		"System.String::",
@@ -97,12 +101,21 @@ func init() {
 		"System.NullReferenceException",
 		"System.IndexOutOfRangeException",
 		"System.InvalidCastException",
-	)
-	// netstandard-lite = rules plus the Fase 3 Convert surface (System.Type
-	// moved into `rules` in Fase 3.14, once it had real natives behind it).
-	bclPrefixes[ProfileNetStandardLite] = append(append([]string{}, bclPrefixes[ProfileRules]...),
+		"System.FormatException",
+		"System.OverflowException",
+		"System.Environment::get_NewLine",
+		"System.Double::ToString",
+		"System.Threading.Interlocked::CompareExchange",
+		"System.StringComparer::",
 		"System.Convert::",
 	)
+	// netstandard-lite currently promises exactly the same BCL surface as
+	// rules (System.Type moved into `rules` in Fase 3.14, System.Convert
+	// in Fase 3.18, once each had real natives behind it) — kept as its
+	// own profile/slice rather than collapsed into one, so a future
+	// rules-only addition doesn't have to be reconsidered for both tiers
+	// by construction.
+	bclPrefixes[ProfileNetStandardLite] = append([]string{}, bclPrefixes[ProfileRules]...)
 }
 
 // objectOpcodesAllowed reports whether profile permits object-model IR

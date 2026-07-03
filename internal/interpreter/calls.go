@@ -146,6 +146,16 @@ func (m *Machine) newObj(in newObjArgs, depth int, instrCount *int64) (runtime.V
 		return runtime.BindDelegate(in.Args[0], *in.Args[1].Func), nil
 	}
 
+	// System.String is a reference type in real .NET, but vmnet
+	// represents every string as a plain KindString value, not a
+	// KindObject (every other native ctor below returns via
+	// runtime.ObjRef, which would be wrong here — nothing downstream
+	// treats a string as an Object). `new string(...)` needs its own
+	// path for exactly that reason.
+	if in.TypeFullName == "System.String" {
+		return bcl.NewStringFromCtor(in.Args)
+	}
+
 	if vtCtor, ok := bcl.LookupValueTypeCtor(in.TypeFullName); ok {
 		s, err := vtCtor(in.Args)
 		if err != nil {

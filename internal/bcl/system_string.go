@@ -34,6 +34,54 @@ func init() {
 	register("System.String::ToCharArray", true, stringToCharArray)
 	register("System.String::Replace", true, stringReplace)
 	register("System.String::Trim", true, stringTrim)
+	register("System.String::Contains", true, stringContains)
+}
+
+// NewStringFromCtor backs `new string(...)` — called directly from
+// internal/interpreter/calls.go's newObj (not through the normal
+// bcl.LookupCtor/registerCtor path, which always wraps its result as a
+// KindObject; a vmnet string is a plain KindString value, never an
+// Object). Covers the char[]-based overloads (char[], char[] with
+// start+length, and char*repeated-count) — the overwhelming majority of
+// real `new string(...)` call sites; the ReadOnlySpan<char>-based .NET
+// Core-only overload isn't covered (netstandard2.0 target, spec's own
+// certified-package scope).
+func NewStringFromCtor(args []runtime.Value) (runtime.Value, error) {
+	if len(args) == 2 && args[0].Kind == runtime.KindI4 && args[1].Kind == runtime.KindI4 {
+		// new string(char c, int count)
+		count := int(args[1].I4)
+		if count < 0 {
+			return runtime.Value{}, &runtime.ManagedException{TypeName: "System.ArgumentOutOfRangeException", Message: "count must be non-negative"}
+		}
+		return runtime.String(strings.Repeat(string(rune(args[0].I4)), count)), nil
+	}
+	if len(args) >= 1 && args[0].Kind == runtime.KindArray {
+		var runes []rune
+		if args[0].Arr != nil {
+			for _, e := range args[0].Arr.Elems {
+				if e.Kind == runtime.KindI4 {
+					runes = append(runes, rune(e.I4))
+				}
+			}
+		}
+		start, length := 0, len(runes)
+		if len(args) >= 3 && args[1].Kind == runtime.KindI4 && args[2].Kind == runtime.KindI4 {
+			start = int(args[1].I4)
+			length = int(args[2].I4)
+		}
+		if start < 0 || length < 0 || start+length > len(runes) {
+			return runtime.Value{}, &runtime.ManagedException{TypeName: "System.ArgumentOutOfRangeException", Message: "new string(char[], start, length): out of range"}
+		}
+		return runtime.String(string(runes[start : start+length])), nil
+	}
+	return runtime.Value{}, fmt.Errorf("bcl: unsupported System.String constructor overload")
+}
+
+func stringContains(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 2 || args[0].Kind != runtime.KindString || args[1].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.Contains expects a string argument")
+	}
+	return runtime.Bool(strings.Contains(args[0].Str, args[1].Str)), nil
 }
 
 // stringJoin backs every String.Join overload: the params-array shape

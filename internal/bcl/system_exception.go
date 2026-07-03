@@ -19,6 +19,8 @@ func init() {
 		"System.IndexOutOfRangeException",
 		"System.NotSupportedException",
 		"System.InvalidCastException",
+		"System.FormatException",
+		"System.OverflowException",
 	} {
 		registerCtor(name, newExceptionCtor(name))
 		// A plugin's own exception subclass (`class MyException :

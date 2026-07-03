@@ -398,3 +398,23 @@ para serializar correctamente accesos concurrentes al mismo campo
 estático — el uso dominante real de `Lazy<T>`), cuyo fixture (agregado
 junto al de LINQ) fue lo que expuso el bug en primer lugar. Con 83.0% el
 85% todavía no se alcanza, pero el margen se cerró considerablemente.
+
+Fase 3.18 (segundo paquete de wins baratos + `IDictionary<K,V>` por
+interfaz) completa. `System.String::.ctor` necesitó su propio camino en
+`newObj` en vez del registro `bcl.LookupCtor` normal: un string en vmnet
+es un `KindString` plano, no un `KindObject` — envolverlo en
+`runtime.ObjRef` como cualquier otro ctor nativo habría sido incorrecto.
+`Interlocked.CompareExchange` implementa la semántica real de
+comparar-e-intercambiar (no un stub que siempre asigna), aunque vmnet no
+tenga un modelo de memoria multi-core real contra el cual ser atómico.
+`IDictionary<K,V>::set_Item`/`get_Item`/`TryGetValue`/`ContainsKey` se
+agregan al allowlist de despacho por interfaz de Fase 3.13 sin código
+nuevo — el runtime ya los resolvía gratis reusando los natives de
+`Dictionary`2` existentes. `System.Convert::` se promueve de
+`netstandard-lite` a `rules` (mismo tratamiento que `System.Type::` en
+Fase 3.14), así que `netstandard-lite` queda como copia explícita de
+`rules` en vez de una lista adicional. Certificación: 82.8% a 83.3%
+(83.0% a 83.5% con Jint). Con 83.5% el 85% todavía no se alcanza, pero
+el margen restante es chico — lo que queda con volumen real es async
+(fuera de alcance permanente), regex (decisión de diseño pendiente), y
+reflection más profunda sobre genéricos/enums.

@@ -166,6 +166,9 @@ var exceptionBaseType = map[string]string{
 	"System.NotSupportedException":       "System.SystemException",
 	"System.NullReferenceException":      "System.SystemException",
 	"System.IndexOutOfRangeException":    "System.SystemException",
+	"System.FormatException":             "System.SystemException",
+	"System.OverflowException":           "System.ArithmeticException",
+	"System.ArithmeticException":         "System.SystemException",
 	"System.SystemException":             "System.Exception",
 }
 

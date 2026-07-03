@@ -1859,6 +1859,81 @@ go test ./... -race -count=5
 go test ./ -run 'TestLinq|TestLazy' -count=3 -v
 ```
 
+### Fase 3.18 — Segundo paquete de wins baratos + `IDictionary<K,V>` por interfaz
+
+Tras el salto grande de Fase 3.17, esta fase ataca la siguiente franja de hallazgos concentrados
+y baratos del probe, más el mismo patrón de despacho por interfaz de Fase 3.13 aplicado a
+`IDictionary<K,V>`.
+
+**Tareas**
+
+- [x] `System.String::Contains`, `System.String::.ctor` (cubre `new string(char[])`,
+      `new string(char[], start, length)`, `new string(char, count)`) — necesitó su propio camino
+      en `newObj` (`internal/interpreter/calls.go`), no el registro `bcl.LookupCtor`/
+      `registerCtor` normal: un `string` en vmnet es un `KindString` plano, no un `KindObject`,
+      así que envolver el resultado en `runtime.ObjRef` (lo que todo otro ctor nativo hace) sería
+      incorrecto — confirmado antes de escribir nada, no asumido.
+- [x] `System.Environment::get_NewLine` (siempre `"\n"` — vmnet no tiene un SO real contra el
+      cual matchear el valor dependiente de plataforma), `System.Convert::ToInt32` (por `Kind` del
+      argumento — string/int64/float/null; un string no parseable lanza `FormatException`, no un
+      resultado adivinado), `System.Double::ToString` (formato `G` invariant, mismo límite de
+      cultura documentado en toda la BCL).
+- [x] `List<T>::RemoveAt`/`Insert`, `Dictionary<K,V>::Clear` — extras baratos sobre colecciones ya
+      soportadas.
+- [x] `System.FormatException`/`System.OverflowException` agregadas al registro de excepciones
+      construibles (mismo patrón que las demás desde Fase 2), con sus entradas correspondientes en
+      `exceptionBaseType` (`internal/interpreter/typecheck.go`) para que `catch (Exception e)`
+      también las atrape correctamente.
+- [x] `System.Threading.Interlocked::CompareExchange` — el argumento `ref` llega como puntero
+      administrado (`KindRef`), mismo mecanismo que cualquier `ref`/`out` desde Fase 3.5; la
+      semántica de comparar-e-intercambiar es real, no solo un stub que siempre asigna (vmnet no
+      tiene un modelo de memoria multi-core real contra el cual ser atómico, pero el resultado
+      observable — lo que el código real realmente depende para su corrección — sí es correcto).
+- [x] `System.StringComparer` (`Ordinal`/`OrdinalIgnoreCase`/`InvariantCulture`/
+      `InvariantCultureIgnoreCase` — las variantes de cultura colapsan a comparación ordinal, mismo
+      límite de "sin soporte de cultura" documentado en toda la BCL; solo `IgnoreCase` se
+      distingue de verdad) con `Equals`/`Compare`/`GetHashCode`.
+- [x] `IDictionary<K,V>::set_Item`/`get_Item`/`TryGetValue`/`ContainsKey` agregados al allowlist
+      del checker (`interfaceDispatchTargets`) — el runtime ya los resolvía gratis vía el
+      fallback de despacho por interfaz de Fase 3.13, reusando los natives de `Dictionary`2` ya
+      existentes; nada nuevo que registrar, mismo patrón que `ICollection`1` en Fase 3.13.
+- [x] `System.Convert::` promovido de `netstandard-lite` a `rules` (mismo tratamiento que
+      `System.Type::` en Fase 3.14) — con natives reales detrás, `netstandard-lite` y `rules`
+      ahora prometen exactamente la misma superficie BCL; el perfil `netstandard-lite` queda como
+      una copia explícita de `rules` en vez de una lista adicional, documentado en el código para
+      que una futura adición solo-`rules` no tenga que reconsiderarse para ambos niveles.
+
+**Fixtures y tests**
+
+- [x] `CheapWins2.cs` / `TestCheapWins2` — un caso por cada native de la lista de arriba
+
+### Re-certificación contra los mismos 8 targets (7 paquetes + Jint)
+
+| Paquete | % limpio Fase 3.17 | % limpio Fase 3.18 |
+|---|---|---|
+| `Ardalis.GuardClauses@5.0.0` | 93.3% | 93.3% |
+| `FluentValidation@11.9.2` | 86.4% | 87.3% |
+| `System.Text.Json@8.0.5` | 80.9% | 81.7% |
+| `Newtonsoft.Json@13.0.3` | 71.0% | 71.6% |
+| `Semver@2.3.0` | 83.7% | 84.6% |
+| `SimpleBase@4.0.0` | 75.6% | 75.6% |
+| `Humanizer.Core@2.14.1` | 88.8% | 89.2% |
+| **Promedio (7 paquetes)** | **82.8%** | **83.3%** |
+| `Jint@3.1.3` | 84.0% | 84.4% |
+| **Promedio (7 paquetes + Jint)** | **83.0%** | **83.5%** |
+
+Con 83.5% el criterio de cierre firme de 85% todavía no se alcanza, pero el margen restante es
+chico. Lo que queda con volumen real: async (fuera de alcance permanente), regex (decisión de
+diseño pendiente), y reflection más profunda (`Type.MakeGenericType`/`GetGenericTypeDefinition`/
+`GetInterfaces`, `Enum.GetValues`/`GetNames`/`IsDefined`).
+
+### Cómo verificar Fase 3.18
+
+```bash
+go test ./... -race -count=3
+go test ./ -run TestCheapWins2 -v
+```
+
 ---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")

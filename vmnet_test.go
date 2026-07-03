@@ -680,6 +680,43 @@ func TestLazy(t *testing.T) {
 	})
 }
 
+// TestCheapWins2 exercises the Fase 3.18 cheap-win BCL bundle: String
+// (Contains, the char[]-based .ctor), Environment.NewLine,
+// Convert.ToInt32, Double.ToString, List (RemoveAt/Insert),
+// Dictionary.Clear, FormatException, Interlocked.CompareExchange, and
+// StringComparer.Ordinal.
+func TestCheapWins2(t *testing.T) {
+	asm := loadFixture(t)
+
+	cases := []struct {
+		method string
+		args   []Value
+		want   any
+	}{
+		{"ContainsTest", []Value{String("Hello")}, int32(1)},
+		{"NewLine", nil, "\n"},
+		{"ConvertToInt32Test", nil, int32(42)},
+		{"DoubleToStringTest", []Value{Float64(3.14)}, "3.14"},
+		{"StringFromChars", nil, "abc"},
+		{"ListRemoveAtInsert", nil, int32(107)},
+		{"DictClear", nil, int32(0)},
+		{"FormatExceptionTest", nil, "bad format"},
+		{"InterlockedTest", nil, int32(10)},
+		{"StringComparerOrdinalTest", nil, int32(1)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.method, func(t *testing.T) {
+			out, err := asm.Call("Vmnet.Fixtures.CheapWins2", tc.method, tc.args...)
+			if err != nil {
+				t.Fatalf("%s() error = %v", tc.method, err)
+			}
+			if got := out.Native(); got != tc.want {
+				t.Errorf("%s() = %#v, want %#v", tc.method, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestLinq exercises System.Linq.Enumerable (Fase 3.15): a chained
 // Where().Select().ToList() over a List<int>, Any/All predicates,
 // FirstOrDefault, and Select/ToArray over an int[] source — the eager,

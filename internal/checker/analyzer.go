@@ -240,9 +240,16 @@ var interfaceDispatchTargets = map[string]bool{
 	"System.Collections.Generic.ICollection`1::Add":           true,
 	"System.Collections.Generic.ICollection`1::get_Count":     true,
 	"System.Collections.ICollection::get_Count":               true,
+	"System.Collections.Generic.IDictionary`2::set_Item":      true,
+	"System.Collections.Generic.IDictionary`2::get_Item":      true,
+	"System.Collections.Generic.IDictionary`2::TryGetValue":   true,
+	"System.Collections.Generic.IDictionary`2::ContainsKey":   true,
 }
 
 func resolvableCtor(md *metadata.Metadata, typeFullName, ctorFullName string) bool {
+	if typeFullName == "System.String" {
+		return true
+	}
 	if _, ok := bcl.LookupCtor(typeFullName); ok {
 		return true
 	}
