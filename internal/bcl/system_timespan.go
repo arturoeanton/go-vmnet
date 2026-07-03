@@ -8,12 +8,26 @@ import (
 
 // timeSpanType models System.TimeSpan as a single int64 "ticks" field —
 // 100-nanosecond intervals, matching the CLR's own representation
-// exactly (same reasoning as System.DateTime, Fase 3.12).
-var timeSpanType = runtime.NewValueType(
-	"System", "TimeSpan",
-	[]string{"ticks"},
-	[]runtime.Value{runtime.Int64(0)},
-)
+// exactly (same reasoning as System.DateTime, Fase 3.12). Also the
+// first native BCL value type needing a real *static* field
+// (TimeSpan.Zero — a public static readonly field in the real BCL, not
+// a property, found via real IL: `ldsfld System.TimeSpan::Zero`) —
+// runtime.NewValueType doesn't support static fields at all (see its
+// own doc comment), so this builds via runtime.NewType directly instead
+// and fills in Zero's real value via SetStaticField once timeSpanType
+// itself exists to reference (StaticFieldDefaults alone isn't enough:
+// NewType snapshots it into internal storage at construction time,
+// before a self-referential struct value naming this very Type could
+// exist yet).
+var timeSpanType = func() *runtime.Type {
+	t := runtime.NewType(
+		"System", "TimeSpan",
+		[]string{"ticks"}, []string{"Zero"},
+		[]runtime.Value{runtime.Int64(0)}, []runtime.Value{runtime.Value{}},
+	)
+	t.IsValueType = true
+	return t
+}()
 
 const (
 	ticksPerMillisecond int64 = 10_000
@@ -24,6 +38,7 @@ const (
 )
 
 func init() {
+	timeSpanType.SetStaticField(0, timeSpanFromTicks(0))
 	registerValueType(timeSpanType)
 	registerValueTypeCtor("System.TimeSpan", timeSpanCtor)
 	// `var ts = new TimeSpan(...)` assigned straight to a local compiles

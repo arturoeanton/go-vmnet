@@ -278,6 +278,19 @@ func (asm *Assembly) resolveTypeByFullName(fullName string) (*runtime.Type, erro
 	if t, ok := asm.cachedType(fullName); ok {
 		return t, nil
 	}
+	// A native BCL value type (System.TimeSpan, ...) has no TypeDef in
+	// the plugin's own metadata — buildType/FindTypeDef below would
+	// never find it. Found the hard way (Fase 3.23): TimeSpan.Zero is a
+	// real static field (`ldsfld System.TimeSpan::Zero`), and resolving
+	// ir.LoadStaticField's owning type goes through this exact function.
+	// bcl's own synthetic Type is already the single shared instance
+	// backing every value of that type (initobj/newobj already resolve
+	// it the same way, internal/interpreter/structs.go) — returned
+	// directly, not cached into asm.types, since it isn't owned by this
+	// Assembly at all.
+	if t, ok := bcl.LookupValueType(fullName); ok {
+		return t, nil
+	}
 	t, err := asm.buildType(fullName)
 	if err != nil {
 		return nil, err

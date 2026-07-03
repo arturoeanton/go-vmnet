@@ -1427,3 +1427,153 @@ func TestAsync(t *testing.T) {
 		}
 	})
 }
+
+// TestCheapWins4 exercises the Fase 3.23 fourth cheap-win BCL bundle
+// (DateTimeOffset, DateTime operators, Double.TryParse, Convert.ToInt64,
+// Char.ToLowerInvariant, Int64.ToString, ValueTuple, more LINQ,
+// CultureInfo) and two real interpreter bugs it exposed: fieldSlot
+// never handling a struct receiver passed by value (not a managed
+// pointer), and the interface-dispatch fallback pushing nothing when
+// the redirected callee's signature genuinely differs from the declared
+// interface's (IList.Add returns int, List<T>.Add is void).
+func TestCheapWins4(t *testing.T) {
+	asm := loadFixture(t)
+
+	t.Run("DateTimeOffset.UtcDateTime.Ticks", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins4", "DateTimeOffsetTest")
+		if err != nil {
+			t.Fatalf("DateTimeOffsetTest() error = %v", err)
+		}
+		if got := out.Native().(int64); got != 638460936000000000 {
+			t.Errorf("DateTimeOffsetTest() = %d, want 638460936000000000", got)
+		}
+	})
+
+	t.Run("DateTime op_Subtraction", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins4", "DateTimeSubtractTest")
+		if err != nil {
+			t.Fatalf("DateTimeSubtractTest() error = %v", err)
+		}
+		if got := out.Native().(float64); got != 1 {
+			t.Errorf("DateTimeSubtractTest() = %v, want 1", got)
+		}
+	})
+
+	t.Run("DateTime op_Equality", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins4", "DateTimeEqualityTest")
+		if err != nil {
+			t.Fatalf("DateTimeEqualityTest() error = %v", err)
+		}
+		if got := out.Native().(int32); got == 0 {
+			t.Errorf("DateTimeEqualityTest() = %d, want nonzero", got)
+		}
+	})
+
+	t.Run("Double.TryParse", func(t *testing.T) {
+		ok, err := asm.Call("Vmnet.Fixtures.CheapWins4", "DoubleTryParseTest", String("3.14"))
+		if err != nil {
+			t.Fatalf("DoubleTryParseTest(3.14) error = %v", err)
+		}
+		if got := ok.Native().(int32); got == 0 {
+			t.Errorf("DoubleTryParseTest(3.14) = %d, want nonzero", got)
+		}
+
+		bad, err := asm.Call("Vmnet.Fixtures.CheapWins4", "DoubleTryParseTest", String("nope"))
+		if err != nil {
+			t.Fatalf("DoubleTryParseTest(nope) error = %v", err)
+		}
+		if got := bad.Native().(int32); got != 0 {
+			t.Errorf("DoubleTryParseTest(nope) = %d, want 0", got)
+		}
+	})
+
+	t.Run("Convert.ToInt64", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins4", "ConvertToInt64Test")
+		if err != nil {
+			t.Fatalf("ConvertToInt64Test() error = %v", err)
+		}
+		if got := out.Native().(int64); got != 123456789012 {
+			t.Errorf("ConvertToInt64Test() = %d, want 123456789012", got)
+		}
+	})
+
+	t.Run("Char.ToLowerInvariant", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins4", "ToLowerInvariantTest", Int32('A'))
+		if err != nil {
+			t.Fatalf("ToLowerInvariantTest() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 'a' {
+			t.Errorf("ToLowerInvariantTest() = %d, want %d ('a')", got, int32('a'))
+		}
+	})
+
+	t.Run("Int64.ToString", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins4", "Int64ToStringTest", Int64(123456789012))
+		if err != nil {
+			t.Fatalf("Int64ToStringTest() error = %v", err)
+		}
+		if got := out.Native().(string); got != "123456789012" {
+			t.Errorf("Int64ToStringTest() = %q, want %q", got, "123456789012")
+		}
+	})
+
+	t.Run("ValueTuple field access without a managed pointer", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins4", "ValueTupleTest")
+		if err != nil {
+			t.Fatalf("ValueTupleTest() error = %v", err)
+		}
+		if got := out.Native().(string); got != "1hello" {
+			t.Errorf("ValueTupleTest() = %q, want %q", got, "1hello")
+		}
+	})
+
+	t.Run("LINQ SelectMany", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins4", "SelectManyTest")
+		if err != nil {
+			t.Fatalf("SelectManyTest() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 10 {
+			t.Errorf("SelectManyTest() = %d, want 10", got)
+		}
+	})
+
+	t.Run("LINQ Contains over an array", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins4", "LinqContainsOverArrayTest")
+		if err != nil {
+			t.Fatalf("LinqContainsOverArrayTest() error = %v", err)
+		}
+		if got := out.Native().(int32); got == 0 {
+			t.Errorf("LinqContainsOverArrayTest() = %d, want nonzero", got)
+		}
+	})
+
+	t.Run("LINQ Take", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins4", "TakeTest")
+		if err != nil {
+			t.Fatalf("TakeTest() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 3 {
+			t.Errorf("TakeTest() = %d, want 3", got)
+		}
+	})
+
+	t.Run("CultureInfo.CurrentCulture.Name stub", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins4", "CultureNameTest")
+		if err != nil {
+			t.Fatalf("CultureNameTest() error = %v", err)
+		}
+		if got := out.Native().(string); got != "" {
+			t.Errorf("CultureNameTest() = %q, want empty", got)
+		}
+	})
+
+	t.Run("IList.Add signature mismatch does not crash", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins4", "IListAddTest")
+		if err != nil {
+			t.Fatalf("IListAddTest() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 2 {
+			t.Errorf("IListAddTest() = %d, want 2", got)
+		}
+	})
+}

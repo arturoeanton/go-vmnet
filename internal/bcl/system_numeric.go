@@ -18,6 +18,21 @@ func init() {
 	register("System.Int32::Parse", true, int32Parse)
 	register("System.Int32::TryParse", true, int32TryParse)
 	register("System.Int32::CompareTo", true, int32CompareTo)
+	register("System.Int64::ToString", true, int64ToString)
+}
+
+func int64ToString(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Int64.ToString expects an int64 receiver")
+	}
+	v := args[0]
+	if v.Kind == runtime.KindRef && v.Ref != nil {
+		v = *v.Ref
+	}
+	if v.Kind != runtime.KindI8 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Int64.ToString expects an int64 receiver")
+	}
+	return runtime.String(strconv.FormatInt(v.I8, 10)), nil
 }
 
 func int32Parse(args []runtime.Value) (runtime.Value, error) {

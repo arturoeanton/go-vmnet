@@ -41,6 +41,10 @@ func init() {
 	machineRegistry["System.Linq.Enumerable::ToList"] = linqToList
 	machineRegistry["System.Linq.Enumerable::ToArray"] = linqToArray
 	machineRegistry["System.Linq.Enumerable::FirstOrDefault"] = linqFirstOrDefault
+	machineRegistry["System.Linq.Enumerable::SelectMany"] = linqSelectMany
+	machineRegistry["System.Linq.Enumerable::Take"] = linqTake
+	machineRegistry["System.Linq.Enumerable::Contains"] = linqContains
+	machineRegistry["System.Linq.Enumerable::Empty"] = linqEmpty
 }
 
 // enumerateAll drives an arbitrary IEnumerable<T>'s real iteration
@@ -246,4 +250,71 @@ func linqFirstOrDefault(m *Machine, args []runtime.Value, depth int, instrCount 
 		}
 	}
 	return runtime.Null(), nil
+}
+
+// linqSelectMany flattens each element's own inner sequence (produced by
+// invoking the selector) into one result — the selector's return value
+// is enumerated the same general way any LINQ source is (m.enumerateAll),
+// so an inner List<T>, array, or another LINQ result all work uniformly.
+func linqSelectMany(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.SelectMany expects (source, selector)")
+	}
+	elems, err := m.enumerateAll(args[0], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	var out []runtime.Value
+	for _, e := range elems {
+		inner, err := m.linqInvoke(args[1], e, depth, instrCount)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		innerElems, err := m.enumerateAll(inner, depth, instrCount)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		out = append(out, innerElems...)
+	}
+	return bcl.NewListValue(out), nil
+}
+
+func linqTake(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 2 || args[1].Kind != runtime.KindI4 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.Take expects (source, count)")
+	}
+	elems, err := m.enumerateAll(args[0], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	n := int(args[1].I4)
+	if n < 0 {
+		n = 0
+	}
+	if n > len(elems) {
+		n = len(elems)
+	}
+	out := make([]runtime.Value, n)
+	copy(out, elems[:n])
+	return bcl.NewListValue(out), nil
+}
+
+func linqContains(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) < 2 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.Contains expects (source, value)")
+	}
+	elems, err := m.enumerateAll(args[0], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	for _, e := range elems {
+		if valuesDeepEqual(e, args[1]) {
+			return runtime.Bool(true), nil
+		}
+	}
+	return runtime.Bool(false), nil
+}
+
+func linqEmpty(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	return bcl.NewListValue(nil), nil
 }

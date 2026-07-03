@@ -70,6 +70,9 @@ func init() {
 		"System.Collections.Generic.IDictionary`2::ContainsKey",
 		"System.Collections.Generic.IList`1::get_Item",
 		"System.Collections.Generic.IList`1::set_Item",
+		"System.Collections.IList::Add",
+		"System.Collections.IList::get_Item",
+		"System.Collections.IList::set_Item",
 		"System.Collections.Generic.IReadOnlyList`1::get_Item",
 		"System.Collections.Generic.IReadOnlyCollection`1::get_Count",
 		"System.Collections.Generic.IEqualityComparer`1::Equals",
@@ -134,6 +137,9 @@ func init() {
 		"System.Runtime.CompilerServices.ConfiguredTaskAwaitable`1::",
 		"System.Runtime.CompilerServices.ConfiguredTaskAwaitable+ConfiguredTaskAwaiter::",
 		"System.Runtime.CompilerServices.ConfiguredTaskAwaitable`1+ConfiguredTaskAwaiter::",
+		"System.DateTimeOffset::",
+		"System.ValueTuple`2::",
+		"System.Int64::",
 	)
 	// netstandard-lite currently promises exactly the same BCL surface as
 	// rules (System.Type moved into `rules` in Fase 3.14, System.Convert

@@ -23,6 +23,11 @@ func init() {
 	register("System.Char::ToString", true, charToString)
 	register("System.Char::ToUpper", true, charTransform(unicode.ToUpper))
 	register("System.Char::ToLower", true, charTransform(unicode.ToLower))
+	// vmnet has no culture support anywhere (CultureInfo's stub since
+	// Fase 3.6) — the *Invariant variants use the exact same
+	// transformation as their culture-sensitive counterparts.
+	register("System.Char::ToUpperInvariant", true, charTransform(unicode.ToUpper))
+	register("System.Char::ToLowerInvariant", true, charTransform(unicode.ToLower))
 }
 
 func charArg(args []runtime.Value) (rune, error) {

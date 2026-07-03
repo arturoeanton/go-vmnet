@@ -231,6 +231,10 @@ var linqTargets = map[string]bool{
 	"System.Linq.Enumerable::ToList":         true,
 	"System.Linq.Enumerable::ToArray":        true,
 	"System.Linq.Enumerable::FirstOrDefault": true,
+	"System.Linq.Enumerable::SelectMany":     true,
+	"System.Linq.Enumerable::Take":           true,
+	"System.Linq.Enumerable::Contains":       true,
+	"System.Linq.Enumerable::Empty":          true,
 }
 
 // interfaceDispatchTargets lists the foreach iteration protocol's
@@ -257,6 +261,9 @@ var interfaceDispatchTargets = map[string]bool{
 	"System.Collections.Generic.ICollection`1::Add":               true,
 	"System.Collections.Generic.ICollection`1::get_Count":         true,
 	"System.Collections.ICollection::get_Count":                   true,
+	"System.Collections.IList::Add":                               true,
+	"System.Collections.IList::get_Item":                          true,
+	"System.Collections.IList::set_Item":                          true,
 	"System.Collections.Generic.IDictionary`2::set_Item":          true,
 	"System.Collections.Generic.IDictionary`2::get_Item":          true,
 	"System.Collections.Generic.IDictionary`2::TryGetValue":       true,

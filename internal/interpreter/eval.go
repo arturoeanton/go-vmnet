@@ -275,8 +275,30 @@ func (m *Machine) runFrame(frame *Frame, method *runtime.Method, depth int, inst
 			if err != nil {
 				return runtime.Value{}, err
 			}
-			if hasReturn {
-				frame.push(result)
+			// The call site's own declared signature (in.HasReturn, known
+			// from the MethodRef at IR-build time) is authoritative for
+			// the stack effect — not hasReturn, whatever the resolved
+			// callee itself reports. These normally agree, but the Fase
+			// 3.13 interface-dispatch fallback can redirect a call to a
+			// concrete method whose real signature genuinely differs from
+			// the interface's declared one (found via a real example:
+			// non-generic System.Collections.IList::Add returns int, but
+			// it redirects to List`1::Add, which is void — pushing
+			// nothing there left the stack one short of what the
+			// following instruction expected, an index-out-of-range panic
+			// popping a value that was never pushed). Pushing Null() as a
+			// placeholder keeps the stack balanced for the overwhelmingly
+			// common case where that return value is immediately
+			// discarded (e.g. `pop` right after) — a real numeric result
+			// (the inserted index) is only lost if a caller actually
+			// captures IList.Add's return value, a rare pattern in
+			// practice.
+			if in.HasReturn {
+				if hasReturn {
+					frame.push(result)
+				} else {
+					frame.push(runtime.Null())
+				}
 			}
 
 		case ir.NewObj:
@@ -496,11 +518,17 @@ func fieldIndex(obj *runtime.Object, name string) int {
 
 // fieldSlot resolves ldfld/stfld/ldflda's receiver to the addressable
 // Value slot backing fieldName: a class instance (receiver is
-// KindObject), or a value type reached through a managed pointer
-// (receiver is KindRef to a KindStruct — this is how a struct's own
-// instance methods receive `this`, and how ldflda's own result chains
-// into a nested struct field access). Spec §III.4.10/4.28: ldfld/stfld
-// accept either shape uniformly.
+// KindObject), a value type reached through a managed pointer (receiver
+// is KindRef to a KindStruct — this is how a struct's own instance
+// methods receive `this`, and how ldflda's own result chains into a
+// nested struct field access), or — found via a real example
+// (ValueTuple`2's second field read in `t.Item1 + t.Item2`, Fase 3.23) —
+// a struct value handed over directly with no managed pointer at all: a
+// plain `ldloc`+`ldfld` (not `ldloca`+`ldfld`) is legal per spec
+// §III.4.10 and real compiler output does emit it, at least once the
+// local's address has already been taken earlier in the same
+// expression. Spec §III.4.10/4.28: ldfld/stfld accept all three shapes
+// uniformly.
 func fieldSlot(receiver runtime.Value, typeFullName, fieldName string) (*runtime.Value, error) {
 	switch receiver.Kind {
 	case runtime.KindObject:
@@ -528,6 +556,18 @@ func fieldSlot(receiver runtime.Value, typeFullName, fieldName string) (*runtime
 			return nil, fmt.Errorf("interpreter: %s has no field %q", typeFullName, fieldName)
 		}
 		return &s.Fields[idx], nil
+	case runtime.KindStruct:
+		if receiver.Struct == nil {
+			return nil, &runtime.ManagedException{
+				TypeName: "System.NullReferenceException",
+				Message:  fmt.Sprintf("Object reference not set to an instance of an object (%s.%s)", typeFullName, fieldName),
+			}
+		}
+		idx := receiver.Struct.Type.FieldIndex(fieldName)
+		if idx < 0 {
+			return nil, fmt.Errorf("interpreter: %s has no field %q", typeFullName, fieldName)
+		}
+		return &receiver.Struct.Fields[idx], nil
 	default:
 		return nil, &runtime.ManagedException{
 			TypeName: "System.NullReferenceException",

@@ -2243,6 +2243,110 @@ go test ./... -race -count=5
 go test ./ -run TestAsync -v
 ```
 
+### Fase 3.23 — Cuarto paquete de wins baratos + dos bugs reales de corrección
+
+Cuarta ronda de hallazgos del probe (`DateTimeOffset`, operadores de `DateTime`,
+`Double.TryParse`, `Convert.ToInt64`, `Char.ToLowerInvariant`, `Int64.ToString`, `ValueTuple`,
+más LINQ, `CultureInfo`, `IList`). Verificar estos natives contra IL real expuso dos bugs
+genuinos en mecanismos ya existentes (el despacho por interfaz de Fase 3.13 y `fieldSlot` desde
+Fase 3.7), no solo faltantes de superficie.
+
+**Tareas — wins baratos**
+
+- [x] `System.DateTimeOffset` (`internal/bcl/system_datetimeoffset.go`, archivo nuevo): value type
+      sintético de dos campos (`ticks` UTC + `offsetTicks`) — mismo doble registro `newobj`+`call`
+      plano que `DateTime`/`Nullable`1`/`TimeSpan`/`KeyValuePair` ya necesitaron.
+      `get_UtcDateTime`/`get_DateTime`/`get_Offset`/`get_Ticks`.
+- [x] `DateTime::op_Subtraction` (devuelve `TimeSpan`, reusando el mismo campo `ticks` de 100ns),
+      `op_Equality`/`op_Inequality`, `ToUniversalTime`/`ToLocalTime` (función identidad — vmnet no
+      tiene zona horaria local real contra la cual convertir, mismo razonamiento que
+      `Environment.NewLine` desde Fase 3.18).
+- [x] `Double.TryParse` (mismo mecanismo de `out` por puntero administrado que `Int32.TryParse`),
+      `Double.Equals`, `Convert.ToInt64`, `Char.ToUpperInvariant`/`ToLowerInvariant` (misma
+      transformación que las variantes sensibles a cultura — vmnet no tiene soporte de cultura en
+      ningún lado), `Int64.ToString`.
+- [x] `System.ValueTuple`2` (`internal/bcl/system_valuetuple.go`, archivo nuevo) — a diferencia de
+      cualquier otro value type de este paquete, sus miembros (`Item1`/`Item2`) son campos
+      públicos reales, no propiedades: registrarlo como value type sintético con esos dos campos
+      alcanza, `ldfld`/`stfld` ya resuelven genéricamente contra cualquier `Type.FieldIndex`
+      registrado — cero código nativo de getter/setter necesario.
+- [x] LINQ: `SelectMany` (aplana invocando el selector y enumerando su resultado con el mismo
+      `enumerateAll` genérico), `Take`, `Contains`, `Empty`.
+- [x] `System.Collections.IList::Add`/`get_Item`/`set_Item` agregados al allowlist de despacho por
+      interfaz de Fase 3.13 (`IList.Count` ya funcionaba gratis: en la BCL real `Count` lo declara
+      `ICollection`, no `IList`, y `System.Collections.ICollection::get_Count` ya estaba desde
+      Fase 3.13 — mismo patrón "miembro heredado, no redeclarado" que `Match.Success`/`Value` en
+      Fase 3.20).
+- [x] `CultureInfo::get_CurrentCulture`/`get_Name` (stubs).
+
+**Tareas — bugs reales encontrados y arreglados**
+
+- [x] **Bug — el despacho por interfaz (Fase 3.13) podía dejar la pila corta cuando la firma
+      real del método concreto difiere de la de la interfaz declarada**: `System.Collections.
+      IList::Add` devuelve `int` (el índice insertado), pero redirige a `List`1::Add`, que es
+      `void`. La pila se desbalanceaba (nada empujado donde el sitio de llamada esperaba un
+      valor), causando un panic real (`index out of range [-1]`) en la siguiente instrucción que
+      intentaba consumirlo — encontrado ejecutando el fixture real, no por inspección. Arreglado
+      en `internal/interpreter/eval.go`: la decisión de empujar un resultado ahora usa
+      `in.HasReturn` (la firma declarada en el sitio de llamada, conocida en tiempo de
+      construcción del IR) como autoridad, no el `hasReturn` que reporta el callee finalmente
+      resuelto — si difieren, se empuja `Null()` como placeholder para mantener la pila
+      balanceada (el resultado real solo se pierde si alguien de verdad captura el valor de
+      retorno de `IList.Add`, un patrón raro en la práctica).
+- [x] **Bug — `fieldSlot` nunca manejaba un receptor struct pasado por valor directo (sin
+      puntero administrado)**: hasta ahora, cada acceso a campo de struct visto en este proyecto
+      usaba `ldloca`+`ldfld` (puntero administrado, el caso `KindRef` de `fieldSlot`). El fixture
+      de `ValueTuple` reveló que el compilador real a veces emite `ldloc`+`ldfld` directo (sin
+      dirección) para el *segundo* acceso a campo en la misma expresión (`t.Item1 + t.Item2`:
+      `Item1` vía `ldloca`+`ldflda`, pero `Item2` vía `ldloc`+`ldfld` plano) — legal según spec
+      §III.4.10, pero un caso nunca antes ejercitado en la práctica. `fieldSlot` solo tenía casos
+      para `KindObject`/`KindRef`; un `KindStruct` bare caía al `default:` y lanzaba
+      `NullReferenceException`. Se agregó el caso `KindStruct` directo.
+- [x] **Descubrimiento arquitectónico — un value type nativo de BCL nunca había necesitado un
+      campo *estático* real hasta `TimeSpan.Zero`**: es un campo público estático real (`ldsfld
+      System.TimeSpan::Zero`), no una propiedad. `runtime.NewValueType` no soporta campos
+      estáticos en absoluto (documentado en su propio comentario, nunca hacía falta); `timeSpanType`
+      se reconstruyó usando `runtime.NewType` directamente más `SetStaticField` para el valor real
+      (un `TimeSpan` cero que se autorreferencia, por lo que no puede ir en el literal de
+      construcción). También se agregó un fallback en `resolveTypeByFullName` (`assembly.go`)
+      para consultar `bcl.LookupValueType` cuando el tipo no tiene `TypeDef` en el ensamblado del
+      plugin — necesario para que `ir.LoadStaticField` pueda resolver el `*runtime.Type` de
+      `System.TimeSpan` en absoluto.
+
+**Fixtures y tests**
+
+- [x] `CheapWins4.cs` / `TestCheapWins4` — un caso por cada native de la lista de arriba, más
+      `IListAddTest` (regresión del bug de firma distinta) y `ValueTupleTest` (regresión del bug
+      de `fieldSlot`)
+
+### Re-certificación contra los mismos 8 targets (7 paquetes + Jint)
+
+| Paquete | % limpio Fase 3.22 | % limpio Fase 3.23 |
+|---|---|---|
+| `Ardalis.GuardClauses@5.0.0` | 96.8% | 96.8% |
+| `FluentValidation@11.9.2` | 91.5% | 92.7% |
+| `System.Text.Json@8.0.5` | 82.4% | 82.7% |
+| `Newtonsoft.Json@13.0.3` | 78.6% | 79.2% |
+| `Semver@2.3.0` | 90.8% | 91.0% |
+| `SimpleBase@4.0.0` | 84.1% | 85.3% |
+| `Humanizer.Core@2.14.1` | 92.6% | 93.3% |
+| **Promedio (7 paquetes)** | **88.1%** | **88.7%** |
+| `Jint@3.1.3` | 86.8% | 87.2% |
+| **Promedio (7 paquetes + Jint)** | **88.0%** | **88.5%** |
+
++0.6 puntos (+0.5 con Jint) — movimiento chico esperado para una ronda de wins dispersos, pero el
+valor real de la fase son los dos bugs de corrección arreglados (uno de ellos, el de la pila
+desbalanceada, es un riesgo que existía silenciosamente desde Fase 3.13 en CUALQUIER despacho por
+interfaz con firma incompatible, no solo `IList.Add`). Con 88.5% el objetivo de ~97% todavía no se
+alcanza.
+
+### Cómo verificar Fase 3.23
+
+```bash
+go test ./... -race -count=5
+go test ./ -run TestCheapWins4 -v
+```
+
 ---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")

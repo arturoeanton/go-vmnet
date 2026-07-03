@@ -98,6 +98,50 @@ func init() {
 	register("System.DateTime::ToString", true, dateTimeToString)
 	register("System.DateTime::CompareTo", true, dateTimeCompareTo)
 	register("System.DateTime::Equals", true, dateTimeEquals)
+	register("System.DateTime::op_Equality", true, dateTimeEquals)
+	register("System.DateTime::op_Inequality", true, dateTimeNotEquals)
+	register("System.DateTime::op_Subtraction", true, dateTimeSubtract)
+	// vmnet has no real local-timezone concept (see Environment.NewLine's
+	// same "no host OS to consult" reasoning, Fase 3.18) — ToUniversalTime
+	// is the identity function, consistent with every DateTime already
+	// effectively being UTC/unspecified internally.
+	register("System.DateTime::ToUniversalTime", true, dateTimeIdentity)
+	register("System.DateTime::ToLocalTime", true, dateTimeIdentity)
+}
+
+func dateTimeIdentity(args []runtime.Value) (runtime.Value, error) {
+	t, _, err := asDateTime(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	return dateTimeFromTime(t), nil
+}
+
+func dateTimeNotEquals(args []runtime.Value) (runtime.Value, error) {
+	v, err := dateTimeEquals(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	return runtime.Bool(!v.Truthy()), nil
+}
+
+// dateTimeSubtract backs DateTime::op_Subtraction(DateTime,DateTime),
+// returning a TimeSpan (defined in system_timespan.go, Fase 3.19) — the
+// tick difference maps directly since both share the same 100ns-tick
+// representation.
+func dateTimeSubtract(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("bcl: DateTime.op_Subtraction expects 2 DateTime arguments")
+	}
+	a, _, err := asDateTime(args[0:1])
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	b, _, err := asDateTime(args[1:2])
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	return timeSpanFromTicks(timeToTicks(a) - timeToTicks(b)), nil
 }
 
 // dateTimeCtor covers the fixed-arity overloads real code actually uses:

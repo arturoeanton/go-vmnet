@@ -488,3 +488,30 @@ anteriores. Certificación: 85.1% a **88.1%** (85.3% a **88.0%** con
 Jint) — `SimpleBase` (+8.5) y `Newtonsoft.Json` (+6.2) confirman la
 hipótesis del análisis de techo. Con 88.0% el objetivo de ~97% todavía
 no se alcanza.
+
+Fase 3.23 (cuarto paquete de wins baratos) completa, con dos bugs
+reales de corrección encontrados verificando contra IL real, no solo
+superficie nueva. Primero: el despacho por interfaz de Fase 3.13 podía
+dejar la pila corta cuando la firma real del método concreto difiere de
+la interfaz declarada (`IList.Add` devuelve `int`, redirige a
+`List`1::Add`, que es `void`) — causaba un panic real
+(`index out of range`), arreglado usando la firma declarada en el sitio
+de llamada (`in.HasReturn`) como autoridad para decidir si empujar un
+resultado, no lo que reporte el callee finalmente resuelto. Segundo:
+`fieldSlot` nunca manejaba un receptor struct pasado por valor directo
+(sin puntero administrado) — hasta ahora todo acceso a campo de struct
+visto usaba `ldloca`+`ldfld`, pero `ValueTuple`'s `t.Item1 + t.Item2`
+reveló que el compilador real a veces emite `ldloc`+`ldfld` plano para
+el segundo acceso en la misma expresión, legal per spec §III.4.10 pero
+nunca antes ejercitado. También se descubrió que ningún value type
+nativo de BCL había necesitado un campo *estático* real hasta
+`TimeSpan.Zero` (un campo público, no propiedad) — `runtime.
+NewValueType` no lo soporta en absoluto, así que `timeSpanType` se
+reconstruyó vía `runtime.NewType` + `SetStaticField`, con un fallback
+nuevo en `resolveTypeByFullName` para que tipos BCL nativos sin
+`TypeDef` en el ensamblado del plugin puedan resolverse igual.
+Certificación: 88.1% a 88.7% (88.0% a 88.5% con Jint) — movimiento chico
+esperado para wins dispersos, pero el valor real son los dos bugs de
+corrección (uno de ellos era un riesgo silencioso desde Fase 3.13 en
+cualquier despacho por interfaz con firma incompatible). Con 88.5% el
+objetivo de ~97% todavía no se alcanza.
