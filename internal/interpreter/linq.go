@@ -2,6 +2,7 @@ package interpreter
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/arturoeanton/go-vmnet/internal/bcl"
 	"github.com/arturoeanton/go-vmnet/internal/runtime"
@@ -45,6 +46,17 @@ func init() {
 	machineRegistry["System.Linq.Enumerable::Take"] = linqTake
 	machineRegistry["System.Linq.Enumerable::Contains"] = linqContains
 	machineRegistry["System.Linq.Enumerable::Empty"] = linqEmpty
+	machineRegistry["System.Linq.Enumerable::Cast"] = linqCast
+	machineRegistry["System.Linq.Enumerable::OfType"] = linqCast
+	machineRegistry["System.Linq.Enumerable::First"] = linqFirst
+	machineRegistry["System.Linq.Enumerable::LastOrDefault"] = linqLastOrDefault
+	machineRegistry["System.Linq.Enumerable::Count"] = linqCount
+	machineRegistry["System.Linq.Enumerable::Distinct"] = linqDistinct
+	machineRegistry["System.Linq.Enumerable::OrderBy"] = linqOrderBy
+	machineRegistry["System.Linq.Enumerable::Concat"] = linqConcat
+	machineRegistry["System.Linq.Enumerable::ToDictionary"] = linqToDictionary
+	machineRegistry["System.Linq.Enumerable::Max"] = linqMax
+	machineRegistry["System.Collections.Generic.List`1::ForEach"] = listForEach
 }
 
 // enumerateAll drives an arbitrary IEnumerable<T>'s real iteration
@@ -317,4 +329,331 @@ func linqContains(m *Machine, args []runtime.Value, depth int, instrCount *int64
 
 func linqEmpty(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
 	return bcl.NewListValue(nil), nil
+}
+
+// linqCast backs both Cast<T> and OfType<T>: vmnet's runtime.Value is
+// already a uniform tagged union with no reified generic type-argument
+// info at this call site, so both simply pass the sequence through
+// unchanged rather than attempting a real type check/filter — real
+// Cast<T> would InvalidCastException on a wrong-shaped element and real
+// OfType<T> would silently drop one, neither of which vmnet can
+// distinguish without T. Documented approximation, same posture as
+// Dictionary.TryGetValue's untyped miss case (Fase 3.13).
+func linqCast(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.Cast/OfType expects a source")
+	}
+	elems, err := m.enumerateAll(args[0], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	return bcl.NewListValue(elems), nil
+}
+
+// linqFirst covers First(source) and First(source, predicate) — unlike
+// FirstOrDefault, an empty/no-match result throws
+// InvalidOperationException, matching real Enumerable.First.
+func linqFirst(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.First expects a source")
+	}
+	elems, err := m.enumerateAll(args[0], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	if len(args) == 1 {
+		if len(elems) == 0 {
+			return runtime.Value{}, &runtime.ManagedException{TypeName: "System.InvalidOperationException", Message: "Sequence contains no elements"}
+		}
+		return elems[0], nil
+	}
+	for _, e := range elems {
+		v, err := m.linqInvoke(args[1], e, depth, instrCount)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		if v.Truthy() {
+			return e, nil
+		}
+	}
+	return runtime.Value{}, &runtime.ManagedException{TypeName: "System.InvalidOperationException", Message: "Sequence contains no matching element"}
+}
+
+func linqLastOrDefault(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.LastOrDefault expects a source")
+	}
+	elems, err := m.enumerateAll(args[0], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	if len(args) == 1 {
+		if len(elems) == 0 {
+			return runtime.Null(), nil
+		}
+		return elems[len(elems)-1], nil
+	}
+	for i := len(elems) - 1; i >= 0; i-- {
+		v, err := m.linqInvoke(args[1], elems[i], depth, instrCount)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		if v.Truthy() {
+			return elems[i], nil
+		}
+	}
+	return runtime.Null(), nil
+}
+
+func linqCount(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.Count expects a source")
+	}
+	elems, err := m.enumerateAll(args[0], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	if len(args) == 1 {
+		return runtime.Int32(int32(len(elems))), nil
+	}
+	n := 0
+	for _, e := range elems {
+		v, err := m.linqInvoke(args[1], e, depth, instrCount)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		if v.Truthy() {
+			n++
+		}
+	}
+	return runtime.Int32(int32(n)), nil
+}
+
+func linqDistinct(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.Distinct expects a source")
+	}
+	elems, err := m.enumerateAll(args[0], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	var out []runtime.Value
+	for _, e := range elems {
+		dup := false
+		for _, o := range out {
+			if valuesDeepEqual(e, o) {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			out = append(out, e)
+		}
+	}
+	return bcl.NewListValue(out), nil
+}
+
+func linqConcat(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.Concat expects (first, second)")
+	}
+	a, err := m.enumerateAll(args[0], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	b, err := m.enumerateAll(args[1], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	out := make([]runtime.Value, 0, len(a)+len(b))
+	out = append(out, a...)
+	out = append(out, b...)
+	return bcl.NewListValue(out), nil
+}
+
+// linqCompare orders two same-Kind primitive values — the numeric/string
+// ordering OrderBy/Max need. vmnet has no IComparable dispatch, so a
+// mismatched-Kind or non-primitive comparison (e.g. two plugin objects
+// with a custom IComparable) is reported rather than guessed.
+func linqCompare(a, b runtime.Value) (int, error) {
+	if a.Kind != b.Kind {
+		return 0, fmt.Errorf("interpreter: LINQ ordering: mismatched value kinds")
+	}
+	switch a.Kind {
+	case runtime.KindI4:
+		switch {
+		case a.I4 < b.I4:
+			return -1, nil
+		case a.I4 > b.I4:
+			return 1, nil
+		default:
+			return 0, nil
+		}
+	case runtime.KindI8:
+		switch {
+		case a.I8 < b.I8:
+			return -1, nil
+		case a.I8 > b.I8:
+			return 1, nil
+		default:
+			return 0, nil
+		}
+	case runtime.KindR4:
+		switch {
+		case a.R4 < b.R4:
+			return -1, nil
+		case a.R4 > b.R4:
+			return 1, nil
+		default:
+			return 0, nil
+		}
+	case runtime.KindR8:
+		switch {
+		case a.R8 < b.R8:
+			return -1, nil
+		case a.R8 > b.R8:
+			return 1, nil
+		default:
+			return 0, nil
+		}
+	case runtime.KindString:
+		switch {
+		case a.Str < b.Str:
+			return -1, nil
+		case a.Str > b.Str:
+			return 1, nil
+		default:
+			return 0, nil
+		}
+	default:
+		return 0, fmt.Errorf("interpreter: LINQ ordering: unsupported value kind")
+	}
+}
+
+func linqOrderBy(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.OrderBy expects (source, keySelector)")
+	}
+	elems, err := m.enumerateAll(args[0], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	type keyed struct {
+		key runtime.Value
+		val runtime.Value
+	}
+	pairs := make([]keyed, len(elems))
+	for i, e := range elems {
+		k, err := m.linqInvoke(args[1], e, depth, instrCount)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		pairs[i] = keyed{key: k, val: e}
+	}
+	var sortErr error
+	sort.SliceStable(pairs, func(i, j int) bool {
+		c, err := linqCompare(pairs[i].key, pairs[j].key)
+		if err != nil {
+			sortErr = err
+			return false
+		}
+		return c < 0
+	})
+	if sortErr != nil {
+		return runtime.Value{}, sortErr
+	}
+	out := make([]runtime.Value, len(pairs))
+	for i, p := range pairs {
+		out[i] = p.val
+	}
+	return bcl.NewListValue(out), nil
+}
+
+func linqMax(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.Max expects a source")
+	}
+	elems, err := m.enumerateAll(args[0], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	if len(elems) == 0 {
+		return runtime.Value{}, &runtime.ManagedException{TypeName: "System.InvalidOperationException", Message: "Sequence contains no elements"}
+	}
+	vals := elems
+	if len(args) >= 2 {
+		vals = make([]runtime.Value, len(elems))
+		for i, e := range elems {
+			v, err := m.linqInvoke(args[1], e, depth, instrCount)
+			if err != nil {
+				return runtime.Value{}, err
+			}
+			vals[i] = v
+		}
+	}
+	best := vals[0]
+	for _, v := range vals[1:] {
+		c, err := linqCompare(v, best)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		if c > 0 {
+			best = v
+		}
+	}
+	return best, nil
+}
+
+// linqToDictionary covers ToDictionary(source, keySelector) and
+// ToDictionary(source, keySelector, valueSelector). Keys are stringified
+// via Value.String() — nativeDict only supports string keys (Fase 2's
+// documented scope) — and a duplicate key overwrites rather than
+// throwing ArgumentException like real ToDictionary: a pragmatic
+// simplification, not yet load-bearing for any target package's real
+// usage found in this loop.
+func linqToDictionary(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) < 2 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.ToDictionary expects (source, keySelector[, valueSelector])")
+	}
+	elems, err := m.enumerateAll(args[0], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	pairs := make(map[string]runtime.Value, len(elems))
+	for _, e := range elems {
+		k, err := m.linqInvoke(args[1], e, depth, instrCount)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		v := e
+		if len(args) >= 3 {
+			v, err = m.linqInvoke(args[2], e, depth, instrCount)
+			if err != nil {
+				return runtime.Value{}, err
+			}
+		}
+		pairs[k.String()] = v
+	}
+	return bcl.NewDictValue(pairs), nil
+}
+
+// listForEach backs List<T>.ForEach — a machine-aware native (needs to
+// invoke the Action<T> argument) despite living conceptually next to
+// system_collections.go's plain-native List methods; registered here
+// alongside LINQ since both need machineRegistry/Machine access for the
+// same reason (Fase 3.32).
+func listForEach(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("interpreter: List.ForEach expects (this, action)")
+	}
+	elems, err := m.enumerateAll(args[0], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	for _, e := range elems {
+		if _, err := m.linqInvoke(args[1], e, depth, instrCount); err != nil {
+			return runtime.Value{}, err
+		}
+	}
+	return runtime.Value{}, nil
 }

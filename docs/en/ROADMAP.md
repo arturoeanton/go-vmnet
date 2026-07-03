@@ -3143,6 +3143,62 @@ go test ./... -race -count=5
 /tmp/vmnet-cli check package ClosedXML@0.105.0 --profile=netstandard-lite # no System.Math findings
 ```
 
+### Fase 3.32 — `Dictionary.Values`/`.Keys`, `List.Remove`/`ForEach`, and 11 more LINQ methods
+
+ClosedXML's single largest remaining blocker class: `System.Linq.Enumerable` gaps (`Cast`/`First`/
+`LastOrDefault`/`Count`/`Distinct`/`OrderBy`/`Concat`/`OfType`/`ToDictionary`/`Max` — ~370 combined
+findings), plus `Dictionary.Values`/`.Keys` and their `ValueCollection`/`KeyCollection` enumerators
+(~130 combined across both packages) and `List<T>.Remove`/`.ForEach` (25 + 43). All machine-aware
+LINQ work reuses `internal/interpreter/linq.go`'s existing `enumerateAll`/`linqInvoke` machinery
+(Fase 3.14) — genuinely additive, no interpreter-core change.
+
+- [x] `internal/bcl/system_collections.go`: `Dictionary.get_Values`/`.get_Keys` return a plain
+      snapshot `nativeList` — `ValueCollection`/`KeyCollection`'s own `GetEnumerator`/`MoveNext`/
+      `get_Current` are registered to `List<T>`'s existing enumerator natives verbatim rather than
+      duplicated: nothing downstream inspects an enumerator's own reported struct type name, only
+      its `MoveNext`/`get_Current` behavior. `List<T>.Remove` added (reference/value equality via
+      the existing `valuesEqual`, same notion `Object.Equals` already uses). New exported
+      `bcl.NewDictValue(map[string]runtime.Value)` — `linq.go`'s `ToDictionary` needs to build a
+      real `Dictionary` instance without reaching into `bcl`'s unexported `nativeDict`.
+- [x] `internal/interpreter/linq.go`: `Cast`/`OfType` (pass-through — no reified generic
+      type-argument info to type-check/filter against, same documented approximation as
+      `Dictionary.TryGetValue`'s untyped miss case), `First` (throws
+      `InvalidOperationException` on empty/no-match, unlike `FirstOrDefault`), `LastOrDefault`,
+      `Count`, `Distinct` (O(n²) `valuesDeepEqual` dedup — fine at the sizes real code hits),
+      `Concat`, `OrderBy` + a new `linqCompare` helper (numeric/string ordering; a
+      mismatched-Kind or non-primitive comparison is reported, not guessed — vmnet has no
+      `IComparable` dispatch), `Max`, `ToDictionary` (keys stringified via `Value.String()` — the
+      existing string-keys-only scope), and `List<T>.ForEach` (machine-aware for the same reason
+      every other delegate-invoking LINQ method is — needs `Machine.invokeFunc`).
+- [x] `internal/checker/analyzer.go`'s `linqTargets` and `internal/checker/profile.go`'s
+      `netstandard-lite` allowlist both updated for every new name — the same two-step
+      registration Fase 3.27/3.30/3.31 already established (a native alone isn't enough; the
+      checker has its own separate awareness of the Machine-registry surface, by design — see
+      `linqTargets`'s own doc comment).
+
+**Result**
+
+| Package | Fase 3.31 clean % | Fase 3.32 clean % |
+|---|---|---|
+| `NPOI@2.8.0` | 94.7% (`MethodsFlagged` 748) | 95.1% (`MethodsFlagged` 694) |
+| `ClosedXML@0.105.0` | 90.9% (`MethodsFlagged` 947) | 92.8% (`MethodsFlagged` 757) |
+
+ClosedXML's remaining top blockers shifted decisively toward XML serialization itself —
+`System.Xml.XmlWriter` (`WriteStartElement`/`WriteEndElement`/`WriteAttributeString`/
+`WriteStartAttribute`/`WriteEndAttribute`, ~205 combined) and `System.Xml.Linq`
+(`XName`/`XElement`/`XAttribute`/`XContainer`, ~65 combined) — squarely the machinery an
+`.xlsx`-writing demo will actually exercise, a good sign for sequencing.
+
+### How to verify Fase 3.32
+
+```bash
+go build ./...
+go vet ./...
+go test ./... -race -count=5
+/tmp/vmnet-cli check package NPOI@2.8.0 --profile=netstandard-lite
+/tmp/vmnet-cli check package ClosedXML@0.105.0 --profile=netstandard-lite
+```
+
 ---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 

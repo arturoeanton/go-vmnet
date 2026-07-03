@@ -286,6 +286,20 @@ var linqTargets = map[string]bool{
 	"System.Linq.Enumerable::Take":           true,
 	"System.Linq.Enumerable::Contains":       true,
 	"System.Linq.Enumerable::Empty":          true,
+	"System.Linq.Enumerable::Cast":           true,
+	"System.Linq.Enumerable::OfType":         true,
+	"System.Linq.Enumerable::First":          true,
+	"System.Linq.Enumerable::LastOrDefault":  true,
+	"System.Linq.Enumerable::Count":          true,
+	"System.Linq.Enumerable::Distinct":       true,
+	"System.Linq.Enumerable::OrderBy":        true,
+	"System.Linq.Enumerable::Concat":         true,
+	"System.Linq.Enumerable::ToDictionary":   true,
+	"System.Linq.Enumerable::Max":            true,
+	// Not System.Linq.Enumerable, but the same "resolved through a
+	// Machine-aware registry, not bcl.Lookup" reason applies (Fase 3.32):
+	// List<T>.ForEach needs to invoke its Action<T> argument.
+	"System.Collections.Generic.List`1::ForEach": true,
 }
 
 // interfaceDispatchTargets lists the foreach iteration protocol's

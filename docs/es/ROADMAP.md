@@ -3160,6 +3160,66 @@ go test ./... -race -count=5
 /tmp/vmnet-cli check package ClosedXML@0.105.0 --profile=netstandard-lite # sin findings de System.Math
 ```
 
+### Fase 3.32 — `Dictionary.Values`/`.Keys`, `List.Remove`/`ForEach`, y 11 métodos LINQ más
+
+La clase de bloqueador restante más grande de ClosedXML: huecos de `System.Linq.Enumerable`
+(`Cast`/`First`/`LastOrDefault`/`Count`/`Distinct`/`OrderBy`/`Concat`/`OfType`/`ToDictionary`/`Max`
+— ~370 findings combinados), más `Dictionary.Values`/`.Keys` y sus enumeradores
+`ValueCollection`/`KeyCollection` (~130 combinados entre ambos paquetes) y
+`List<T>.Remove`/`.ForEach` (25 + 43). Todo el trabajo LINQ machine-aware reutiliza la maquinaria
+ya existente de `internal/interpreter/linq.go` (`enumerateAll`/`linqInvoke`, Fase 3.14) — trabajo
+genuinamente aditivo, sin cambios en el núcleo del intérprete.
+
+- [x] `internal/bcl/system_collections.go`: `Dictionary.get_Values`/`.get_Keys` devuelven un
+      `nativeList` de snapshot plano — el propio `GetEnumerator`/`MoveNext`/`get_Current` de
+      `ValueCollection`/`KeyCollection` se registran contra los enumeradores ya existentes de
+      `List<T>` textualmente en vez de duplicarlos: nada río abajo inspecciona el nombre de tipo
+      struct que reporta el enumerador, solo su comportamiento `MoveNext`/`get_Current`. Se agregó
+      `List<T>.Remove` (igualdad por referencia/valor vía el `valuesEqual` ya existente, la misma
+      noción que ya usa `Object.Equals`). Nuevo `bcl.NewDictValue(map[string]runtime.Value)`
+      exportado — el `ToDictionary` de `linq.go` necesita construir una instancia real de
+      `Dictionary` sin meterse en el `nativeDict` no exportado de `bcl`.
+- [x] `internal/interpreter/linq.go`: `Cast`/`OfType` (pasan directo — sin info de argumento de
+      tipo genérico reificado contra la cual type-checkear/filtrar, la misma aproximación
+      documentada que el caso de miss no-tipado de `Dictionary.TryGetValue`), `First` (lanza
+      `InvalidOperationException` en vacío/sin-match, a diferencia de `FirstOrDefault`),
+      `LastOrDefault`, `Count`, `Distinct` (dedup O(n²) con `valuesDeepEqual` — suficiente para los
+      tamaños que el código real toca), `Concat`, `OrderBy` + un nuevo helper `linqCompare`
+      (orden numérico/de strings; una comparación de Kind distinto o no-primitiva se reporta, no
+      se adivina — vmnet no tiene despacho `IComparable`), `Max`, `ToDictionary` (claves
+      stringificadas vía `Value.String()` — el alcance ya existente de solo-claves-string), y
+      `List<T>.ForEach` (machine-aware por la misma razón que cualquier otro método LINQ que
+      invoca un delegate — necesita `Machine.invokeFunc`).
+- [x] El `linqTargets` de `internal/checker/analyzer.go` y el allowlist `netstandard-lite` de
+      `internal/checker/profile.go` se actualizaron ambos para cada nombre nuevo — el mismo
+      registro en dos pasos que Fase 3.27/3.30/3.31 ya estableció (un nativo solo no alcanza; el
+      checker tiene su propia conciencia separada de la superficie del Machine-registry, por
+      diseño — ver el propio doc comment de `linqTargets`).
+
+**Resultado**
+
+| Paquete | % limpio Fase 3.31 | % limpio Fase 3.32 |
+|---|---|---|
+| `NPOI@2.8.0` | 94.7% (`MethodsFlagged` 748) | 95.1% (`MethodsFlagged` 694) |
+| `ClosedXML@0.105.0` | 90.9% (`MethodsFlagged` 947) | 92.8% (`MethodsFlagged` 757) |
+
+Los bloqueadores principales restantes de ClosedXML se corrieron decisivamente hacia la
+serialización XML misma — `System.Xml.XmlWriter` (`WriteStartElement`/`WriteEndElement`/
+`WriteAttributeString`/`WriteStartAttribute`/`WriteEndAttribute`, ~205 combinados) y
+`System.Xml.Linq` (`XName`/`XElement`/`XAttribute`/`XContainer`, ~65 combinados) — justo la
+maquinaria que un demo que escribe `.xlsx` va a ejercitar de verdad, una buena señal de
+secuenciación.
+
+### Cómo verificar Fase 3.32
+
+```bash
+go build ./...
+go vet ./...
+go test ./... -race -count=5
+/tmp/vmnet-cli check package NPOI@2.8.0 --profile=netstandard-lite
+/tmp/vmnet-cli check package ClosedXML@0.105.0 --profile=netstandard-lite
+```
+
 ---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")

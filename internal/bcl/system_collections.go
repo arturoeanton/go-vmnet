@@ -67,6 +67,7 @@ func init() {
 	register("System.Collections.Generic.List`1::RemoveAt", false, listRemoveAt)
 	register("System.Collections.Generic.List`1::Insert", false, listInsert)
 	register("System.Collections.Generic.List`1::Clear", false, listClear)
+	register("System.Collections.Generic.List`1::Remove", true, listRemove)
 	register("System.Collections.Generic.List`1::GetEnumerator", true, listGetEnumerator)
 	register("System.Collections.Generic.List`1+Enumerator::MoveNext", true, listEnumeratorMoveNext)
 	register("System.Collections.Generic.List`1+Enumerator::get_Current", true, listEnumeratorGetCurrent)
@@ -86,6 +87,20 @@ func init() {
 	register("System.Collections.Generic.Dictionary`2::GetEnumerator", true, dictGetEnumerator)
 	register("System.Collections.Generic.Dictionary`2+Enumerator::MoveNext", true, dictEnumeratorMoveNext)
 	register("System.Collections.Generic.Dictionary`2+Enumerator::get_Current", true, dictEnumeratorGetCurrent)
+	// ValueCollection/KeyCollection (Dictionary.Values/.Keys) are backed
+	// by a plain snapshot nativeList (Fase 3.32) — foreach over either
+	// then reuses List<T>'s own enumerator natives verbatim rather than
+	// duplicating them under a new struct type: nothing downstream
+	// inspects the enumerator's own reported type name, only its
+	// MoveNext/get_Current behavior.
+	register("System.Collections.Generic.Dictionary`2::get_Values", true, dictGetValues)
+	register("System.Collections.Generic.Dictionary`2::get_Keys", true, dictGetKeys)
+	register("System.Collections.Generic.Dictionary`2+ValueCollection::GetEnumerator", true, listGetEnumerator)
+	register("System.Collections.Generic.Dictionary`2+ValueCollection+Enumerator::MoveNext", true, listEnumeratorMoveNext)
+	register("System.Collections.Generic.Dictionary`2+ValueCollection+Enumerator::get_Current", true, listEnumeratorGetCurrent)
+	register("System.Collections.Generic.Dictionary`2+KeyCollection::GetEnumerator", true, listGetEnumerator)
+	register("System.Collections.Generic.Dictionary`2+KeyCollection+Enumerator::MoveNext", true, listEnumeratorMoveNext)
+	register("System.Collections.Generic.Dictionary`2+KeyCollection+Enumerator::get_Current", true, listEnumeratorGetCurrent)
 
 	register("System.Collections.Generic.KeyValuePair`2::get_Key", true, keyValuePairGetKey)
 	register("System.Collections.Generic.KeyValuePair`2::get_Value", true, keyValuePairGetValue)
@@ -128,6 +143,15 @@ func NativeListItems(native any) ([]runtime.Value, bool) {
 		return nil, false
 	}
 	return l.items, true
+}
+
+// NewDictValue wraps pairs as a real Dictionary<string,V>-shaped value
+// (string keys only — see nativeDict's doc comment) — used by LINQ's
+// ToDictionary (internal/interpreter/linq.go, Fase 3.32), which needs to
+// build a real Dictionary instance without importing bcl's own
+// unexported nativeDict type.
+func NewDictValue(pairs map[string]runtime.Value) runtime.Value {
+	return runtime.ObjRef(&runtime.Object{Native: &nativeDict{m: pairs}})
 }
 
 // derefStructReceiver unwraps a struct instance method's receiver: it
@@ -431,6 +455,28 @@ func listClear(args []runtime.Value) (runtime.Value, error) {
 	return runtime.Value{}, nil
 }
 
+// listRemove removes the first element equal to args[1] (reference
+// identity for object/array/struct-shaped values, value equality for
+// primitives/strings — same notion of equality valuesEqual already uses
+// for Object.Equals/List.Contains), returning whether anything was
+// removed, matching real List<T>.Remove's bool result.
+func listRemove(args []runtime.Value) (runtime.Value, error) {
+	l, err := asList(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	if len(args) < 2 {
+		return runtime.Value{}, fmt.Errorf("bcl: List.Remove expects a value argument")
+	}
+	for i, item := range l.items {
+		if valuesEqual(item, args[1]) {
+			l.items = append(l.items[:i], l.items[i+1:]...)
+			return runtime.Bool(true), nil
+		}
+	}
+	return runtime.Bool(false), nil
+}
+
 func asDict(args []runtime.Value) (*nativeDict, error) {
 	if len(args) == 0 || args[0].Kind != runtime.KindObject || args[0].Obj == nil {
 		return nil, fmt.Errorf("bcl: Dictionary method called without a receiver")
@@ -552,6 +598,30 @@ func dictRemove(args []runtime.Value) (runtime.Value, error) {
 	_, existed := d.m[key]
 	delete(d.m, key)
 	return runtime.Bool(existed), nil
+}
+
+func dictGetValues(args []runtime.Value) (runtime.Value, error) {
+	d, err := asDict(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	values := make([]runtime.Value, 0, len(d.m))
+	for _, v := range d.m {
+		values = append(values, v)
+	}
+	return NewListValue(values), nil
+}
+
+func dictGetKeys(args []runtime.Value) (runtime.Value, error) {
+	d, err := asDict(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	keys := make([]runtime.Value, 0, len(d.m))
+	for k := range d.m {
+		keys = append(keys, runtime.String(k))
+	}
+	return NewListValue(keys), nil
 }
 
 func dictClear(args []runtime.Value) (runtime.Value, error) {
