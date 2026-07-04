@@ -4274,22 +4274,176 @@ arquitectónica genuina (el propio motor de métricas de fuente de ClosedXML) re
 
 | Paquete | % limpio netstandard-lite | Demo real |
 |---|---|---|
-| `NPOI@2.8.0` | 97.3% | `examples/npoi-demo` — lee un `.xls` legacy real |
-| `ClosedXML@0.105.0` | (no rastreado independientemente; superado por el demo) | `examples/closedxml-demo` — lee un `.xlsx` real |
-| `System.Text.Json@8.0.5` | 66.7%+ | `examples/system-text-json-demo` — parsea JSON real |
-| `Newtonsoft.Json@13.0.3` | 60.6%+ | `examples/newtonsoft-json-demo` — parsea JSON real |
-| `DocumentFormat.OpenXml@3.1.1` | (target nuevo, no rastreado independientemente) | `examples/openxml-demo` — escribe un `.docx` real, abierto de vuelta por el SDK real de .NET |
-| `Jint@3.1.3` | 66.1%+ | `examples/jint-demo`/`jint-nowrapper` — corre JS real |
-| `Ardalis.GuardClauses@5.0.0` | 87.4%+ | — |
-| `Semver@2.3.0` | 72.6%+ | — |
-| `FluentValidation@11.9.2` | 63.5%+ | — |
-| `Humanizer.Core@2.14.1` | 46.0%+ | — |
-| `SimpleBase@4.0.0` | 45.7%+ | — |
+| `NPOI@2.8.0` | 97.6% (14.202 métodos analizados, 347 marcados) | `examples/npoi-demo` — lee un `.xls` legacy real |
+| `ClosedXML@0.105.0` | 96.1% (10.444 métodos analizados, 412 marcados) | `examples/closedxml-demo` — lee un `.xlsx` real |
+| `System.Text.Json@8.0.5` | 95.7% (3.577 métodos analizados, 155 marcados) | `examples/system-text-json-demo` — parsea JSON real |
+| `Newtonsoft.Json@13.0.3` | 84.4% (4.064 métodos analizados, 636 marcados) | `examples/newtonsoft-json-demo` — parsea JSON real |
+| `DocumentFormat.OpenXml@3.1.1` | 100.0% (67.234 métodos analizados, 7 marcados) | `examples/openxml-demo` — escribe un `.docx` real, abierto de vuelta por el SDK real de .NET |
+| `Jint@3.1.3` | 94.6% (5.414 métodos analizados, 290 marcados) | `examples/jint-demo`/`jint-nowrapper` — corre JS real |
+| `Ardalis.GuardClauses@5.0.0` | 97.5% (285 métodos analizados, 7 marcados) | — |
+| `Semver@2.3.0` | 92.9% (423 métodos analizados, 30 marcados) | — |
+| `FluentValidation@11.9.2` | 96.0% (1.289 métodos analizados, 51 marcados) | — |
+| `Humanizer.Core@2.14.1` | 97.1% (1.597 métodos analizados, 47 marcados) | — |
+| `SimpleBase@4.0.0` | 92.2% (258 métodos analizados, 20 marcados) | — |
 
 Cinco de diez targets ahora tienen un demo real y completo (leyendo y/o escribiendo formatos
 binarios/XML/JSON reales de punta a punta) en vez de solo un porcentaje de checker estático — la
 señal más fuerte hasta ahora de que vmnet corre paquetes .NET reales y genuinamente sin modificar,
-no solo pasa un linter de compatibilidad.
+no solo pasa un linter de compatibilidad. Re-medido después de la Fase 3.45
+(`internal/checker.Report.MethodsAnalyzed`/`MethodsFlagged`, `--profile=netstandard-lite`,
+dependencias transitivas incluidas exactamente como lo hace `vm.LoadPackage` en tiempo de
+ejecución): cada target subió, varios sustancialmente — `Humanizer.Core` de 46.0% a 97.1%,
+`FluentValidation` de 63.5% a 96.0%, `SimpleBase` de 45.7% a 92.2%, `Newtonsoft.Json` de 60.6% a
+84.4% — reflejando cuánta de la superficie de LINQ/colecciones (`OrderBy`/`GroupBy`/`Sort`/
+`Aggregate`/`SortedDictionary`/...) usa realmente el propio código de esos paquetes. El promedio
+simple entre las 11 filas es 94.9%; un promedio ponderado por métodos es 98.2%, dominado por los
+propios 67.234 métodos analizados de `DocumentFormat.OpenXml` (62% del total combinado) al
+100.0% — el número por paquete es el más representativo de "qué tan bien cubre vmnet un paquete
+real diverso y típico", no el ponderado.
+
+### Fase 3.51 — un barrido amplio de endurecimiento de formato de strings/cultura, excepciones, y reflection
+
+**Objetivo:** tres áreas que los pases anteriores impulsados por demos nunca apuntaron
+específicamente — especificadores de `ToString(format)`/`string.Format` numéricos/de DateTime,
+filtros de excepción/`Data`/`AggregateException`, y `System.Reflection` (`PropertyInfo`,
+`Enum.Parse`/`TryParse`, `Activator.CreateInstance(Type, object[])`,
+`MethodInfo.MakeGenericMethod`). Cada fix se verificó contra la salida real de `dotnet run` para
+el mismo código C# exacto (una librería fixture `netstandard2.0` + un runner `net10.0` manejado
+por reflection), comparada línea por línea contra la propia salida de vmnet para el mismo DLL
+compilado.
+
+**Excepciones — las dos brechas más grandes**:
+- [x] **Las cláusulas de filtro `catch (Foo) when (cond)` no tenían soporte en absoluto** —
+      `ir.Build` fallaba directamente con `UnsupportedOpcodeError{OpCode: "filter (catch-when)"}`
+      en el instante en que un método contenía una, no solo un bug de salida incorrecta. Arreglado
+      de forma general: el parseo ya correcto de `FilterOffset` de `il` ahora se baja a una
+      cláusula `ir.HandlerFilter` real con su propio `FilterStart`/`endfilter` (`ir.EndFilter`,
+      opcode `0xFE11` — distinto del `0xDC` de `endfinally`) IR, y
+      `internal/interpreter/exceptions.go` corre el cuerpo del filtro en línea exactamente como un
+      handler finally/fault, usando su veredicto booleano para decidir si entrar al handler o
+      seguir buscando entre los candidatos restantes (`resumeAfterFilter`).
+- [x] **Un objeto de excepción capturado perdía sus propios campos extra en el momento en que se
+      capturaba** — `catch (MyException e) { ...e.Code... }` fallaba con `"MyException has no
+      field \"<Code>k__BackingField\""` para CUALQUIER subclase de excepción personalizada con sus
+      propios campos/auto-propiedades, con o sin filtro. Causa raíz: `dispatchException`/
+      `resumeAfterFilter` empujaban un `&runtime.Object{Native: ex}` nuevo y vacío a la pila en el
+      punto de entrada del catch, nunca el objeto REAL lanzado (que — para una subclase de plugin —
+      tiene tanto `Type` como `Native` seteados, ver el propio comentario de
+      `baseExceptionCtorInPlace`). Arreglado dándole a `ManagedException` una referencia real
+      `Object *runtime.Object`, seteada una vez por `ir.Throw`, y reusándola (`exceptionValue`) en
+      cada punto de entrada de catch/filtro en vez de un wrapper nuevo — la propia lógica de
+      coincidencia de tipos de `exceptionMatchesCatch` queda intacta (todavía necesita el camino
+      del wrapper vacío para que el recorrido de jerarquía de excepciones de `nativeMatches` siga
+      funcionando más allá de una base `System.Exception` no resoluble).
+- [x] `Exception.GetType()` sobre una excepción simple (no subclase de plugin) fallaba con
+      "unsupported BCL method" — el recorrido de despacho virtual (`calls.go`) ya tenía un
+      fallback de `System.Object` para `Equals`/`GetHashCode`/`ToString`, pero no para `GetType`; y
+      por separado, `bcl.NativeTypeName` no tenía ningún caso para `*runtime.ManagedException`, así
+      que el recorrido ni siquiera arrancaba para un objeto de excepción simple (`ok` era false).
+      Ambos arreglados.
+- [x] `Exception.ToString()` caía a un `Object.ToString()` genérico (solo el nombre de tipo, sin
+      mensaje) — se agregó una sobreescritura real reusando el propio formato `TypeName: Message
+      ---> innerError` de `ManagedException.Error()`.
+- [x] `Exception.Data` (un `IDictionary`, semántica real: nunca null, respaldado perezosamente) —
+      faltaba por completo; ahora asigna perezosamente un diccionario real con forma de
+      `Hashtable` en un nuevo campo `ManagedException.Data` en el primer acceso.
+- [x] `ArgumentException`/`ArgumentNullException`/`ArgumentOutOfRangeException.ParamName` —
+      faltaba por completo (sin campo para guardarlo). El constructor de 2 strings de
+      `ArgumentNullException`/`ArgumentOutOfRangeException` pone `paramName` PRIMERO
+      (`(paramName, message)`), lo opuesto al propio `(message, paramName)` de `ArgumentException`
+      — una asimetría real y fácil de errar de la API de .NET, ahora manejada por tipo
+      (`argExceptionParamOrder`).
+- [x] `System.AggregateException` — faltaba por completo (`InnerExceptions`, `Flatten()`). Se
+      agregó un campo `ManagedException.InnerExceptions []*Object` (`Inner` sigue apuntando al
+      primero, así que el getter singular ordinario `InnerException` sigue funcionando de forma
+      transparente) más un `Flatten()` recursivo real.
+
+**Formato de strings**:
+- [x] `int`/`long`/`double.ToString(format)` **ignoraba el argumento de formato por completo** —
+      `n.ToString("X")`/`("N0")` silenciosamente corría la sobrecarga sin argumento en su lugar.
+      Para `double` específicamente esto no era solo "falta una coma": `Double.ToString("N2")`
+      sobre un valor grande caía a `FormatFloat('G', -1, ...)`, que cambia a notación científica
+      en esa magnitud — una respuesta completamente distinta, no solo formato faltante. Ambos
+      ahora pasan por `formatValue`, el propio parser de especificadores de `String.Format`.
+- [x] `{0:X}` sobre un valor negativo producía `"-1"` en vez del patrón de bits en complemento a
+      dos real de .NET (`"FFFFFFFF"` para `int`, 16 F's para `long`) — arreglado usando el `Kind`
+      real del valor (I4 vs I8) para elegir el ancho correcto. `{0:x8}` en minúscula también
+      ignoraba el caso por completo (siempre en mayúscula) — arreglado.
+- [x] Los especificadores estándar `"C"` (moneda) y `"E"`/`"e"` (científico) no estaban
+      implementados en absoluto. `"E"` además necesitó un fix manual de ancho de exponente: el
+      `FormatFloat` de Go rellena el exponente a 2 dígitos, .NET real siempre usa al menos 3
+      (`"E+003"`, no `"E+03"`).
+- [x] Los strings de formato numérico personalizado (`"0.00%"`, `"000.00"`, `"#,##0.00"` — una
+      secuencia de caracteres placeholder `0`/`#`/`,`/`.`/`%`, no un especificador estándar de una
+      letra+dígitos) se rechazaban directamente como "unsupported format specifier". Se agregó una
+      implementación acotada de formato personalizado (`formatCustomNumeric`) cubriendo el caso
+      común; una sección separada por `;` de positivo/negativo/cero o un patrón personalizado de
+      notación científica sigue dando error correctamente en vez de adivinar.
+- [x] `StringBuilder.AppendFormat` — faltaba por completo; ahora comparte el propio parser de
+      formato compuesto de `String.Format`.
+- [x] `int.TryParse(s, NumberStyles.HexNumber, ...)` parseaba mal silenciosamente un literal hex
+      como decimal (y fallaba) — ahora detecta el bit `AllowHexSpecifier` y parsea en base 16.
+- [x] `DateTime.ToString(format)` ignoraba su argumento (siempre el formato fijo por defecto) —
+      ahora respeta tanto un especificador estándar de una letra (`"d"`, `"D"`, `"s"`, `"o"`, ...)
+      como un patrón personalizado (`"yyyy-MM-dd HH:mm:ss"`, vía el mismo traductor que
+      `ParseExact` ya usaba, corrido en la dirección de Format).
+- [ ] **Encontrado, no arreglado**: un valor `bool`/enum boxeado pasado a través de
+      `string.Format`/un string interpolado imprime su `int32` subyacente crudo (`"1"`/`"0"`, o el
+      valor numérico de un enum) en vez de `"True"`/`"False"` o el nombre del miembro. Causa raíz:
+      `box`/`unbox.any` se eliden como no-op (`ir/builder.go` — el `Value` de vmnet ya es una unión
+      etiquetada, así que boxear un value type "simplemente funciona" para cualquier otro
+      consumidor), lo cual descarta la ÚNICA información que un sitio de llamada de display/
+      `ToString` necesitaría para distinguir un `bool`/enum boxeado de un `int32` boxeado en ese
+      punto — para cuando los argumentos `object[]` de `String.Format` llegan a `displayString`,
+      son valores `KindI4` indistinguibles. Un fix real necesita o bien un cambio amplio de
+      representación de `Value` (etiquetar cada valor enum/bool con su tipo declarado — toca
+      despacho de aritmética/comparación/switch en todo el intérprete) o pasar el propio operando
+      de tipo estático del prefijo `constrained.` hasta un `callvirt` de `ToString` siguiente
+      específicamente — ambos más grandes que el alcance de este pase.
+      `Enum.GetValues`/`GetNames`/`Parse`/`TryParse` (que todos toman un argumento `Type` explícito,
+      no un receptor ambiente) no están afectados y ya son correctos.
+
+**Reflection**:
+- [x] `Type.GetProperties()`/`GetProperty(name)` + `PropertyInfo.GetValue`/`SetValue`/`Name`/
+      `CanRead`/`CanWrite` — faltaba por completo; no existía ningún lector de metadatos para las
+      tablas `Property`/`PropertyMap`/`MethodSemantics`. Se agregaron accesores tipados
+      (`metadata.Property`/`TypeDefPropertyRange`/`PropertyAccessors`) más un `PropertyResolver`
+      nuevo, enhebrado a través de `runtime.Resolvers`/`interpreter.Machine` de la misma forma que
+      ya lo están `MemberResolver`/`EnumResolver`. `CanRead`/`CanWrite` vienen del enlace real de
+      `MethodSemantics` de `get_Xxx`/`set_Xxx` (correctamente true para un accesor `private set` —
+      el `CanWrite` real de reflection significa "tiene un setter en absoluto", no "públicamente"),
+      no una adivinanza por nombre.
+- [x] `Activator.CreateInstance(Type, object[])` — la sobrecarga de reflection no genérica
+      ordinaria — siempre fallaba con `"T could not be resolved"`, porque `Activator.CreateInstance`
+      solo estaba conectado para la forma GENÉRICA `CreateInstance<T>()` (`where T : new()`); ambas
+      compilan al mismo nombre de método CIL, distinguibles solo por si los argumentos de método
+      genérico del sitio de llamada están presentes.
+- [x] `Enum.Parse`/`Enum.TryParse<TEnum>` — faltaba por completo. `Parse` es un método estático
+      simple (el enum destino nombrado por un argumento `Type` ordinario); `TryParse<TEnum>` es en
+      sí mismo un MÉTODO GENÉRICO (la misma forma `ir.Call.MethodGenericArgs` que necesita
+      `Activator.CreateInstance<T>`) — conectado por separado por esa razón.
+- [x] `MethodInfo.MakeGenericMethod(Type[])` + invocar el resultado — faltaba por completo.
+      `Type.GetMethod(string)` (sin argumento de firma `Type[]`, la sobrecarga que el código real
+      usa para buscar un método genérico todavía abierto antes de cerrarlo) también requería 3
+      argumentos incondicionalmente y fallaba directamente; ahora acepta la forma de 2 argumentos,
+      coincidiendo solo por nombre (la propia distinción de Go entre nil y slice vacío, preservada
+      a través de `bcl.TypeArrayToFullNames`, es lo que distingue "sin Type[] en absoluto" de "un
+      Type[] vacío real explícito" en `resolveMember`).
+
+### Cómo verificar Fase 3.51
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+cd examples/npoi-demo && go run .
+cd ../system-text-json-demo && go run .
+cd ../openxml-demo && go run .
+cd ../newtonsoft-json-demo && go run .
+cd ../calculator && dotnet build Calculator.csproj -c Release && go run .
+cd ../closedxml-demo && dotnet build GraphicEngineWrapper.csproj -c Release && for i in 1 2 3 4; do go run .; done
+```
 
 ---
 

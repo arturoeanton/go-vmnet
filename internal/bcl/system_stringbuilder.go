@@ -41,6 +41,7 @@ func init() {
 	})
 	register("System.Text.StringBuilder::Append", true, sbAppend)
 	register("System.Text.StringBuilder::AppendLine", true, sbAppendLine)
+	register("System.Text.StringBuilder::AppendFormat", true, sbAppendFormat)
 	register("System.Text.StringBuilder::Insert", true, sbInsert)
 	register("System.Text.StringBuilder::ToString", true, sbToString)
 	register("System.Text.StringBuilder::get_Length", true, sbLength)
@@ -109,6 +110,38 @@ func sbInsert(args []runtime.Value) (runtime.Value, error) {
 	}
 	inserted := displayString(args[2])
 	sb.buf = string(current[:idx]) + inserted + string(current[idx:])
+	return args[0], nil
+}
+
+// sbAppendFormat mirrors System.String.Format's own overload handling
+// (stringFormat, system_string.go) exactly — same composite-format
+// grammar (formatComposite), same optional leading IFormatProvider
+// argument (ignored, no culture support anywhere else either), same
+// `params object[]` collapse for a 4th-or-later substitution value —
+// just appended to the buffer instead of returned as a new string.
+// Returns the receiver so `sb.Append(...).AppendFormat(...)` fluent
+// chaining keeps working, like every other StringBuilder method here.
+func sbAppendFormat(args []runtime.Value) (runtime.Value, error) {
+	sb, err := asStringBuilder(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	rest := args[1:]
+	if len(rest) >= 2 && rest[0].Kind != runtime.KindString && rest[1].Kind == runtime.KindString {
+		rest = rest[1:]
+	}
+	if len(rest) < 1 || rest[0].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: StringBuilder.AppendFormat expects a format string")
+	}
+	values := rest[1:]
+	if len(values) == 1 && values[0].Kind == runtime.KindArray {
+		values = values[0].Arr.Elems
+	}
+	out, err := formatComposite(rest[0].Str, values)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	sb.buf += out
 	return args[0], nil
 }
 

@@ -19,6 +19,7 @@ type Machine struct {
 	ResolveFieldBytes       FieldBytesResolver
 	ResolveMember           MemberResolver
 	ResolveManifestResource ManifestResourceResolver
+	ResolveProperties       PropertyResolver
 	Limits                  Limits
 
 	// cctorsRunning tracks static constructors currently executing on
@@ -80,6 +81,14 @@ func (m *Machine) WithMemberResolver(r MemberResolver) *Machine {
 // WithFieldBytesResolver/WithMemberResolver.
 func (m *Machine) WithManifestResourceResolver(r ManifestResourceResolver) *Machine {
 	m.ResolveManifestResource = r
+	return m
+}
+
+// WithPropertyResolver attaches a PropertyResolver (Fase 3.51, Type.
+// GetProperties/GetProperty) — same rationale as WithFieldBytesResolver/
+// WithMemberResolver.
+func (m *Machine) WithPropertyResolver(r PropertyResolver) *Machine {
+	m.ResolveProperties = r
 	return m
 }
 
@@ -164,6 +173,7 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 		prevResolveFieldBytes := m.ResolveFieldBytes
 		prevResolveMember := m.ResolveMember
 		prevResolveManifestResource := m.ResolveManifestResource
+		prevResolveProperties := m.ResolveProperties
 		if method.Resolvers.Resolve != nil {
 			m.Resolve = method.Resolvers.Resolve
 		}
@@ -185,12 +195,16 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 		if method.Resolvers.ResolveManifestResource != nil {
 			m.ResolveManifestResource = method.Resolvers.ResolveManifestResource
 		}
+		if method.Resolvers.ResolveProperties != nil {
+			m.ResolveProperties = method.Resolvers.ResolveProperties
+		}
 		defer func() {
 			m.Resolve, m.ResolveType = prevResolve, prevResolveType
 			m.ResolveExplicitImpl, m.ResolveEnum = prevResolveExplicitImpl, prevResolveEnum
 			m.ResolveFieldBytes = prevResolveFieldBytes
 			m.ResolveMember = prevResolveMember
 			m.ResolveManifestResource = prevResolveManifestResource
+			m.ResolveProperties = prevResolveProperties
 		}()
 	}
 
@@ -526,6 +540,17 @@ func (m *Machine) runFrame(frame *Frame, method *runtime.Method, depth int, inst
 			v := frame.pop()
 			if v.Kind == runtime.KindObject && v.Obj != nil {
 				if ex, ok := v.Obj.Native.(*runtime.ManagedException); ok {
+					// Record the real thrown Object (see ManagedException.
+					// Object's own doc comment) — a plugin exception
+					// subclass's extra fields (or a base Exception's
+					// otherwise-untracked Data dictionary, system_exception.
+					// go's exceptionGetData) are only reachable through it,
+					// never through ManagedException's own flat TypeName/
+					// Message/Inner fields. `throw e;` re-throwing an
+					// already-caught local is the same v.Obj a previous
+					// catch already set this to, so this is idempotent —
+					// not just a first-throw special case.
+					ex.Object = v.Obj
 					return runtime.Value{}, ex
 				}
 			}
@@ -684,6 +709,17 @@ func (m *Machine) runFrame(frame *Frame, method *runtime.Method, depth int, inst
 
 		case ir.EndFinally:
 			resumeIP, propagate, err := m.resumeAfterFinally(frame)
+			if err != nil {
+				return runtime.Value{}, err
+			}
+			if propagate != nil {
+				return runtime.Value{}, propagate
+			}
+			next = resumeIP
+
+		case ir.EndFilter:
+			verdict := frame.pop()
+			resumeIP, propagate, err := m.resumeAfterFilter(frame, verdict)
 			if err != nil {
 				return runtime.Value{}, err
 			}

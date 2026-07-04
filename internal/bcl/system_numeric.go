@@ -8,12 +8,31 @@ import (
 	"github.com/arturoeanton/go-vmnet/internal/runtime"
 )
 
-// int32ToString ignores a format-string/IFormatProvider argument
-// (culture-invariant decimal only — no culture support anywhere else
-// either, see CultureInfo's stub since Fase 3.6): real Int32.ToString(D)/
-// ToString("X") formatting would need the same specifier parser
-// System.String.Format already has, not duplicated here for a single
-// BCL type until real usage demands it.
+// int32ToString/int64ToString honor a real ToString(format) argument via
+// formatValue (System.String.Format's own specifier parser, system_
+// string.go) rather than ignoring it — real Int32.ToString("X")/("N0")/
+// ("D6") are exactly as common as the plain no-argument overload, and by
+// the time formatValue existed for String.Format composite specs there
+// was no reason for this one call site to keep silently discarding it.
+// The provider argument itself is still ignored either way (no culture
+// support anywhere else — CultureInfo is a stub, Fase 3.6).
+//
+// numericToStringFormat finds a ToString(format)/(format, provider) call's
+// format-string argument, if any — args[1:] rather than a fixed index,
+// since the IFormatProvider-only overload (ToString(CultureInfo), no
+// format string at all) and the (format, provider) overload both exist,
+// and vmnet ignores the provider itself either way (culture-invariant
+// only, no culture support anywhere else — CultureInfo is a stub, Fase
+// 3.6).
+func numericToStringFormat(args []runtime.Value) string {
+	for _, a := range args[1:] {
+		if a.Kind == runtime.KindString {
+			return a.Str
+		}
+	}
+	return ""
+}
+
 func init() {
 	register("System.Int32::ToString", true, int32ToString)
 	register("System.Int32::Parse", true, int32Parse)
@@ -126,6 +145,13 @@ func int64ToString(args []runtime.Value) (runtime.Value, error) {
 	if v.Kind != runtime.KindI8 {
 		return runtime.Value{}, fmt.Errorf("bcl: System.Int64.ToString expects an int64 receiver")
 	}
+	if format := numericToStringFormat(args); format != "" {
+		s, err := formatValue(v, format)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		return runtime.String(s), nil
+	}
 	return runtime.String(strconv.FormatInt(v.I8, 10)), nil
 }
 
@@ -140,18 +166,41 @@ func int32Parse(args []runtime.Value) (runtime.Value, error) {
 	return runtime.Int32(int32(n)), nil
 }
 
+// numberStylesAllowHexSpecifier is System.Globalization.NumberStyles.
+// AllowHexSpecifier's real bit value (0x00000200) — HexNumber itself is
+// AllowLeadingWhite|AllowTrailingWhite|AllowHexSpecifier (0x00000203), so
+// testing just this one bit catches either constant a caller passes.
+const numberStylesAllowHexSpecifier = 0x200
+
+// numberStylesArg finds a TryParse(string, NumberStyles, IFormatProvider,
+// out T) call's own NumberStyles argument — always a plain int32 enum
+// value, always between the text and the trailing out parameter
+// (lastOutRef's own convention), so scanning by Kind rather than a fixed
+// index handles both this 4-arg overload and the plain 2-arg
+// TryParse(string, out T) uniformly (returns 0/false for the latter,
+// same as NumberStyles.None would).
+func numberStylesArg(args []runtime.Value) (int32, bool) {
+	for i := 1; i < len(args)-1; i++ {
+		if args[i].Kind == runtime.KindI4 {
+			return args[i].I4, true
+		}
+	}
+	return 0, false
+}
+
 // int32TryParse's `out int result` arrives as a managed pointer, same
 // mechanism as any other `ref`/`out` primitive since Fase 3.5. Both real
 // overload shapes are covered (Fase 3.43, the second found reading a real
 // .xlsx through ClosedXML 0.105.0's own worksheet reader): the plain
 // `TryParse(string, out int)` and the culture-explicit `TryParse(string,
 // NumberStyles, IFormatProvider, out int)` — the out parameter is always
-// the LAST argument, the string always the first, and the styles/provider
-// pair contributes nothing for this loop's target packages' real inputs
-// (always NumberStyles.Integer-shaped decimal digits with
-// CultureInfo.InvariantCulture, which is exactly what base-10 ParseInt
-// already is; a styles flag requesting hex/thousands-separators would be
-// a real semantic difference, but no caller here passes one).
+// the LAST argument, the string always the first. The styles/provider
+// pair is usually NumberStyles.Integer-shaped decimal digits (what base-10
+// ParseInt already is regardless), but AllowHexSpecifier/HexNumber
+// (Fase 3.51, a real, common pattern for parsing a raw hex literal, e.g.
+// `int.TryParse(s, NumberStyles.HexNumber, CultureInfo.InvariantCulture,
+// out var n)`) is a genuine semantic difference this now honors instead
+// of silently mis-parsing every hex-styled input as decimal and failing.
 func int32TryParse(args []runtime.Value) (runtime.Value, error) {
 	if len(args) < 2 || args[0].Kind != runtime.KindString {
 		return runtime.Value{}, fmt.Errorf("bcl: System.Int32.TryParse expects (string, out int)")
@@ -159,6 +208,15 @@ func int32TryParse(args []runtime.Value) (runtime.Value, error) {
 	out := args[len(args)-1]
 	if out.Kind != runtime.KindRef || out.Ref == nil {
 		return runtime.Value{}, fmt.Errorf("bcl: System.Int32.TryParse expects an out parameter")
+	}
+	if styles, ok := numberStylesArg(args); ok && styles&numberStylesAllowHexSpecifier != 0 {
+		n, err := strconv.ParseInt(strings.TrimSpace(args[0].Str), 16, 32)
+		if err != nil {
+			*out.Ref = runtime.Int32(0)
+			return runtime.Bool(false), nil
+		}
+		*out.Ref = runtime.Int32(int32(n))
+		return runtime.Bool(true), nil
 	}
 	n, err := strconv.ParseInt(strings.TrimSpace(args[0].Str), 10, 32)
 	if err != nil {
@@ -205,6 +263,13 @@ func int32ToString(args []runtime.Value) (runtime.Value, error) {
 	}
 	if v.Kind != runtime.KindI4 {
 		return runtime.Value{}, fmt.Errorf("bcl: System.Int32.ToString expects an int32 receiver")
+	}
+	if format := numericToStringFormat(args); format != "" {
+		s, err := formatValue(v, format)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		return runtime.String(s), nil
 	}
 	return runtime.String(strconv.FormatInt(int64(v.I4), 10)), nil
 }

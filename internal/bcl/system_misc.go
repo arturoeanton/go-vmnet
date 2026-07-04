@@ -550,6 +550,15 @@ func sign[T float32 | float64](f T) T {
 	return 1
 }
 
+// doubleToString honors a real ToString(format) argument via formatValue
+// (System.String.Format's own specifier parser, system_string.go) instead
+// of always falling through to the plain no-argument G-format path —
+// found the hard way: Double.ToString("N2") silently ignoring "N2" here
+// meant it still ran the unconditional FormatFloat('G', -1, ...) below,
+// which for a large value (in the millions, common for "N2"-formatted
+// totals) switches to scientific notation Go's 'G' verb picks at that
+// magnitude — a completely different (and completely wrong) answer from
+// real N2's fixed-point, comma-grouped output, not just a missing comma.
 func doubleToString(args []runtime.Value) (runtime.Value, error) {
 	if len(args) < 1 {
 		return runtime.Value{}, fmt.Errorf("bcl: System.Double.ToString expects a receiver")
@@ -560,6 +569,13 @@ func doubleToString(args []runtime.Value) (runtime.Value, error) {
 	}
 	if v.Kind != runtime.KindR8 {
 		return runtime.Value{}, fmt.Errorf("bcl: System.Double.ToString expects a double receiver")
+	}
+	if format := numericToStringFormat(args); format != "" {
+		s, err := formatValue(v, format)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		return runtime.String(s), nil
 	}
 	return runtime.String(strconv.FormatFloat(v.R8, 'G', -1, 64)), nil
 }

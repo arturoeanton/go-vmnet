@@ -17,6 +17,13 @@ type unwind struct {
 	target    int
 	exception *runtime.ManagedException
 	pending   []ir.Handler
+	// filterHandler is non-nil while a HandlerFilter candidate's own filter
+	// body (FilterStart..EndFilter) is running: resumeAfterFilter needs it
+	// to find HandlerStart if the filter's verdict is true; pending still
+	// holds the remaining candidates to try (via dispatchException again)
+	// if it's false. Never set together with target — a leave never runs
+	// a filter, only an exception search does.
+	filterHandler *ir.Handler
 }
 
 // handlersContaining returns method's handlers whose try region contains
@@ -90,9 +97,10 @@ func handlersLeaving(method *runtime.Method, ip, target int) []ir.Handler {
 // suffix of a previous search resumed after a finally/fault ran) for a
 // matching catch, running any finally/fault found along the way first.
 // Returns whether a handler was entered — on true, frame.IP/Stack (and
-// frame.unwind, if a finally/fault still needs to run before a catch)
-// are already set up to resume execution; on false, the exception
-// propagates out of this method entirely.
+// frame.unwind, if a finally/fault still needs to run before a catch, or a
+// filter still needs to be evaluated to decide if it even matches) are
+// already set up to resume execution; on false, the exception propagates
+// out of this method entirely.
 func (m *Machine) dispatchException(frame *Frame, ex *runtime.ManagedException, candidates []ir.Handler) bool {
 	for i, h := range candidates {
 		switch h.Kind {
@@ -101,7 +109,7 @@ func (m *Machine) dispatchException(frame *Frame, ex *runtime.ManagedException, 
 				continue
 			}
 			frame.Stack = frame.Stack[:0]
-			frame.push(runtime.ObjRef(&runtime.Object{Native: ex}))
+			frame.push(exceptionValue(ex))
 			frame.currentException = ex
 			frame.IP = h.HandlerStart
 			return true
@@ -110,16 +118,58 @@ func (m *Machine) dispatchException(frame *Frame, ex *runtime.ManagedException, 
 			frame.unwind = &unwind{exception: ex, pending: candidates[i+1:]}
 			frame.IP = h.HandlerStart
 			return true
+		case ir.HandlerFilter:
+			// Real two-pass CLR semantics run every filter (even from
+			// enclosing methods) before unwinding anything; this
+			// interpreter's single-pass model approximates it well enough
+			// for the common case by just running the filter body inline
+			// here, exactly like a finally/fault handler, and letting
+			// EndFilter's own opcode (see eval.go) decide whether to
+			// proceed into HandlerStart or keep searching candidates[i+1:]
+			// (resumeAfterFilter). h is captured by value into hCopy since
+			// candidates is a fresh local slice per handlersContaining/
+			// resumeAfterFinally call — its backing array isn't guaranteed
+			// to outlive this loop iteration. The filter body needs the
+			// SAME exceptionValue a matching catch would get, not a bare
+			// wrapper: `when (e.Code == 42)` reads a plugin exception's own
+			// field directly out of the object pushed here.
+			hCopy := h
+			frame.Stack = frame.Stack[:0]
+			frame.push(exceptionValue(ex))
+			frame.unwind = &unwind{exception: ex, pending: candidates[i+1:], filterHandler: &hCopy}
+			frame.IP = h.FilterStart
+			return true
 		}
 	}
 	return false
+}
+
+// exceptionValue is what gets pushed onto the stack at a catch/filter
+// entry point (or read back via Exception.InnerException, GetType, ...):
+// the real thrown *Object if ir.Throw ever recorded one (see
+// ManagedException.Object's doc comment) — preserving a plugin exception
+// subclass's own Type/Fields, not just this flat TypeName/Message/Inner
+// struct — or a fresh bare wrapper for an exception that was never a real
+// thrown Object (a BCL native reporting a fault by returning
+// &runtime.ManagedException{...} directly as a Go error).
+func exceptionValue(ex *runtime.ManagedException) runtime.Value {
+	if ex.Object != nil {
+		return runtime.ObjRef(ex.Object)
+	}
+	return runtime.ObjRef(&runtime.Object{Native: ex})
 }
 
 // exceptionMatchesCatch reuses isAssignableTo's real class-hierarchy walk
 // (Fase 3.8) plus typecheck.go's hand-maintained exception hierarchy —
 // the same mechanism a real `isinst`/`is` check against the exception
 // would use, so "which catch clause matches" agrees with "what `ex is
-// SomeType` would say" elsewhere in the same program.
+// SomeType` would say" elsewhere in the same program. Deliberately does
+// NOT use exceptionValue: matching needs nativeMatches's exception-
+// hierarchy walk (exceptionBaseType plus a plugin subclass's own
+// TypeDef.BaseTypeFullName chain) even when ex.Object.Type is set, since
+// typeMatches's own BaseTypeFullName walk dead-ends the instant it hits
+// an unresolvable BCL name like "System.Exception" — nativeMatches exists
+// specifically to keep walking past that point.
 func (m *Machine) exceptionMatchesCatch(ex *runtime.ManagedException, catchTypeFullName string) bool {
 	return m.isAssignableTo(runtime.ObjRef(&runtime.Object{Native: ex}), catchTypeFullName)
 }
@@ -150,4 +200,38 @@ func (m *Machine) resumeAfterFinally(frame *Frame) (next int, propagate *runtime
 		return frame.IP, nil, nil
 	}
 	return 0, u.exception, nil
+}
+
+// resumeAfterFilter implements endfilter: verdict is whatever the filter
+// body's own IL just pushed (`when (cond)`'s boolean, combined with
+// whatever `isinst`-based type check the filter's IL performs itself —
+// see ir.HandlerFilter's doc comment). A nonzero verdict means this
+// candidate matches, exactly like dispatchException's HandlerCatch case
+// (same Stack-reset-then-push-the-exception entry protocol, since a
+// filter's catch body sees the exception the same way an ordinary catch
+// does); zero means it doesn't, and the search resumes over the remaining
+// candidates recorded when the filter started — which may themselves be
+// another filter, an intervening finally/fault, or nothing left at all
+// (propagate).
+func (m *Machine) resumeAfterFilter(frame *Frame, verdict runtime.Value) (next int, propagate *runtime.ManagedException, err error) {
+	u := frame.unwind
+	if u == nil || u.filterHandler == nil {
+		return 0, nil, errEndfilterOutsideFilter
+	}
+	h := u.filterHandler
+	pending := u.pending
+	ex := u.exception
+	frame.unwind = nil
+
+	if verdict.Truthy() {
+		frame.Stack = frame.Stack[:0]
+		frame.push(exceptionValue(ex))
+		frame.currentException = ex
+		return h.HandlerStart, nil, nil
+	}
+
+	if m.dispatchException(frame, ex, pending) {
+		return frame.IP, nil, nil
+	}
+	return 0, ex, nil
 }

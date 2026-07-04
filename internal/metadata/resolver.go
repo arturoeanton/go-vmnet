@@ -72,6 +72,98 @@ type MemberRefRow struct {
 	Signature []byte
 }
 
+// PropertyRow (ECMA-335 §II.22.34) — a C# auto-property or explicit
+// `{ get; set; }` property compiles to a real Property table row (Name +
+// PropertySig blob) PLUS the underlying get_Xxx/set_Xxx MethodDefs a
+// MethodSemantics row (below) links back to it; the row itself carries no
+// getter/setter reference directly. Reflection.PropertyInfo (Fase 3.51)
+// is the first real consumer.
+type PropertyRow struct {
+	Flags     uint16
+	Name      string
+	Signature []byte
+}
+
+func (md *Metadata) Property(rid uint32) (PropertyRow, error) {
+	t, row, err := md.tableOrErr(TableProperty, rid)
+	if err != nil {
+		return PropertyRow{}, err
+	}
+	name, err := md.strings.String(t.col(row, 1))
+	if err != nil {
+		return PropertyRow{}, err
+	}
+	sig, err := md.blob.Blob(t.col(row, 2))
+	if err != nil {
+		return PropertyRow{}, err
+	}
+	return PropertyRow{Flags: uint16(t.col(row, 0)), Name: name, Signature: sig}, nil
+}
+
+// TypeDefPropertyRange returns the [start, end) 1-based Property RID
+// range owned by TypeDef rid — unlike TypeDefFieldRange/
+// TypeDefMethodRange, there's no direct column on TypeDef itself for
+// this: PropertyMap is a separate, SPARSE table (one row only for a type
+// that actually declares at least one property, not one per TypeDef at
+// all), indirected through exactly like EventMap's own Event linkage.
+// Real metadata always keeps PropertyMap rows in increasing Parent order
+// (ECMA-335 §II.22.35's own row-ordering constraint every real compiler
+// honors), so "the next PropertyMap row's PropertyList" is a safe range
+// end here as much as it is for TypeDefFieldRange's direct TypeDef
+// column case. Returns start==end==0, not an error, for a type with no
+// PropertyMap row at all (the overwhelmingly common case: most types
+// declare no properties).
+func (md *Metadata) TypeDefPropertyRange(typeDefRID uint32) (start, end uint32, err error) {
+	t := md.tables[TablePropertyMap]
+	if t == nil {
+		return 0, 0, nil
+	}
+	for row := uint32(0); row < t.rowCount; row++ {
+		if t.col(row, 0) != typeDefRID {
+			continue
+		}
+		start = t.col(row, 1)
+		if row+1 < t.rowCount {
+			end = t.col(row+1, 1)
+		} else {
+			end = md.RowCount(TableProperty) + 1
+		}
+		return start, end, nil
+	}
+	return 0, 0, nil
+}
+
+// PropertyAccessors returns propertyRID's linked get_Xxx/set_Xxx MethodDef
+// RIDs (0 if that property has no getter, or no setter — a get-only or
+// set-only property is common), found by scanning MethodSemantics for a
+// Property-tagged Association matching propertyRID. MethodSemantics.
+// Semantics flags: 0x1 Setter, 0x2 Getter, 0x4 Other (an add/remove/raise
+// accessor on an Event, never seen for a Property — ignored here).
+func (md *Metadata) PropertyAccessors(propertyRID uint32) (getterRID, setterRID uint32, err error) {
+	t := md.tables[TableMethodSemantics]
+	if t == nil {
+		return 0, 0, nil
+	}
+	for row := uint32(0); row < t.rowCount; row++ {
+		semantics := t.col(row, 0)
+		assoc, err := decodeCodedIndex(codedHasSemantics, t.col(row, 2))
+		if err != nil {
+			return 0, 0, err
+		}
+		if assoc.Table() != TableProperty || assoc.RID() != propertyRID {
+			continue
+		}
+		method := t.col(row, 1)
+		switch {
+		case semantics&0x2 != 0:
+			getterRID = method
+		case semantics&0x1 != 0:
+			setterRID = method
+		}
+	}
+	return getterRID, setterRID, nil
+}
+
 type ConstantRow struct {
 	Type   byte
 	Parent Token

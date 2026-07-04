@@ -409,16 +409,34 @@ type Leave struct{ Target int }
 // finally/fault block that's ending.
 type EndFinally struct{}
 
-// HandlerKind is one exception handler's kind (spec §II.25.4.6). Filter
-// clauses (`catch (Foo) when (cond)`) parse structurally at the il layer
-// but aren't lowered here — see Build's doc comment — so there's no
-// HandlerFilter case to dispatch on.
+// EndFilter implements endfilter (spec §III.3.15), the terminator of a
+// `catch (Foo) when (cond)` filter clause's own IL block (distinct from
+// endfinally/endfault's 0xDC — endfilter is its own two-byte opcode,
+// 0xFE11). Unlike EndFinally, this pops a real value off the stack: the
+// filter's boolean verdict (the compiler's own IL for `when (cond)` — and
+// for the implicit `isinst Foo` type check, which the filter body performs
+// itself rather than vmnet's Handler.CatchTypeFullName mechanism — always
+// ends by pushing 0 or 1 then executing this). See
+// internal/interpreter/exceptions.go's resumeAfterFilter for what happens
+// with that verdict.
+type EndFilter struct{}
+
+// HandlerKind is one exception handler's kind (spec §II.25.4.6).
 type HandlerKind byte
 
 const (
 	HandlerCatch HandlerKind = iota
 	HandlerFinally
 	HandlerFault
+	// HandlerFilter is `catch (Foo) when (cond)` — the filter body (a real
+	// IR range of its own, FilterStart..HandlerStart) runs BEFORE the
+	// handler body proper, with the thrown exception as its sole stack
+	// value, and decides via EndFilter whether this candidate matches at
+	// all (see dispatchException/resumeAfterFilter). CatchTypeFullName is
+	// left unset for this kind: the filter's own IL already contains
+	// whatever `isinst`/`castclass` the compiler needed for `catch (Foo)`,
+	// so there's no separate type check for vmnet to apply on top of it.
+	HandlerFilter
 )
 
 // Handler is one exception handler region, converted from an
@@ -426,13 +444,17 @@ const (
 // HandlerStart/HandlerEnd are a [start, end) range over the enclosing
 // Method's IR slice, same convention as Branch's Target). CatchTypeFullName
 // is set only for HandlerCatch, resolved once here rather than re-resolved
-// per exception at runtime.
+// per exception at runtime. FilterStart is set only for HandlerFilter (the
+// filter body's own entry point, always physically located just before
+// HandlerStart in real compiler-emitted IL, but tracked separately rather
+// than assumed contiguous).
 type Handler struct {
 	Kind              HandlerKind
 	TryStart, TryEnd  int
 	HandlerStart      int
 	HandlerEnd        int
 	CatchTypeFullName string
+	FilterStart       int
 }
 
 // Rethrow implements `rethrow` (spec §III.4.31 — C#'s `throw;` with no

@@ -459,6 +459,9 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool, ehClaus
 		case "endfinally":
 			out = append(out, EndFinally{})
 
+		case "endfilter":
+			out = append(out, EndFilter{})
+
 		case "rethrow":
 			out = append(out, Rethrow{})
 
@@ -581,11 +584,6 @@ func buildHandlers(ehClauses []il.ExceptionHandler, md *metadata.Metadata, offse
 
 	handlers := make([]Handler, 0, len(ehClauses))
 	for _, c := range ehClauses {
-		if c.Kind == il.HandlerFilter {
-			// Filter clauses (`catch (Foo) when (cond)`) parse at the il
-			// layer but aren't executable here — see Build's doc comment.
-			return nil, &UnsupportedOpcodeError{OpCode: "filter (catch-when)", Offset: c.HandlerOffset}
-		}
 		tryStart, err := resolveStart(c.TryOffset)
 		if err != nil {
 			return nil, err
@@ -609,6 +607,18 @@ func buildHandlers(ehClauses []il.ExceptionHandler, md *metadata.Metadata, offse
 			h.Kind = HandlerFinally
 		case il.HandlerFault:
 			h.Kind = HandlerFault
+		case il.HandlerFilter:
+			// `catch (Foo) when (cond)` — FilterOffset is a plain IL byte
+			// offset here too (resolveStart, not resolveEnd: the filter
+			// body is always a real instruction range starting exactly
+			// there, never the "end of method" edge case resolveEnd
+			// tolerates for a handler's closing boundary).
+			h.Kind = HandlerFilter
+			filterStart, err := resolveStart(c.FilterOffset)
+			if err != nil {
+				return nil, err
+			}
+			h.FilterStart = filterStart
 		default:
 			h.Kind = HandlerCatch
 			typeName, err := resolveTypeTokenOrGeneric(md, c.ClassToken)

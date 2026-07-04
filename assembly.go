@@ -1202,6 +1202,7 @@ func (asm *Assembly) resolvers() *runtime.Resolvers {
 		ResolveFieldBytes:       asm.resolveFieldBytes,
 		ResolveMember:           asm.resolveMember,
 		ResolveManifestResource: asm.resolveManifestResource,
+		ResolveProperties:       asm.resolveProperties,
 	}
 }
 
@@ -1287,6 +1288,19 @@ func (asm *Assembly) resolveFieldBytes(typeFullName, fieldName string) ([]byte, 
 // the same "best effort, not full type identity" posture
 // hasHardShapeMismatch/scoreParamMatch already document for overload
 // resolution proper.
+//
+// paramTypeFullNames == nil (a real Go nil, distinct from a non-nil
+// zero-length slice — bcl.TypeArrayToFullNames preserves that
+// distinction for a real, empty Type[] argument via Go's own make()
+// semantics) means Type.GetMethod(string) — the plain, no-Type[]-at-all
+// overload (Fase 3.51, found via a real, common pattern: a generic
+// method like `T Identity<T>(T)`, whose eventual MakeGenericMethod call
+// has no way to spell out a still-open T in a Type[] up front, so real
+// code looks it up by bare name first). Matches the FIRST candidate by
+// name alone in that case, same simplification GetProperty/GetField
+// already make (no overload-ambiguity detection at all, unlike real
+// reflection's AmbiguousMatchException) — acceptable since every real
+// target here uses this shape for an unambiguous, non-overloaded name.
 func (asm *Assembly) resolveMember(typeFullName, memberName string, paramTypeFullNames []string) (string, bool) {
 	namespace, typeName := splitTypeName(typeFullName)
 	typeRID, _, err := asm.md.FindTypeDef(namespace, typeName)
@@ -1301,6 +1315,9 @@ func (asm *Assembly) resolveMember(typeFullName, memberName string, paramTypeFul
 	_, rows, err := asm.md.FindMethodDefCandidates(typeRID, memberName)
 	if err != nil {
 		return "", false
+	}
+	if paramTypeFullNames == nil && len(rows) > 0 {
+		return typeFullName + "::" + memberName, true
 	}
 	for _, row := range rows {
 		sig, err := metadata.ParseMethodSig(row.Signature)
@@ -1320,6 +1337,45 @@ func (asm *Assembly) resolveMember(typeFullName, memberName string, paramTypeFul
 		}
 	}
 	return "", false
+}
+
+// resolveProperties backs the interpreter's PropertyResolver (Fase 3.51,
+// Type.GetProperties/GetProperty) — reads typeFullName's own declared
+// properties directly off the real Property/PropertyMap/MethodSemantics
+// tables (metadata.TypeDefPropertyRange/Property/PropertyAccessors), not
+// derived from a get_Xxx/set_Xxx naming guess: MethodSemantics is the
+// real linkage a property's accessors use, so this stays correct even
+// for a non-standard accessor name (vanishingly rare in practice, but
+// free to get right here since the real linkage is already read anyway).
+func (asm *Assembly) resolveProperties(typeFullName string) (names []string, canRead []bool, canWrite []bool, ok bool) {
+	namespace, typeName := splitTypeName(typeFullName)
+	typeRID, _, err := asm.md.FindTypeDef(namespace, typeName)
+	if err != nil {
+		for _, dep := range asm.deps {
+			if n, r, w, depOK := dep.resolveProperties(typeFullName); depOK {
+				return n, r, w, true
+			}
+		}
+		return nil, nil, nil, false
+	}
+	start, end, err := asm.md.TypeDefPropertyRange(typeRID)
+	if err != nil {
+		return nil, nil, nil, false
+	}
+	for rid := start; rid < end; rid++ {
+		prop, err := asm.md.Property(rid)
+		if err != nil {
+			continue
+		}
+		getterRID, setterRID, err := asm.md.PropertyAccessors(rid)
+		if err != nil {
+			continue
+		}
+		names = append(names, prop.Name)
+		canRead = append(canRead, getterRID != 0)
+		canWrite = append(canWrite, setterRID != 0)
+	}
+	return names, canRead, canWrite, true
 }
 
 // resolveTypeByFullName implements interpreter.TypeResolver: it builds a

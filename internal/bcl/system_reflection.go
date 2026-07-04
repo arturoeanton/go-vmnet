@@ -26,11 +26,112 @@ type nativeConstructorInfo struct {
 type nativeMethodInfo struct {
 	typeFullName string
 	methodName   string
+	// genericArgs holds MakeGenericMethod's own real Type[] argument
+	// (closed generic method type arguments, e.g. ["System.Int32"] for
+	// `Identity<int>`) — nil for an ordinary non-generic MethodInfo, or
+	// one obtained via GetMethod that hasn't had MakeGenericMethod called
+	// on it. internal/interpreter/reflection.go's methodInfoInvoke reads
+	// this to pass the real methodGenericArgs through to Machine.call,
+	// the same argument an ordinary compiled `callvirt SomeMethod<T>()`
+	// site's own ir.Call.MethodGenericArgs already carries.
+	genericArgs []string
 }
 
 type nativeFieldInfo struct {
 	typeFullName string
 	fieldName    string
+}
+
+// nativePropertyInfo backs System.Reflection.PropertyInfo (Fase 3.51,
+// Type.GetProperties/GetProperty) — canRead/canWrite come from the real
+// get_Xxx/set_Xxx MethodDef linkage (assembly.go's resolveProperties),
+// not guessed from the name, so a get-only or set-only property answers
+// CanRead/CanWrite correctly and GetValue/SetValue can reject the
+// unsupported direction with a real error instead of an opaque "method
+// not found" from whatever m.call attempt would otherwise fail deep
+// inside.
+type nativePropertyInfo struct {
+	typeFullName      string
+	propertyName      string
+	canRead, canWrite bool
+}
+
+func init() {
+	register("System.Reflection.PropertyInfo::get_Name", true, propertyInfoGetName)
+	register("System.Reflection.PropertyInfo::get_CanRead", true, propertyInfoGetCanRead)
+	register("System.Reflection.PropertyInfo::get_CanWrite", true, propertyInfoGetCanWrite)
+	// MakeGenericMethod(Type[] typeArguments) needs no Machine access at
+	// all — unlike Invoke (which actually has to run the target method),
+	// this just stamps the real closed type-argument names onto a NEW
+	// MethodInfo wrapper (real MakeGenericMethod never mutates the
+	// receiver), so it's a plain bcl.Native rather than a machineRegistry
+	// entry like every other MethodInfo/PropertyInfo member here.
+	register("System.Reflection.MethodInfo::MakeGenericMethod", true, methodInfoMakeGenericMethod)
+}
+
+func methodInfoMakeGenericMethod(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("bcl: MethodInfo.MakeGenericMethod expects (this, Type[])")
+	}
+	mi, ok := nativeOf[*nativeMethodInfo](args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: MethodInfo.MakeGenericMethod receiver is not a MethodInfo")
+	}
+	typeArgs, err := TypeArrayToFullNames(args[1])
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	return runtime.ObjRef(&runtime.Object{Native: &nativeMethodInfo{
+		typeFullName: mi.typeFullName,
+		methodName:   mi.methodName,
+		genericArgs:  typeArgs,
+	}}), nil
+}
+
+// MethodInfoGenericArgs returns a MethodInfo wrapper's own MakeGenericMethod
+// type arguments, if any were ever attached — exported so internal/
+// interpreter/reflection.go's methodInfoInvoke (which needs Machine
+// access to actually call the target, unlike MakeGenericMethod itself)
+// can pass them through to Machine.call as its real methodGenericArgs.
+func MethodInfoGenericArgs(v runtime.Value) []string {
+	mi, ok := nativeOf[*nativeMethodInfo](v)
+	if !ok {
+		return nil
+	}
+	return mi.genericArgs
+}
+
+func propertyInfoGetName(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: PropertyInfo.Name expects a receiver")
+	}
+	name, ok := propertyInfoName(args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: PropertyInfo.Name receiver is not a PropertyInfo")
+	}
+	return runtime.String(name), nil
+}
+
+func propertyInfoGetCanRead(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: PropertyInfo.CanRead expects a receiver")
+	}
+	pi, ok := nativeOf[*nativePropertyInfo](args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: PropertyInfo.CanRead receiver is not a PropertyInfo")
+	}
+	return runtime.Bool(pi.canRead), nil
+}
+
+func propertyInfoGetCanWrite(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: PropertyInfo.CanWrite expects a receiver")
+	}
+	pi, ok := nativeOf[*nativePropertyInfo](args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: PropertyInfo.CanWrite receiver is not a PropertyInfo")
+	}
+	return runtime.Bool(pi.canWrite), nil
 }
 
 // NewConstructorInfoValue/NewMethodInfoValue/NewFieldInfoValue build the
@@ -47,6 +148,18 @@ func NewMethodInfoValue(typeFullName, methodName string) runtime.Value {
 
 func NewFieldInfoValue(typeFullName, fieldName string) runtime.Value {
 	return runtime.ObjRef(&runtime.Object{Native: &nativeFieldInfo{typeFullName: typeFullName, fieldName: fieldName}})
+}
+
+// NewPropertyInfoValue builds a System.Reflection.PropertyInfo wrapper —
+// called from internal/interpreter/reflection.go's Machine-aware
+// GetProperties/GetProperty natives.
+func NewPropertyInfoValue(typeFullName, propertyName string, canRead, canWrite bool) runtime.Value {
+	return runtime.ObjRef(&runtime.Object{Native: &nativePropertyInfo{
+		typeFullName: typeFullName,
+		propertyName: propertyName,
+		canRead:      canRead,
+		canWrite:     canWrite,
+	}})
 }
 
 // ConstructorInfoTypeFullName/MethodInfoParts/FieldInfoParts unwrap the
@@ -76,6 +189,25 @@ func FieldInfoParts(v runtime.Value) (typeFullName, fieldName string, ok bool) {
 		return "", "", false
 	}
 	return fi.typeFullName, fi.fieldName, true
+}
+
+// PropertyInfoParts unwraps a PropertyInfo wrapper value back to its
+// plain data — same rationale as ConstructorInfoTypeFullName/
+// MethodInfoParts/FieldInfoParts above.
+func PropertyInfoParts(v runtime.Value) (typeFullName, propertyName string, canRead, canWrite bool, ok bool) {
+	pi, ok := nativeOf[*nativePropertyInfo](v)
+	if !ok {
+		return "", "", false, false, false
+	}
+	return pi.typeFullName, pi.propertyName, pi.canRead, pi.canWrite, true
+}
+
+func propertyInfoName(v runtime.Value) (string, bool) {
+	pi, ok := nativeOf[*nativePropertyInfo](v)
+	if !ok {
+		return "", false
+	}
+	return pi.propertyName, true
 }
 
 func nativeOf[T any](v runtime.Value) (T, bool) {

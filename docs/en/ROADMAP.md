@@ -4165,22 +4165,164 @@ engine) requires.
 
 | Package | Netstandard-lite clean % | Real demo |
 |---|---|---|
-| `NPOI@2.8.0` | 97.3% | `examples/npoi-demo` — reads a real legacy `.xls` |
-| `ClosedXML@0.105.0` | (not independently tracked; superseded by the demo) | `examples/closedxml-demo` — reads a real `.xlsx` |
-| `System.Text.Json@8.0.5` | 66.7%+ | `examples/system-text-json-demo` — parses real JSON |
-| `Newtonsoft.Json@13.0.3` | 60.6%+ | `examples/newtonsoft-json-demo` — parses real JSON |
-| `DocumentFormat.OpenXml@3.1.1` | (new target, not independently tracked) | `examples/openxml-demo` — writes a real `.docx`, opened back by the real .NET SDK |
-| `Jint@3.1.3` | 66.1%+ | `examples/jint-demo`/`jint-nowrapper` — runs real JS |
-| `Ardalis.GuardClauses@5.0.0` | 87.4%+ | — |
-| `Semver@2.3.0` | 72.6%+ | — |
-| `FluentValidation@11.9.2` | 63.5%+ | — |
-| `Humanizer.Core@2.14.1` | 46.0%+ | — |
-| `SimpleBase@4.0.0` | 45.7%+ | — |
+| `NPOI@2.8.0` | 97.6% (14,202 methods analyzed, 347 flagged) | `examples/npoi-demo` — reads a real legacy `.xls` |
+| `ClosedXML@0.105.0` | 96.1% (10,444 methods analyzed, 412 flagged) | `examples/closedxml-demo` — reads a real `.xlsx` |
+| `System.Text.Json@8.0.5` | 95.7% (3,577 methods analyzed, 155 flagged) | `examples/system-text-json-demo` — parses real JSON |
+| `Newtonsoft.Json@13.0.3` | 84.4% (4,064 methods analyzed, 636 flagged) | `examples/newtonsoft-json-demo` — parses real JSON |
+| `DocumentFormat.OpenXml@3.1.1` | 100.0% (67,234 methods analyzed, 7 flagged) | `examples/openxml-demo` — writes a real `.docx`, opened back by the real .NET SDK |
+| `Jint@3.1.3` | 94.6% (5,414 methods analyzed, 290 flagged) | `examples/jint-demo`/`jint-nowrapper` — runs real JS |
+| `Ardalis.GuardClauses@5.0.0` | 97.5% (285 methods analyzed, 7 flagged) | — |
+| `Semver@2.3.0` | 92.9% (423 methods analyzed, 30 flagged) | — |
+| `FluentValidation@11.9.2` | 96.0% (1,289 methods analyzed, 51 flagged) | — |
+| `Humanizer.Core@2.14.1` | 97.1% (1,597 methods analyzed, 47 flagged) | — |
+| `SimpleBase@4.0.0` | 92.2% (258 methods analyzed, 20 flagged) | — |
 
 Five of ten targets now have a full, real, running demo (reading and/or writing real binary/XML/
 JSON formats end to end) rather than just a static-checker percentage — the strongest signal yet
 that vmnet runs genuinely unmodified, real-world .NET packages, not just passes a compatibility
-linter.
+linter. Re-measured after Fase 3.45 (`internal/checker.Report.MethodsAnalyzed`/`MethodsFlagged`,
+`--profile=netstandard-lite`, transitive dependencies included exactly like `vm.LoadPackage` does
+at runtime): every target moved up, several substantially — `Humanizer.Core` from 46.0% to 97.1%,
+`FluentValidation` from 63.5% to 96.0%, `SimpleBase` from 45.7% to 92.2%, `Newtonsoft.Json` from
+60.6% to 84.4% — reflecting how much of the LINQ/collections surface (`OrderBy`/`GroupBy`/`Sort`/
+`Aggregate`/`SortedDictionary`/... ) those packages' own real code actually exercises. The simple
+average across all 11 rows is 94.9%; a methods-weighted average is 98.2%, dominated by
+`DocumentFormat.OpenXml`'s own 67,234 analyzed methods (62% of the combined total) at 100.0% —
+the per-package number is the more representative one for "how well does vmnet cover a typical,
+diverse real package," not the weighted one.
+
+### Fase 3.51 — a broad string-formatting/culture, exceptions, and reflection hardening pass
+
+**Goal:** three areas the demo-driven passes above never specifically targeted — numeric/DateTime
+`ToString(format)`/`string.Format` specifiers, exception filters/`Data`/`AggregateException`, and
+`System.Reflection` (`PropertyInfo`, `Enum.Parse`/`TryParse`, `Activator.CreateInstance(Type,
+object[])`, `MethodInfo.MakeGenericMethod`). Every fix verified against real `dotnet run` output
+for the identical C# source (a `netstandard2.0` fixture library + a `net10.0` reflection-driven
+runner), diffed line by line against vmnet's own output for the same compiled DLL.
+
+**Exceptions — the two biggest gaps**:
+- [x] **`catch (Foo) when (cond)` filter clauses were entirely unsupported** — `ir.Build` hard-
+      failed with `UnsupportedOpcodeError{OpCode: "filter (catch-when)"}` the instant a method
+      contained one, not just a wrong-output bug. Fixed generally: `il`'s already-correct
+      `FilterOffset` parsing is now lowered into a real `ir.HandlerFilter` clause with its own
+      `FilterStart`/`endfilter` (`ir.EndFilter`, opcode `0xFE11` — distinct from `endfinally`'s
+      `0xDC`) IR, and `internal/interpreter/exceptions.go` runs the filter body inline exactly like
+      a finally/fault handler, using its boolean verdict to decide whether to enter the handler or
+      keep searching remaining candidates (`resumeAfterFilter`).
+- [x] **A caught exception object lost its own extra fields the moment it was caught** — `catch
+      (MyException e) { ...e.Code... }` failed with `"MyException has no field
+      \"<Code>k__BackingField\""` for ANY custom exception subclass with its own fields/auto-
+      properties, filter or no filter. Root cause: `dispatchException`/`resumeAfterFilter` pushed a
+      brand-new bare `&runtime.Object{Native: ex}` onto the stack at the catch entry point, never
+      the REAL thrown object (which — for a plugin subclass — has both `Type` and `Native` set, see
+      `baseExceptionCtorInPlace`'s own doc comment). Fixed by giving `ManagedException` a real
+      `Object *runtime.Object` back-reference, set once by `ir.Throw`, and reusing it
+      (`exceptionValue`) at every catch/filter entry point instead of a fresh wrapper —
+      `exceptionMatchesCatch`'s own type-matching logic is untouched (still needs the bare-wrapper
+      path so `nativeMatches`'s exception-hierarchy walk keeps working past an unresolvable
+      `System.Exception` base).
+- [x] `Exception.GetType()` on a plain (non-plugin-subclass) exception failed with "unsupported BCL
+      method" — the virtual-dispatch ancestor walk (`calls.go`) already had a `System.Object`
+      fallback for `Equals`/`GetHashCode`/`ToString`, just not `GetType`; and separately,
+      `bcl.NativeTypeName` had no case for `*runtime.ManagedException` at all, so the walk never
+      even started for a bare exception object (`ok` was false). Both fixed.
+- [x] `Exception.ToString()` fell through to a generic `Object.ToString()` (just the bare type name,
+      no message) — added a real override reusing `ManagedException.Error()`'s own `TypeName:
+      Message ---> innerError` formatting.
+- [x] `Exception.Data` (an `IDictionary`, real semantics: never null, lazily backed) — missing
+      entirely; now lazily allocates a real `Hashtable`-shaped dictionary into a new
+      `ManagedException.Data` field on first access.
+- [x] `ArgumentException`/`ArgumentNullException`/`ArgumentOutOfRangeException.ParamName` — missing
+      entirely (no field to hold it). `ArgumentNullException`/`ArgumentOutOfRangeException`'s
+      2-string constructor puts `paramName` FIRST (`(paramName, message)`), the opposite of
+      `ArgumentException`'s own `(message, paramName)` — a real, easy-to-get-wrong .NET API
+      asymmetry, now handled per-type (`argExceptionParamOrder`).
+- [x] `System.AggregateException` — missing entirely (`InnerExceptions`, `Flatten()`). Added a
+      `ManagedException.InnerExceptions []*Object` field (`Inner` still points at the first one, so
+      the ordinary singular `InnerException` getter keeps working transparently) plus a real
+      recursive `Flatten()`.
+
+**String formatting**:
+- [x] `int`/`long`/`double.ToString(format)` **ignored the format argument entirely** — `n.ToString
+      ("X")`/`("N0")` silently ran the plain no-argument overload instead. For `double` specifically
+      this wasn't just "missing a comma": `Double.ToString("N2")` on a large value fell through to
+      `FormatFloat('G', -1, ...)`, which switches to scientific notation at that magnitude — a
+      completely different answer, not just missing formatting. Both now route through
+      `formatValue`, `String.Format`'s own specifier parser.
+- [x] `{0:X}` on a negative value produced `"-1"` instead of real .NET's two's-complement bit
+      pattern (`"FFFFFFFF"` for `int`, 16 F's for `long`) — fixed using the value's real `Kind`
+      (I4 vs I8) to pick the correct width. Lowercase `{0:x8}` also ignored case entirely (always
+      uppercased) — fixed.
+- [x] `"C"` (currency) and `"E"`/`"e"` (scientific) standard specifiers were entirely unimplemented.
+      `"E"` additionally needed a manual exponent-width fix: Go's `FormatFloat` pads the exponent to
+      2 digits, real .NET always uses at least 3 (`"E+003"`, not `"E+03"`).
+- [x] Custom numeric format strings (`"0.00%"`, `"000.00"`, `"#,##0.00"` — a sequence of `0`/`#`/
+      `,`/`.`/`%` placeholder characters, not a standard single-letter+digits specifier) were
+      rejected outright as "unsupported format specifier". Added a bounded custom-format
+      implementation (`formatCustomNumeric`) covering the common case; a `;`-separated
+      positive/negative/zero section or scientific-notation custom pattern still correctly errors
+      rather than guessing.
+- [x] `StringBuilder.AppendFormat` — missing entirely; now shares `String.Format`'s own composite-
+      format parser.
+- [x] `int.TryParse(s, NumberStyles.HexNumber, ...)` silently mis-parsed a hex literal as decimal
+      (and failed) — now detects the `AllowHexSpecifier` bit and parses base-16.
+- [x] `DateTime.ToString(format)` ignored its argument (always the fixed default format) — now
+      honors both a standard single-letter specifier (`"d"`, `"D"`, `"s"`, `"o"`, ...) and a custom
+      pattern (`"yyyy-MM-dd HH:mm:ss"`, via the same translator `ParseExact` already used, just run
+      in the Format direction).
+- [ ] **Found, not fixed**: a boxed `bool`/enum value passed through `string.Format`/an interpolated
+      string prints its raw underlying `int32` (`"1"`/`"0"`, or an enum's numeric value) instead of
+      `"True"`/`"False"` or the member name. Root cause: `box`/`unbox.any` are elided as a no-op
+      (`ir/builder.go` — vmnet's `Value` is already a tagged union, so boxing a value type "just
+      works" for every other consumer), which discards the ONE piece of information a display/
+      `ToString` call site would need to tell a boxed `bool`/enum apart from a boxed `int32` at that
+      point — by the time `String.Format`'s `object[]` arguments reach `displayString`, they're
+      indistinguishable `KindI4` values. A real fix needs either a broad `Value` representation
+      change (tagging every enum/bool value with its declared type — touches arithmetic/comparison/
+      switch dispatch throughout the interpreter) or threading the `constrained.` prefix's own
+      static-type operand through to a following `ToString` callvirt specifically — both larger than
+      this pass's scope. `Enum.GetValues`/`GetNames`/`Parse`/`TryParse` (which all take an explicit
+      `Type` argument, not an ambient receiver) are unaffected and already correct.
+
+**Reflection**:
+- [x] `Type.GetProperties()`/`GetProperty(name)` + `PropertyInfo.GetValue`/`SetValue`/`Name`/
+      `CanRead`/`CanWrite` — missing entirely; no metadata reader for the `Property`/`PropertyMap`/
+      `MethodSemantics` tables existed at all. Added typed accessors (`metadata.Property`/
+      `TypeDefPropertyRange`/`PropertyAccessors`) plus a new `PropertyResolver` threaded through
+      `runtime.Resolvers`/`interpreter.Machine` the same way `MemberResolver`/`EnumResolver` already
+      are. `CanRead`/`CanWrite` come from the real `get_Xxx`/`set_Xxx` `MethodSemantics` linkage
+      (correctly true for a `private set` accessor — real reflection's `CanWrite` means "has a
+      setter at all", not "publicly"), not a name guess.
+- [x] `Activator.CreateInstance(Type, object[])` — the ordinary non-generic reflection overload —
+      always failed with `"T could not be resolved"`, because `Activator.CreateInstance` was only
+      ever wired up for the GENERIC `CreateInstance<T>()` shape (`where T : new()`); both compile to
+      the identical CIL method name, told apart only by whether the call site's own generic method
+      arguments are present.
+- [x] `Enum.Parse`/`Enum.TryParse<TEnum>` — missing entirely. `Parse` is a plain static method
+      (target enum named by an ordinary `Type` argument); `TryParse<TEnum>` is itself a GENERIC
+      METHOD (the same `ir.Call.MethodGenericArgs` shape `Activator.CreateInstance<T>` needs) —
+      wired up separately for that reason.
+- [x] `MethodInfo.MakeGenericMethod(Type[])` + invoking the result — missing entirely.
+      `Type.GetMethod(string)` (no `Type[]` signature argument, the overload real code uses to look
+      up a still-open generic method before closing it) also unconditionally required 3 arguments
+      and failed outright; now accepts the 2-arg shape, matched by name only (Go's own nil-vs-empty-
+      slice distinction, preserved through `bcl.TypeArrayToFullNames`, is what tells "no Type[] at
+      all" apart from "an explicit, real empty Type[]" in `resolveMember`).
+
+### How to verify Fase 3.51
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+cd examples/npoi-demo && go run .
+cd ../system-text-json-demo && go run .
+cd ../openxml-demo && go run .
+cd ../newtonsoft-json-demo && go run .
+cd ../calculator && dotnet build Calculator.csproj -c Release && go run .
+cd ../closedxml-demo && dotnet build GraphicEngineWrapper.csproj -c Release && for i in 1 2 3 4; do go run .; done
+```
 
 ---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")

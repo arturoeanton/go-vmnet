@@ -33,6 +33,9 @@ func analyzeFixture(t *testing.T, profile Profile) *Report {
 // certify clean under the profiles it was built against, with the single
 // expected exception being Unsupported.cs (which exists specifically to
 // test the checker itself — see TestAnalyze_UnsupportedOpcodeIsReported).
+// Repurposed to a `calli` (indirect call through a C# 9+ function
+// pointer) once exception filter clauses — its previous "still
+// unsupported" example — gained real support in Fase 3.51.
 // Any OTHER finding here means the checker or the interpreter has drifted
 // from what it actually supports.
 func TestAnalyze_OwnAssemblyIsCompatible(t *testing.T) {
@@ -43,7 +46,7 @@ func TestAnalyze_OwnAssemblyIsCompatible(t *testing.T) {
 				t.Fatal("MethodsAnalyzed = 0, want > 0 (did the fixture assembly fail to load?)")
 			}
 			for _, f := range r.Findings {
-				if f.Method != "Vmnet.Fixtures.Unsupported::FilterClause" {
+				if f.Method != "Vmnet.Fixtures.Unsupported::FunctionPointerCall" {
 					t.Errorf("unexpected finding outside Unsupported.cs: %+v", f)
 				}
 			}
@@ -89,28 +92,29 @@ func TestAnalyze_MinimalProfileFlagsObjectModel(t *testing.T) {
 }
 
 // TestAnalyze_UnsupportedOpcodeIsReported proves a method using an
-// exception filter clause (`catch (Foo) when (cond)` — the one exception-
-// handling shape Fase 3.10 doesn't lower, see ir/builder.go's
-// buildHandlers) shows up as a concrete, located finding, not a silent
-// skip or a crash.
+// indirect call through a function pointer (`delegate*<...>`, compiling
+// to a real `calli` — internal/ir/builder.go's opcode switch has no case
+// for it at all, the same "no raw function-pointer indirection" boundary
+// Reflection.Emit/P-Invoke already sit outside of) shows up as a
+// concrete, located finding, not a silent skip or a crash.
 func TestAnalyze_UnsupportedOpcodeIsReported(t *testing.T) {
 	r := analyzeFixture(t, ProfileNetStandardLite)
 
 	var found *Finding
 	for i := range r.Findings {
-		if r.Findings[i].Method == "Vmnet.Fixtures.Unsupported::FilterClause" {
+		if r.Findings[i].Method == "Vmnet.Fixtures.Unsupported::FunctionPointerCall" {
 			found = &r.Findings[i]
 			break
 		}
 	}
 	if found == nil {
-		t.Fatalf("expected a finding for Unsupported::FilterClause, got: %+v", r.Findings)
+		t.Fatalf("expected a finding for Unsupported::FunctionPointerCall, got: %+v", r.Findings)
 	}
 	if found.Kind != KindUnsupportedOpcode {
 		t.Errorf("finding.Kind = %s, want %s", found.Kind, KindUnsupportedOpcode)
 	}
 	if r.Status == StatusCompatible {
-		t.Error("Status = compatible, want partial (Unsupported.FilterClause should have blocked it)")
+		t.Error("Status = compatible, want partial (Unsupported.FunctionPointerCall should have blocked it)")
 	}
 }
 

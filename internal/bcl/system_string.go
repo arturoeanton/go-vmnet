@@ -2,6 +2,7 @@ package bcl
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"unicode"
@@ -752,20 +753,36 @@ func formatSpec(spec string, values []runtime.Value) (string, error) {
 	return s, nil
 }
 
-// formatValue applies a standard numeric format specifier (D/F/N/X/P/G —
-// spec's most common composite-format cases). An unrecognized specifier is
-// a Go error rather than a silent guess, matching vmnet's rule of never
-// producing a plausible-but-wrong result for something it doesn't model.
+// formatValue applies a standard numeric format specifier (D/F/N/X/P/G/C/E
+// — spec's most common composite-format cases, and the same set every
+// ToString(format) native below delegates to) or a CUSTOM numeric format
+// string (formatCustomNumeric — a sequence of placeholder/literal
+// characters like "0.00%"/"000.00"/"#,##0.00", told apart from a standard
+// specifier by shape: real .NET treats a format string as "standard" only
+// when it's a single letter optionally followed by plain digits —
+// anything else is always custom, even if it happens to start with a
+// letter). An unrecognized standard letter, or a custom pattern using a
+// character this simplified implementation doesn't model (a ';'
+// negative/zero section, scientific notation, ...), is a Go error rather
+// than a silent guess, matching vmnet's rule of never producing a
+// plausible-but-wrong result for something it doesn't model.
 func formatValue(v runtime.Value, spec string) (string, error) {
 	if spec == "" {
 		return displayString(v), nil
 	}
-	kind := byte(0)
-	if len(spec) > 0 {
-		kind = spec[0]
-		if kind >= 'a' && kind <= 'z' {
-			kind -= 'a' - 'A'
-		}
+	if !isStandardSpecifierShape(spec) {
+		return formatCustomNumeric(v, spec)
+	}
+	// origKind (case preserved) only matters for X/x: real .NET's hex
+	// format specifier is the one standard specifier whose CASE is part
+	// of its meaning ("X" uppercase digits, "x" lowercase) rather than
+	// just a case-insensitive alias for the same behavior (every other
+	// letter here — F/N/D/P/G/C/E/e — means the same thing regardless of
+	// case).
+	origKind := spec[0]
+	kind := origKind
+	if kind >= 'a' && kind <= 'z' {
+		kind -= 'a' - 'A'
 	}
 	precision := -1
 	if len(spec) > 1 {
@@ -818,11 +835,50 @@ func formatValue(v runtime.Value, spec string) (string, error) {
 			f = float64(asInt)
 		}
 		return groupThousands(strconv.FormatFloat(f, 'f', precision, 64)), nil
+	case 'C':
+		// Invariant-culture-adjacent: real Currency format is
+		// culture-specific (symbol, symbol placement, grouping), but
+		// vmnet has no culture support anywhere (CultureInfo is a stub,
+		// Fase 3.6) — "$" prefix + N's own grouping is what every
+		// culture-less/en-US-like environment (this project's only
+		// realistic target) actually produces.
+		if !isFloat && !isInt {
+			return "", fmt.Errorf("bcl: format specifier \"C\" requires a numeric value")
+		}
+		if precision < 0 {
+			precision = 2
+		}
+		f := asFloat
+		if !isFloat {
+			f = float64(asInt)
+		}
+		neg := f < 0
+		s := "$" + groupThousands(strconv.FormatFloat(math.Abs(f), 'f', precision, 64))
+		if neg {
+			return "-" + s, nil
+		}
+		return s, nil
 	case 'X':
+		// Two's-complement of the value's ORIGINAL integral width, not a
+		// naive decimal-negative-sign hex string: real (-1).ToString("X")
+		// is "FFFFFFFF" for a 32-bit int, "FFFFFFFFFFFFFFFF" for a 64-bit
+		// long — the CLR's X format only ever prints the bit pattern,
+		// which has no sign of its own. v.Kind (not just asInt's value)
+		// is what distinguishes a widened-to-64-bit long from a 32-bit
+		// int/short/byte, since valueAsInt64 already sign-extends either
+		// into the same int64 asInt.
 		if !isInt {
 			return "", fmt.Errorf("bcl: format specifier \"X\" requires an integer value")
 		}
-		s := strings.ToUpper(strconv.FormatInt(asInt, 16))
+		var s string
+		if v.Kind == runtime.KindI8 {
+			s = strconv.FormatUint(uint64(asInt), 16)
+		} else {
+			s = strconv.FormatUint(uint64(uint32(asInt)), 16)
+		}
+		if origKind == 'X' {
+			s = strings.ToUpper(s)
+		}
 		if precision > len(s) {
 			s = strings.Repeat("0", precision-len(s)) + s
 		}
@@ -838,12 +894,140 @@ func formatValue(v runtime.Value, spec string) (string, error) {
 		if !isFloat {
 			f = float64(asInt)
 		}
-		return strconv.FormatFloat(f*100, 'f', precision, 64) + "%", nil
+		return groupThousands(strconv.FormatFloat(f*100, 'f', precision, 64)) + "%", nil
+	case 'E':
+		// .NET's E format always uses a signed, MINIMUM-3-digit exponent
+		// ("E+003"), unlike Go's FormatFloat ('E'/'e' verb), which pads to
+		// only 2 — padExponent bridges that one difference; everything
+		// else (mantissa digit count defaulting to 6, the E/e case itself
+		// selecting upper/lowercase) already matches.
+		if !isFloat && !isInt {
+			return "", fmt.Errorf("bcl: format specifier \"E\" requires a numeric value")
+		}
+		if precision < 0 {
+			precision = 6
+		}
+		f := asFloat
+		if !isFloat {
+			f = float64(asInt)
+		}
+		goVerb := byte('E')
+		if origKind == 'e' {
+			goVerb = 'e'
+		}
+		return padExponent(strconv.FormatFloat(f, goVerb, precision, 64)), nil
 	case 'G':
 		return displayString(v), nil
 	default:
 		return "", fmt.Errorf("bcl: unsupported format specifier %q", spec)
 	}
+}
+
+// padExponent widens FormatFloat's 'E'/'e'-verb exponent field (Go always
+// emits at least 2 digits, e.g. "E+03") to .NET's own minimum of 3
+// ("E+003") — the exponent digit COUNT is the only thing FormatFloat gets
+// wrong for real .NET E-format output; sign and mantissa already match.
+func padExponent(s string) string {
+	idx := strings.IndexAny(s, "Ee")
+	if idx < 0 || idx+1 >= len(s) {
+		return s
+	}
+	mantissa := s[:idx+1]
+	sign := s[idx+1]
+	digits := s[idx+2:]
+	for len(digits) < 3 {
+		digits = "0" + digits
+	}
+	return mantissa + string(sign) + digits
+}
+
+// isStandardSpecifierShape tells a standard numeric format string
+// ("X", "N2", "F4", ...) apart from a custom one ("0.00%", "#,##0.00",
+// "000.00", ...) by shape alone, matching real .NET's own rule: a
+// standard specifier is always exactly one letter followed by nothing
+// but plain decimal digits (the precision). Anything else — including a
+// single character that happens to be a letter .NET doesn't recognize as
+// standard, e.g. "A" — is a custom format string instead of a "supported
+// standard specifier" error, so it reaches formatCustomNumeric's own
+// (separate) unsupported-character error instead, which is the more
+// accurate diagnostic for it.
+func isStandardSpecifierShape(spec string) bool {
+	c := spec[0]
+	if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+		return false
+	}
+	for i := 1; i < len(spec); i++ {
+		if spec[i] < '0' || spec[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// formatCustomNumeric implements the common core of .NET's custom numeric
+// format strings: '0' (mandatory digit, zero-padded), '#' (optional
+// digit), ',' anywhere left of the decimal point (thousands grouping —
+// real .NET also gives a trailing ',' immediately before the decimal
+// point a "scale by 1000" meaning, not modeled here), '.' (decimal
+// point), '%' (multiply by 100, literal '%' in the output), any other
+// character passed through literally. Deliberately does NOT support
+// custom format SECTIONS (";"-separated positive/negative/zero patterns)
+// or scientific notation ('0.00E+00') — reports those as an unsupported
+// character rather than guessing, same posture as formatValue's own
+// unrecognized-standard-specifier error.
+func formatCustomNumeric(v runtime.Value, spec string) (string, error) {
+	asFloat, isFloat := valueAsFloat64(v)
+	asInt, isInt := valueAsInt64(v)
+	if !isFloat && !isInt {
+		return "", fmt.Errorf("bcl: custom numeric format %q requires a numeric value", spec)
+	}
+	for _, r := range spec {
+		switch r {
+		case '0', '#', ',', '.', '%':
+		default:
+			return "", fmt.Errorf("bcl: unsupported character %q in custom numeric format %q", r, spec)
+		}
+	}
+	f := asFloat
+	if !isFloat {
+		f = float64(asInt)
+	}
+	hasPercent := strings.Contains(spec, "%")
+	if hasPercent {
+		f *= 100
+	}
+	intSpec, fracSpec, _ := strings.Cut(spec, ".")
+	minIntDigits := strings.Count(intSpec, "0")
+	hasGrouping := strings.Contains(intSpec, ",")
+	fracDigits := 0
+	for i := 0; i < len(fracSpec); i++ {
+		if fracSpec[i] != '0' && fracSpec[i] != '#' {
+			break
+		}
+		fracDigits++
+	}
+
+	s := strconv.FormatFloat(f, 'f', fracDigits, 64)
+	neg := strings.HasPrefix(s, "-")
+	s = strings.TrimPrefix(s, "-")
+	intPart, fracPart, hasFrac := strings.Cut(s, ".")
+	if minIntDigits > len(intPart) {
+		intPart = strings.Repeat("0", minIntDigits-len(intPart)) + intPart
+	}
+	out := intPart
+	if hasFrac {
+		out += "." + fracPart
+	}
+	if hasGrouping {
+		out = groupThousands(out)
+	}
+	if neg {
+		out = "-" + out
+	}
+	if hasPercent {
+		out += "%"
+	}
+	return out, nil
 }
 
 func valueAsInt64(v runtime.Value) (int64, bool) {

@@ -76,6 +76,11 @@ type MemberResolver func(typeFullName, memberName string, paramTypeFullNames []s
 // runtime.Resolvers.ResolveManifestResource.
 type ManifestResourceResolver func(name string) ([]byte, bool)
 
+// PropertyResolver reads a plugin type's own declared properties (Fase
+// 3.50, Type.GetProperties/GetProperty) — see
+// runtime.Resolvers.ResolveProperties.
+type PropertyResolver func(typeFullName string) (names []string, canRead []bool, canWrite []bool, ok bool)
+
 // genericMachineNative is a Machine-aware native (like machineNative,
 // linq.go) that additionally needs the call site's own resolved generic
 // method type arguments (Fase 3.40, ir.Call.MethodGenericArgs) — e.g.
@@ -207,7 +212,8 @@ func (m *Machine) call(fullName string, args []runtime.Value, virtual bool, dept
 					}
 				}
 				// Last resort: System.Object's own Equals/GetHashCode/
-				// ToString (Fase 3.40). The ancestor chain walk above
+				// ToString/GetType (Fase 3.40, GetType added hardening
+				// this same gap further). The ancestor chain walk above
 				// never reaches "System.Object" itself — buildType
 				// deliberately leaves BaseTypeFullName empty for a type
 				// whose immediate base IS Object (assembly.go's own
@@ -219,17 +225,29 @@ func (m *Machine) call(fullName string, args []runtime.Value, virtual bool, dept
 				// the way through to the literal "IEquatable`1::Equals"
 				// fallback below, which can never resolve (no real
 				// TypeDef for a BCL-only generic interface). Only tried
-				// for the 3 names that actually have a native here, AND
+				// for the 4 names that actually have a native here, AND
 				// only when the argument count actually matches Object's
-				// own arity (Equals: receiver+1, GetHashCode/ToString:
-				// receiver only) — a same-named but differently-shaped
-				// interface method (IEqualityComparer<T>.Equals(T,T),
-				// receiver+2) must NOT be redirected here: found via a
+				// own arity (Equals: receiver+1, GetHashCode/ToString/
+				// GetType: receiver only) — a same-named but differently-
+				// shaped interface method (IEqualityComparer<T>.Equals(T,
+				// T), receiver+2) must NOT be redirected here: found via a
 				// real bug where a comparer's own unresolvable
 				// Equals(x,y) hit this fallback and objectEquals rejected
 				// it outright ("expects 2 arguments"), instead of falling
 				// through to the ordinary, more informative error below.
-				if (method == "Equals" && len(args) == 2) || ((method == "GetHashCode" || method == "ToString") && len(args) == 1) {
+				//
+				// GetType specifically: found via a real, common pattern
+				// this ancestor walk alone can't reach at all — a plugin
+				// exception subclass (`class MyException : Exception`)
+				// calling `e.GetType()` inside a catch block walks
+				// MyException -> System.Exception (its real
+				// BaseTypeFullName) -> stops (System.Exception has no
+				// TypeDef to resolve further, so baseTypeOf's ok is
+				// false), never trying System.Object at all — regardless
+				// of catch (Exception e).ToString()/Equals hitting the
+				// exact same dead end, which this fallback already
+				// covered for those two.
+				if (method == "Equals" && len(args) == 2) || ((method == "GetHashCode" || method == "ToString" || method == "GetType") && len(args) == 1) {
 					v, hasReturn, err, found, rerr := m.tryCall("System.Object::"+method, args, depth, instrCount, paramTypeNames, methodGenericArgs)
 					if found {
 						return v, hasReturn, err

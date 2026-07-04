@@ -29,4 +29,5 @@ var (
 
 	errEndfinallyOutsideHandler = errors.New("interpreter: endfinally outside a finally/fault handler")
 	errRethrowOutsideCatch      = errors.New("interpreter: rethrow outside a catch handler")
+	errEndfilterOutsideFilter   = errors.New("interpreter: endfilter outside a filter handler")
 )

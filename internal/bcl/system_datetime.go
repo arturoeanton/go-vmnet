@@ -383,14 +383,59 @@ func dateTimeAddCalendar(years, months, days int) Native {
 	}
 }
 
+// dateTimeStandardFormats maps DateTime.ToString's single-letter standard
+// format specifiers (not to be confused with a custom pattern like
+// "yyyy-MM-dd" — real .NET tells them apart the same way formatValue's
+// own isStandardSpecifierShape does: a bare recognized letter with no
+// other characters) directly to the equivalent Go reference-time layout.
+// Real values are culture-dependent (this is the en-US-shaped default —
+// consistent with every other culture-sensitive native in this project,
+// e.g. formatValue's own "C" currency using "$": no culture support
+// anywhere, CultureInfo is a stub, Fase 3.6). "K" (the round-trip
+// specifiers' own timezone-offset-or-Z suffix) is omitted: every
+// DateTime here is effectively Unspecified/UTC internally (Fase 3.21),
+// so there is no real offset to print beyond a literal "Z" for the
+// Utc-labeled formats.
+var dateTimeStandardFormats = map[byte]string{
+	'd': "1/2/2006",
+	'D': "Monday, January 2, 2006",
+	't': "3:04 PM",
+	'T': "3:04:05 PM",
+	'f': "Monday, January 2, 2006 3:04 PM",
+	'F': "Monday, January 2, 2006 3:04:05 PM",
+	'g': "1/2/2006 3:04 PM",
+	'G': "1/2/2006 3:04:05 PM",
+	's': "2006-01-02T15:04:05",
+	'u': "2006-01-02 15:04:05Z",
+	'o': "2006-01-02T15:04:05.0000000",
+	'O': "2006-01-02T15:04:05.0000000",
+	'r': "Mon, 02 Jan 2006 15:04:05 GMT",
+	'R': "Mon, 02 Jan 2006 15:04:05 GMT",
+}
+
+// dateTimeToString honors a real ToString(format) argument: a standard
+// single-letter specifier via dateTimeStandardFormats, or a custom
+// pattern (e.g. "yyyy-MM-dd HH:mm:ss") via netDateFormatToGoLayout — the
+// same translator ParseExact already uses, just running in the other
+// direction (Format instead of Parse). Falls back to the original fixed
+// culture-invariant default when no format argument is given at all.
 func dateTimeToString(args []runtime.Value) (runtime.Value, error) {
 	t, _, err := asDateTime(args)
 	if err != nil {
 		return runtime.Value{}, err
 	}
-	// A fixed, culture-invariant format — real DateTime.ToString() is
-	// culture/format-string driven, which vmnet doesn't model (no culture
-	// support anywhere else either — CultureInfo is a stub, Fase 3.6).
+	if format := numericToStringFormat(args); format != "" {
+		if len(format) == 1 {
+			if layout, ok := dateTimeStandardFormats[format[0]]; ok {
+				return runtime.String(t.Format(layout)), nil
+			}
+		}
+		return runtime.String(t.Format(netDateFormatToGoLayout(format))), nil
+	}
+	// A fixed, culture-invariant format when no format argument is given
+	// at all — real DateTime.ToString() defaults to CurrentCulture's own
+	// general format, which vmnet doesn't model (no culture support
+	// anywhere else either — CultureInfo is a stub, Fase 3.6).
 	return runtime.String(t.Format("01/02/2006 15:04:05")), nil
 }
 

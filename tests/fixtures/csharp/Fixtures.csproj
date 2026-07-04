@@ -3,6 +3,7 @@
   <PropertyGroup>
     <TargetFramework>netstandard2.0</TargetFramework>
     <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Nullable>disable</Nullable>
     <RootNamespace>Vmnet.Fixtures</RootNamespace>
     <AssemblyName>Vmnet.Fixtures</AssemblyName>

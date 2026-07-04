@@ -103,4 +103,16 @@ type Resolvers struct {
 	// real .NET assembly can embed arbitrary files, e.g. ClosedXML's own
 	// bundled .ttf font data, in its own PE image).
 	ResolveManifestResource func(name string) ([]byte, bool)
+	// ResolveProperties reads a plugin type's own declared properties
+	// (Fase 3.51: System.Reflection — Type.GetProperties/GetProperty) in
+	// declaration order — parallel slices (names[i]/canRead[i]/
+	// canWrite[i] all describe the same i'th property), matching
+	// ResolveEnum's own parallel-slice convention above rather than a
+	// descriptor struct. canRead[i]/canWrite[i] come from the real
+	// get_Xxx/set_Xxx MethodDef linkage (a property can be get-only,
+	// set-only, or both), not just guessed from the property's name.
+	// ok=false for a type with no TypeDef at all (a BCL-only type vmnet
+	// has no metadata for), matching every other resolver's own "no
+	// data available" contract here.
+	ResolveProperties func(typeFullName string) (names []string, canRead []bool, canWrite []bool, ok bool)
 }

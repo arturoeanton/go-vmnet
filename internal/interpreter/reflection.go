@@ -2,6 +2,8 @@ package interpreter
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/arturoeanton/go-vmnet/internal/bcl"
 	"github.com/arturoeanton/go-vmnet/internal/runtime"
@@ -21,6 +23,14 @@ func init() {
 	machineRegistry["System.Enum::GetNames"] = enumGetNames
 	machineRegistry["System.Enum::IsDefined"] = enumIsDefined
 	machineRegistry["System.Enum::ToObject"] = enumToObject
+	// Enum.Parse(Type, string[, bool ignoreCase]) is a plain, non-generic
+	// static method (the Type argument carries the target enum, so no
+	// method-generic-argument machinery is needed at all) — unlike
+	// Enum.TryParse<TEnum>, which is itself a generic method and needs
+	// genericMachineRegistry instead (see enumTryParseGeneric's own doc
+	// comment).
+	machineRegistry["System.Enum::Parse"] = enumParse
+	genericMachineRegistry["System.Enum::TryParse"] = enumTryParseGeneric
 	// Real reflection (Fase 3.39) — Type.GetConstructor/GetMethod/GetField
 	// plus ConstructorInfo/MethodInfo/FieldInfo's own Invoke/GetValue.
 	// Found via a real, common pattern: a reflection-based type registry
@@ -39,6 +49,18 @@ func init() {
 	machineRegistry["System.Reflection.ConstructorInfo::op_Equality"] = memberInfoOpEquality
 	machineRegistry["System.Reflection.MethodInfo::op_Inequality"] = memberInfoOpInequality
 	machineRegistry["System.Reflection.MethodInfo::op_Equality"] = memberInfoOpEquality
+	// Type.GetProperties/GetProperty plus PropertyInfo.GetValue/SetValue
+	// (Fase 3.51) — same real-reflection posture as GetConstructor/
+	// GetMethod/GetField above: every PropertyInfo here names a real
+	// get_Xxx/set_Xxx MethodDef pair (assembly.go's resolveProperties),
+	// invoked through the exact same Machine.call a normal property
+	// access already goes through.
+	machineRegistry["System.Type::GetProperties"] = typeGetProperties
+	machineRegistry["System.Type::GetProperty"] = typeGetProperty
+	machineRegistry["System.Reflection.PropertyInfo::GetValue"] = propertyInfoGetValue
+	machineRegistry["System.Reflection.PropertyInfo::SetValue"] = propertyInfoSetValue
+	machineRegistry["System.Reflection.PropertyInfo::op_Inequality"] = memberInfoOpInequality
+	machineRegistry["System.Reflection.PropertyInfo::op_Equality"] = memberInfoOpEquality
 	// Assembly.GetManifestResourceStream (Fase 3.40) — needs Machine
 	// access to reach whichever assembly's ResolveManifestResource is
 	// currently active (Machine.invoke swaps it per Fase 3.27's pattern),
@@ -172,6 +194,100 @@ func enumToObject(m *Machine, args []runtime.Value, depth int, instrCount *int64
 	default:
 		return runtime.Value{}, fmt.Errorf("interpreter: Enum.ToObject: unsupported value kind %v", args[1].Kind)
 	}
+}
+
+// enumParse backs the non-generic Enum.Parse(Type enumType, string value
+// [, bool ignoreCase]) — a real, common pattern (config/deserialization
+// code turning a stored string back into an enum member) distinct from
+// the generic Enum.TryParse<TEnum> below only in how the target enum
+// type reaches this native (a real System.Type argument here, a method
+// generic argument there) — both ultimately just search the same
+// name/value pairs enumTypeMembers already extracts for GetValues/
+// GetNames. Also accepts the underlying integer as a string (e.g. "2"),
+// matching real Enum.Parse's own documented behavior of treating a
+// purely-numeric string as the raw underlying value regardless of
+// whether it's a defined member.
+func enumParse(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) < 2 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enum.Parse expects (Type, string[, bool])")
+	}
+	if args[1].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enum.Parse expects a string value")
+	}
+	names, values, err := enumTypeMembers(m, args[0])
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	text := args[1].Str
+	ignoreCase := len(args) >= 3 && args[2].Truthy()
+	if v, ok := matchEnumMember(names, values, text, ignoreCase); ok {
+		return runtime.Int32(int32(v)), nil
+	}
+	if n, convErr := strconv.ParseInt(strings.TrimSpace(text), 10, 64); convErr == nil {
+		return runtime.Int32(int32(n)), nil
+	}
+	return runtime.Value{}, &runtime.ManagedException{TypeName: "System.ArgumentException", Message: fmt.Sprintf("Requested value '%s' was not found.", text)}
+}
+
+// matchEnumMember finds text among names (case-sensitively, or via
+// strings.EqualFold when ignoreCase), returning its underlying value —
+// shared by enumParse and enumTryParseGeneric so both agree on exactly
+// the same matching rule.
+func matchEnumMember(names []string, values []int64, text string, ignoreCase bool) (int64, bool) {
+	for i, n := range names {
+		if n == text || (ignoreCase && strings.EqualFold(n, text)) {
+			return values[i], true
+		}
+	}
+	return 0, false
+}
+
+// enumTryParseGeneric backs Enum.TryParse<TEnum>(string value[, bool
+// ignoreCase], out TEnum result) — unlike Enum.Parse(Type, string)
+// above, TryParse<TEnum> is itself a generic METHOD (TEnum is a method
+// type parameter, not a regular argument), the same
+// ir.Call.MethodGenericArgs shape Activator.CreateInstance<T> uses (see
+// its own doc comment) — hence genericMachineRegistry rather than
+// machineRegistry. false + result=default(TEnum) (zero) for an
+// unresolvable name, matching real TryParse's own "never throws" no-match
+// contract (unlike Parse, which throws ArgumentException).
+func enumTryParseGeneric(m *Machine, args []runtime.Value, methodGenericArgs []string, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(methodGenericArgs) < 1 || methodGenericArgs[0] == "" {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enum.TryParse<TEnum>: TEnum could not be resolved (generic method chaining through its own open type parameter)")
+	}
+	if m.ResolveEnum == nil {
+		return runtime.Value{}, fmt.Errorf("interpreter: no enum member data available for %s", methodGenericArgs[0])
+	}
+	names, values, ok := m.ResolveEnum(bcl.GenericOpenName(methodGenericArgs[0]))
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("interpreter: %s is not a resolvable plugin enum (vmnet has no BCL enum member database)", methodGenericArgs[0])
+	}
+	if len(args) < 2 || args[0].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enum.TryParse expects a string value")
+	}
+	text := args[0].Str
+	var outRef *runtime.Value
+	for i := len(args) - 1; i >= 0; i-- {
+		if args[i].Kind == runtime.KindRef && args[i].Ref != nil {
+			outRef = args[i].Ref
+			break
+		}
+	}
+	if outRef == nil {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enum.TryParse expects an out parameter")
+	}
+	ignoreCase := false
+	for _, a := range args[1 : len(args)-1] {
+		if a.Kind == runtime.KindI4 {
+			ignoreCase = a.Truthy()
+		}
+	}
+	if v, ok := matchEnumMember(names, values, text, ignoreCase); ok {
+		*outRef = runtime.Int32(int32(v))
+		return runtime.Bool(true), nil
+	}
+	*outRef = runtime.Int32(0)
+	return runtime.Bool(false), nil
 }
 
 // bclPrimitiveValueTypes/bclKnownInterfaces are hand-maintained, mirroring
@@ -453,11 +569,20 @@ func typeGetConstructor(m *Machine, args []runtime.Value, depth int, instrCount 
 	return bcl.NewConstructorInfoValue(typeFullName), nil
 }
 
-// typeGetMethod backs Type.GetMethod(string name, Type[] parameterTypes)
-// — same real-reflection posture as typeGetConstructor.
+// typeGetMethod backs both Type.GetMethod(string name, Type[]
+// parameterTypes) and the simpler Type.GetMethod(string name) overload
+// (2 args here, no Type[] at all — found via a real, common pattern: a
+// generic method like `T Identity<T>(T)`, whose MakeGenericMethod call
+// site has no way to spell out a still-open T in a Type[] up front, so
+// real code always looks it up by bare name first, exactly as this
+// overload's own real signature suggests). paramNames stays nil for this
+// shape — a real Go nil, not just an empty slice — which resolveMember
+// (assembly.go) treats as "match by name only, any signature" rather
+// than "match a zero-parameter method": see its own doc comment for why
+// that distinction matters here specifically.
 func typeGetMethod(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
-	if len(args) != 3 {
-		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetMethod expects (this, name, Type[])")
+	if len(args) != 2 && len(args) != 3 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetMethod expects (this, name[, Type[]])")
 	}
 	typeFullName, ok := bcl.TypeFullNameOf(args[0])
 	if !ok {
@@ -467,9 +592,13 @@ func typeGetMethod(m *Machine, args []runtime.Value, depth int, instrCount *int6
 		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetMethod expects a string name")
 	}
 	methodName := args[1].Str
-	paramNames, err := bcl.TypeArrayToFullNames(args[2])
-	if err != nil {
-		return runtime.Value{}, err
+	var paramNames []string
+	if len(args) == 3 {
+		var err error
+		paramNames, err = bcl.TypeArrayToFullNames(args[2])
+		if err != nil {
+			return runtime.Value{}, err
+		}
 	}
 	if m.ResolveMember == nil {
 		return runtime.Null(), nil
@@ -550,7 +679,14 @@ func methodInfoInvoke(m *Machine, args []runtime.Value, depth int, instrCount *i
 	if args[1].Kind != runtime.KindNull {
 		callArgs = append([]runtime.Value{args[1]}, methodArgs...)
 	}
-	v, _, err := m.call(fullName, callArgs, true, depth, instrCount, nil, nil)
+	// genericArgs is non-nil only when this MethodInfo came from
+	// MakeGenericMethod (bcl.methodInfoMakeGenericMethod) — passed
+	// through as Machine.call's own methodGenericArgs, the same argument
+	// an ordinary compiled `callvirt SomeMethod<T>()` site's own
+	// ir.Call.MethodGenericArgs already carries, so a generic method
+	// invoked via reflection resolves identically to one called directly.
+	genericArgs := bcl.MethodInfoGenericArgs(args[0])
+	v, _, err := m.call(fullName, callArgs, true, depth, instrCount, nil, genericArgs)
 	return v, err
 }
 
@@ -586,6 +722,95 @@ func fieldInfoGetValue(m *Machine, args []runtime.Value, depth int, instrCount *
 		return runtime.Value{}, fmt.Errorf("interpreter: FieldInfo.GetValue: %s has no field %q", typeFullName, fieldName)
 	}
 	return obj.Obj.Fields[idx], nil
+}
+
+// typeGetProperties backs Type.GetProperties() — every declared property
+// on typeFullName's own TypeDef (Machine.ResolveProperties, backed by the
+// real Property/PropertyMap/MethodSemantics tables, not a name guess).
+// Empty (not an error) for a BCL type vmnet has no TypeDef for at all,
+// matching GetInterfaces' own "no metadata, no results" convention.
+func typeGetProperties(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetProperties expects a receiver")
+	}
+	typeFullName, ok := bcl.TypeFullNameOf(args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetProperties receiver is not a Type")
+	}
+	if m.ResolveProperties == nil {
+		return runtime.ArrRef(runtime.NewArray(0)), nil
+	}
+	names, canRead, canWrite, _ := m.ResolveProperties(typeFullName)
+	elems := make([]runtime.Value, len(names))
+	for i, name := range names {
+		elems[i] = bcl.NewPropertyInfoValue(typeFullName, name, canRead[i], canWrite[i])
+	}
+	return runtime.ArrRef(&runtime.Array{Elems: elems}), nil
+}
+
+// typeGetProperty backs Type.GetProperty(string name) — null (not an
+// error) for an unresolvable type OR a real property name it doesn't
+// declare, matching real Type.GetProperty's own "no match" contract.
+func typeGetProperty(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetProperty expects (this, name)")
+	}
+	typeFullName, ok := bcl.TypeFullNameOf(args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetProperty receiver is not a Type")
+	}
+	if args[1].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetProperty expects a string name")
+	}
+	if m.ResolveProperties == nil {
+		return runtime.Null(), nil
+	}
+	names, canRead, canWrite, _ := m.ResolveProperties(typeFullName)
+	for i, name := range names {
+		if name == args[1].Str {
+			return bcl.NewPropertyInfoValue(typeFullName, name, canRead[i], canWrite[i]), nil
+		}
+	}
+	return runtime.Null(), nil
+}
+
+// propertyInfoGetValue backs PropertyInfo.GetValue(object obj) — obj is
+// the instance to read from (never null here: unlike FieldInfo, no
+// static-property fast path is needed yet — every real caller found so
+// far reads an instance property). CanRead false (a set-only property,
+// vanishingly rare but real) is a genuine ArgumentException in real
+// .NET, not a silent null.
+func propertyInfoGetValue(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("interpreter: PropertyInfo.GetValue expects (this, obj)")
+	}
+	typeFullName, propertyName, canRead, _, ok := bcl.PropertyInfoParts(args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("interpreter: PropertyInfo.GetValue receiver is not a PropertyInfo")
+	}
+	if !canRead {
+		return runtime.Value{}, &runtime.ManagedException{TypeName: "System.ArgumentException", Message: "Property get method was not found."}
+	}
+	v, _, err := m.call(typeFullName+"::get_"+propertyName, []runtime.Value{args[1]}, true, depth, instrCount, nil, nil)
+	return v, err
+}
+
+// propertyInfoSetValue backs PropertyInfo.SetValue(object obj, object
+// value) — same CanWrite-checked shape as propertyInfoGetValue's own
+// CanRead check.
+func propertyInfoSetValue(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 3 {
+		return runtime.Value{}, fmt.Errorf("interpreter: PropertyInfo.SetValue expects (this, obj, value)")
+	}
+	typeFullName, propertyName, _, canWrite, ok := bcl.PropertyInfoParts(args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("interpreter: PropertyInfo.SetValue receiver is not a PropertyInfo")
+	}
+	if !canWrite {
+		return runtime.Value{}, &runtime.ManagedException{TypeName: "System.ArgumentException", Message: "Property set method was not found."}
+	}
+	_, _, err := m.call(typeFullName+"::set_"+propertyName, []runtime.Value{args[1], args[2]}, true, depth, instrCount, nil, nil)
+	return runtime.Value{}, err
 }
 
 // memberInfoOpEquality/memberInfoOpInequality back ConstructorInfo/

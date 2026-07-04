@@ -138,6 +138,8 @@ func NativeTypeName(native any) (string, bool) {
 		return "System.Reflection.MethodInfo", true
 	case *nativeFieldInfo:
 		return "System.Reflection.FieldInfo", true
+	case *nativePropertyInfo:
+		return "System.Reflection.PropertyInfo", true
 	case *nativeSortedList:
 		if n.typeName != "" {
 			return n.typeName, true
@@ -215,6 +217,22 @@ func NativeTypeName(native any) (string, bool) {
 		// reached through `group.Key`/`foreach (var x in group)`, both
 		// interface-declared call sites needing the same redirection.
 		return "VmnetInternal.Grouping", true
+	case *runtime.ManagedException:
+		// A bare exception object (no TypeDef — either a plain BCL
+		// exception type like ArgumentException, or ex.Object unset
+		// entirely, see ManagedException.Object's own doc comment) still
+		// needs a concrete type name for receiverTypeName's virtual-
+		// dispatch ancestor walk (internal/interpreter/calls.go) to find
+		// at all: without this, `e.GetType()`/`.ToString()`/`.Equals()`
+		// called on any such exception skipped that walk outright (ok
+		// was false), never reaching its own System.Object fallback —
+		// found via a real, common pattern (`catch (Exception e) {
+		// ...e.GetType()... }`, and just as much for a plugin exception
+		// subclass caught as its base System.Exception, which has no
+		// TypeDef of its own to carry BaseTypeFullName from). Already
+		// precedented at the one other call site that needed this exact
+		// answer (assembly.go's own qualifiedTypeNameOf, Fase 3.40).
+		return n.TypeName, true
 	default:
 		return "", false
 	}

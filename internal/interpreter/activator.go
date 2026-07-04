@@ -3,26 +3,33 @@ package interpreter
 import (
 	"fmt"
 
+	"github.com/arturoeanton/go-vmnet/internal/bcl"
 	"github.com/arturoeanton/go-vmnet/internal/runtime"
 )
 
-// System.Activator.CreateInstance<T>() is the real, compiler-emitted
-// shape of a `where T : new()` generic constraint's `new T()` — found
-// pervasively in DocumentFormat.OpenXml.Framework's real IL (`call !!0
-// System.Activator::CreateInstance<!!T>()`, e.g. building a fresh
-// element/part instance generically). T is a generic METHOD parameter
-// at these call sites, exactly the shape ir.Call.MethodGenericArgs
-// exists for (see features.go's identical reasoning for
-// FeatureCollectionBase::Get<TFeature>) — Activator itself has no real
-// interpreted body to run at all (it's a CoreLib intrinsic), so this
-// constructs T directly via the same newObj machinery a real `newobj
-// T::.ctor()` would use.
+// System.Activator.CreateInstance covers two entirely different real call
+// shapes under one CIL method name: the GENERIC CreateInstance<T>() (the
+// compiler-emitted form of a `where T : new()` constraint's `new T()`,
+// found pervasively in DocumentFormat.OpenXml.Framework's real IL — `call
+// !!0 System.Activator::CreateInstance<!!T>()`) and the ordinary
+// non-generic CreateInstance(Type[, object[] args]) reflection overload
+// (Fase 3.51, e.g. a plugin discovery registry that only has a
+// System.Type value in hand, not a static T to constrain against) —
+// genericMachineRegistry only tells them apart by whether
+// methodGenericArgs is non-empty, since both compile to the exact same
+// "System.Activator::CreateInstance" full name. Activator itself has no
+// real interpreted body to run at all (it's a CoreLib intrinsic), so
+// either shape constructs the target directly via the same newObj/
+// Machine.New machinery a real `newobj T::.ctor(...)` would use.
 func init() {
 	genericMachineRegistry["System.Activator::CreateInstance"] = activatorCreateInstance
 }
 
 func activatorCreateInstance(m *Machine, args []runtime.Value, methodGenericArgs []string, depth int, instrCount *int64) (runtime.Value, error) {
-	if len(methodGenericArgs) < 1 || methodGenericArgs[0] == "" {
+	if len(methodGenericArgs) == 0 {
+		return activatorCreateInstanceFromType(m, args, depth, instrCount)
+	}
+	if methodGenericArgs[0] == "" {
 		// The enclosing generic method's own still-open type parameter
 		// (an MVAR referencing the CALLER's own T, e.g. a generic method
 		// calling Activator.CreateInstance<T>() with its own unresolved
@@ -39,4 +46,33 @@ func activatorCreateInstance(m *Machine, args []runtime.Value, methodGenericArgs
 		CtorFullName: methodGenericArgs[0] + "::.ctor",
 		Args:         nil,
 	}, depth, instrCount)
+}
+
+// activatorCreateInstanceFromType backs the non-generic
+// Activator.CreateInstance(Type type[, object[] args]) reflection
+// overload (methodGenericArgs is empty for this shape — it's an ordinary,
+// non-generic static call). Constructs through Machine.New, the exact
+// same overload-resolution-by-real-argument-Kind path ConstructorInfo.
+// Invoke already uses, so this and `new T(...)` agree on which
+// constructor overload actually runs. A trailing non-array argument (the
+// (Type, bool nonPublic) or (Type, BindingFlags, ...) overloads) is
+// accepted and ignored — every real caller found using those still just
+// wants the default constructor, which an empty ctorArgs already gives.
+func activatorCreateInstanceFromType(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Activator.CreateInstance expects a Type argument")
+	}
+	typeFullName, ok := bcl.TypeFullNameOf(args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("interpreter: Activator.CreateInstance: argument is not a Type")
+	}
+	var ctorArgs []runtime.Value
+	if len(args) >= 2 && args[1].Kind == runtime.KindArray {
+		var err error
+		ctorArgs, err = bcl.ObjectArrayToValues(args[1])
+		if err != nil {
+			return runtime.Value{}, err
+		}
+	}
+	return m.New(typeFullName, ctorArgs)
 }
