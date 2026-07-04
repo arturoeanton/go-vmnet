@@ -38,12 +38,18 @@ Go, no compilation step beyond `go run`) and
 tiny compiled C# wrapper, for APIs that lean on C#-only sugar).
 
 ```txt
-Status: Fase 3 complete (Fase 3.39) — checker + NuGet + real virtual
-dispatch + multi-assembly resolution + an instance-object API
-(Assembly.New / Instance.Call) + real System.Reflection
-(ConstructorInfo/MethodInfo/FieldInfo Invoke) + a real legacy-.xls demo
-via NPOI. Fase 4 (production readiness: benchmarks, full sandbox, docs
-polish) is next. See docs/en/ROADMAP.md.
+Status: Fase 3.53 — checker + NuGet + real virtual dispatch +
+multi-assembly resolution + an instance-object API (Assembly.New /
+Instance.Call) + real System.Reflection + a broad LINQ/collections
+hardening pass + real demos for NPOI, System.Text.Json, Newtonsoft.Json,
+DocumentFormat.OpenXml, ClosedXML, Dapper, and (new) a real, Go-native
+Microsoft.Data.Sqlite provider — vmnet's first external Go dependency,
+verified end to end against the real sqlite3 CLI. 19 real packages
+tracked; see docs/en/COMPATIBILITY.md for the per-package breakdown
+(checker %, real demo, and confidence, kept deliberately separate).
+Fase 4 (production readiness: a real Permissions/sandbox model,
+benchmarks, docs polish) is next — see docs/en/security.md for today's
+honest threat model. Full history: docs/en/ROADMAP.md.
 ```
 
 *[Léelo en español →](README.es.md)*
@@ -65,14 +71,14 @@ built for:
 
 Before you load a third-party assembly, `vmnet check` tells you exactly
 which methods will run and which won't — with a concrete reason for each
-gap — instead of failing midway through execution. Checked against 9 real,
-popular NuGet packages plus Jint today: the original 7 (Ardalis.
-GuardClauses, FluentValidation, System.Text.Json, Newtonsoft.Json, Semver,
-SimpleBase, Humanizer.Core) plus Jint average ~89% clean under vmnet's
-`netstandard-lite` profile, and the two most recently added — NPOI (the
-legacy-`.xls` demo below) and ClosedXML — sit at 97.3% and 93.9%
-respectively (see [`docs/en/ROADMAP.md`](docs/en/ROADMAP.md) for the
-per-package breakdown and methodology).
+gap — instead of failing midway through execution. Checked against 19
+real, popular NuGet packages today, averaging 93.9% clean under vmnet's
+`netstandard-lite` profile — but the average isn't the number that
+matters: see [`docs/en/COMPATIBILITY.md`](docs/en/COMPATIBILITY.md) for
+the full per-package breakdown, which deliberately keeps the static
+checker percentage, whether a real running demo exists, and an honest
+confidence note separate for every single package, instead of collapsing
+them into one score.
 
 The full technical specification is in [`docs/en/spec.md`](docs/en/spec.md).
 
@@ -121,7 +127,10 @@ The full technical specification is in [`docs/en/spec.md`](docs/en/spec.md).
   cache them locally, and load them with `vm.LoadPackage`.
 - **Sandbox**: instruction/call-depth/stack-depth/array-length limits, and
   a panic anywhere in interpreted code is recovered at the API boundary —
-  a broken or adversarial plugin can't crash the host process.
+  a broken or adversarial plugin can't crash the host process. This is a
+  **stability** boundary today, not yet a full trust boundary — see
+  [`docs/en/security.md`](docs/en/security.md) for the honest threat
+  model before running untrusted C# through vmnet.
 
 See [`docs/en/ROADMAP.md`](docs/en/ROADMAP.md) for the full phase-by-phase
 history — including every real correctness bug found and fixed along the
@@ -193,6 +202,7 @@ Runnable, documented examples in [`examples/`](examples/):
 | [`examples/closedxml-demo`](examples/closedxml-demo) | Reading a real `.xlsx` file through the real ClosedXML package, via a tiny compiled C# wrapper for one font-metrics limitation |
 | [`examples/calculator`](examples/calculator) | An arithmetic/loop workload run through vmnet, native Go, and (optionally) real CoreCLR side by side, for a correctness-and-speed comparison |
 | [`examples/dapper-demo`](examples/dapper-demo) | The real Dapper NuGet package's own `SqlMapper.Query`/`Execute`, run against a minimal fake in-memory ADO.NET provider — no real database, no dotnet SDK needed at runtime |
+| [`examples/sqlite-demo`](examples/sqlite-demo) | The same real Dapper code running against vmnet's own real, Go-native `Microsoft.Data.Sqlite` provider — a genuine embedded SQLite `.db` file, independently re-opened and integrity-checked by the real `sqlite3` CLI afterward |
 
 ## CLI
 

@@ -40,12 +40,19 @@ un wrapper compilado en C# chiquito, para APIs que dependen de azúcar
 sintáctico exclusivo de C#).
 
 ```txt
-Estado: Fase 3 completa (Fase 3.39) — checker + NuGet + despacho virtual
-real + resolución multi-ensamblado + una API de instancias de objetos
-(Assembly.New / Instance.Call) + System.Reflection real
-(ConstructorInfo/MethodInfo/FieldInfo con Invoke) + un demo real de
-`.xls` legacy vía NPOI. Sigue la Fase 4 (listo para producción:
-benchmarks, sandbox completo, docs finales). Ver docs/es/ROADMAP.md.
+Estado: Fase 3.53 — checker + NuGet + despacho virtual real +
+resolución multi-ensamblado + una API de instancias de objetos
+(Assembly.New / Instance.Call) + System.Reflection real + un pase amplio
+de endurecimiento de LINQ/colecciones + demos reales para NPOI,
+System.Text.Json, Newtonsoft.Json, DocumentFormat.OpenXml, ClosedXML,
+Dapper, y (nuevo) un proveedor `Microsoft.Data.Sqlite` real y nativo en
+Go — la primera dependencia externa de Go de vmnet, verificada de punta
+a punta contra el CLI real de sqlite3. 19 paquetes reales rastreados;
+ver docs/es/COMPATIBILITY.md para el desglose por paquete (% de checker,
+demo real, y confianza, mantenidos deliberadamente separados). Sigue la
+Fase 4 (listo para producción: un modelo real de Permissions/sandbox,
+benchmarks, docs finales) — ver docs/es/security.md para el modelo de
+amenazas honesto de hoy. Historia completa: docs/es/ROADMAP.md.
 ```
 
 *[Read it in English →](README.md)*
@@ -69,15 +76,14 @@ para:
 
 Antes de cargar un assembly de terceros, `vmnet check` dice exactamente
 qué métodos van a correr y cuáles no —con una razón concreta para cada
-falta— en vez de fallar a mitad de la ejecución. Chequeado hoy contra 9
-paquetes NuGet reales y populares más Jint: los 7 originales
-(Ardalis.GuardClauses, FluentValidation, System.Text.Json,
-Newtonsoft.Json, Semver, SimpleBase, Humanizer.Core) más Jint promedian
-~89% limpio bajo el perfil `netstandard-lite` de vmnet, y los dos
-agregados más recientemente — NPOI (el demo de `.xls` legacy de abajo) y
-ClosedXML — están en 97.3% y 93.9% respectivamente (ver
-[`docs/es/ROADMAP.md`](docs/es/ROADMAP.md) para el desglose por paquete y
-la metodología).
+falta— en vez de fallar a mitad de la ejecución. Chequeado hoy contra 19
+paquetes NuGet reales y populares, con un promedio de 93.9% limpio bajo
+el perfil `netstandard-lite` de vmnet — pero el promedio no es el número
+que importa: ver [`docs/es/COMPATIBILITY.md`](docs/es/COMPATIBILITY.md)
+para el desglose completo por paquete, que deliberadamente mantiene
+separados el porcentaje del checker estático, si existe un demo real
+corriendo, y una nota de confianza honesta para cada paquete, en vez de
+colapsarlos en un solo puntaje.
 
 La especificación técnica completa está en [`docs/es/spec.md`](docs/es/spec.md).
 
@@ -131,7 +137,10 @@ La especificación técnica completa está en [`docs/es/spec.md`](docs/es/spec.m
 - **Sandbox**: límites de instrucciones/profundidad de llamadas/
   profundidad de stack/longitud de arrays, y cualquier panic dentro del
   código interpretado se recupera en el borde de la API — un plugin roto
-  o adversarial no puede tirar abajo el proceso host.
+  o adversarial no puede tirar abajo el proceso host. Hoy esto es un
+  límite de **estabilidad**, todavía no un límite de confianza completo
+  — ver [`docs/es/security.md`](docs/es/security.md) para el modelo de
+  amenazas honesto antes de correr C# no confiable a través de vmnet.
 
 Ver [`docs/es/ROADMAP.md`](docs/es/ROADMAP.md) para el historial completo fase
 por fase — incluido cada bug de correctitud real encontrado y arreglado en
@@ -205,6 +214,7 @@ Ejemplos corribles y documentados en [`examples/`](examples/):
 | [`examples/closedxml-demo`](examples/closedxml-demo) | Leer un archivo `.xlsx` real vía el paquete ClosedXML real, con un pequeño wrapper de C# compilado para una limitación de métricas de fuentes |
 | [`examples/calculator`](examples/calculator) | Una carga de aritmética/loop corrida a través de vmnet, Go nativo y (opcionalmente) CoreCLR real, lado a lado, para una comparación de corrección y velocidad |
 | [`examples/dapper-demo`](examples/dapper-demo) | El propio `SqlMapper.Query`/`Execute` del paquete NuGet Dapper real, corrido contra un proveedor ADO.NET fake mínimo en memoria — sin base de datos real, sin necesitar el SDK de .NET en tiempo de ejecución |
+| [`examples/sqlite-demo`](examples/sqlite-demo) | El mismo código real de Dapper corriendo contra el propio proveedor `Microsoft.Data.Sqlite` real y nativo en Go de vmnet — un archivo `.db` de SQLite embebido genuino, reabierto de forma independiente y verificado con `PRAGMA integrity_check` por el CLI real de `sqlite3` después |
 
 ## CLI
 

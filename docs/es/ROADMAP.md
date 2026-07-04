@@ -4593,6 +4593,95 @@ cd ../dapper-demo && dotnet build DapperDemoWrapper.csproj -c Release && go run 
 ```
 
 ---
+### Fase 3.53 — un proveedor ADO.NET real, nativo en Go: `Microsoft.Data.Sqlite` sobre `go-r2-sqlite`
+
+**Objetivo:** la Fase 3.52 probó que el propio código de mapeo `SqlMapper` de Dapper corre
+correctamente contra cualquier forma real de `IDbConnection` — pero solo contra el propio
+proveedor fake en memoria de `examples/dapper-demo`, nunca contra un motor de base de datos real.
+Esta fase agrega uno: una implementación concreta de `Microsoft.Data.Sqlite`, respaldada por Go
+(`internal/bcl/system_data_sqlite.go`), sobre
+[`github.com/arturoeanton/go-r2-sqlite`](https://github.com/arturoeanton/go-r2-sqlite) — un motor
+SQLite puro en Go, sin CGO, que expone la interfaz estándar `database/sql/driver` como
+`"r2sqlite"`. Esta es la primera dependencia externa de Go que vmnet tuvo jamás (`go.mod` no tenía
+ninguna antes — una excepción deliberada y autorizada por el dueño del proyecto, por única vez,
+no un precedente).
+
+- [x] `go get github.com/arturoeanton/go-r2-sqlite` — la única línea `require` en `go.mod`
+      (subió `go 1.23` → `go 1.24`, el mínimo propio de la dependencia). `sql.Open("r2sqlite",
+      path)` es toda la superficie de integración; cada otra línea de `system_data_sqlite.go` es
+      uso simple de `database/sql`.
+- [x] Seis tipos BCL reales, concretos y nativos en Go, registrados bajo nombres reales de tipo de
+      Microsoft.Data.Sqlite (`SqliteConnection`/`SqliteCommand`/`SqliteDataReader`/
+      `SqliteParameter`/`SqliteParameterCollection`/`SqliteTransaction`) — código C# real haciendo
+      `using Microsoft.Data.Sqlite;` + `new SqliteConnection(...)` necesita cero cambios de código
+      fuente para correr contra esto. Colocados en `internal/bcl` (`Native`/`NativeCtor` simple,
+      sin acceso a Machine) en vez del `machineRegistry` de `internal/interpreter` (el propio
+      patrón de `adonet.go`): a diferencia del propio `dbDataReaderDispose` de `adonet.go` (que
+      genuinamente necesita `Machine.tryCall` para re-despachar a la propia sobreescritura de
+      `Dispose(bool)` de una subclase de PLUGIN), nada acá llama de vuelta a código de plugin
+      interpretado — cada operación es una llamada hoja al propio `database/sql` de Go, la misma
+      postura que las propias llamadas reales a `archive/zip` de `ZipArchive` o a `bytes.Buffer`
+      de `MemoryStream`.
+- [x] Binding real de parámetros con nombre (`@name`) y posicionales (`?`) vía el propio
+      `sql.Named` de Go — se encontró un desajuste de frontera real llegando ahí: el propio
+      `database/sql` de Go (`validateNamedValueName` de `convert.go`) exige un nombre desnudo sin
+      símbolo ("empieza con una letra"), mientras que un `SqliteParameter.ParameterName` real
+      normalmente incluye uno (`"@id"`). `bindParams` lo quita antes de llamar a `sql.Named`; la
+      propia búsqueda de parámetros con nombre de go-r2-sqlite (`engine/expr.go`) ya prueba el
+      propio placeholder del texto SQL tanto con como sin su símbolo, así que esto tiende un
+      puente entre ambas convenciones sin que vmnet necesite adivinar cuál usó el texto SQL de un
+      comando dado.
+- [x] Una `SqliteTransaction` real (`BeginTransaction`/`Commit`/`Rollback`), respaldada por un
+      `sql.Tx` de Go genuino — `SqliteCommand.target()` elige el `*sql.Tx` vinculado sobre el
+      `*sql.DB` pooled de la conexión solo cuando uno se setea explícitamente vía
+      `cmd.Transaction = tx`, igualando el ADO.NET real (un comando nunca se une automáticamente a
+      una transacción solo porque su conexión tenga una abierta).
+- [x] `System.DBNull` (`internal/bcl/system_dbnull.go`) — completamente nuevo, sin representación
+      previa en ningún lugar de este código. Un `NULL` SQL real leído de vuelta a través de
+      `GetValue`/`ExecuteScalar` necesita ser `DBNull.Value` (un singleton real, verificable con
+      `is`, comparable por referencia), nunca el propio `KindNull` de vmnet (un `null` de C# plano)
+      — código real (incluyendo el propio `SqlMapper` de Dapper) comúnmente ramifica sobre
+      `is DBNull` antes de caer a un `null` real.
+- [x] `GetFieldType(i)`/`GetDataTypeName(i)` deben responder desde METADATOS de columna,
+      disponibles apenas se abre el reader — independiente de la posición del cursor — a
+      diferencia de `GetValue`/`GetInt32`/..., que necesitan una fila real. Encontrado vía un caso
+      real y determinante: el propio `SqlMapper.GetDapperRowDeserializer` de Dapper (el camino de
+      fila `typeof(object)` que usan los propios demos de este proyecto) llama a `GetFieldType(i)`
+      antes de que el estado de fila actual del reader esté necesariamente poblado; el error
+      estricto inicial de "sin fila actual" rompía cada consulta real de Dapper en el instante en
+      que corría contra este proveedor.
+- [x] `examples/sqlite-demo` — un demo nuevo y autocontenido (se dejó `examples/dapper-demo`
+      completamente intacto): binding real de parámetros con nombre/posicionales y una transacción
+      real confirmada vía ADO.NET simple, después la MISMA conexión real entregada al propio
+      `SqlMapper.Query`/`Execute` real de Dapper, y después el archivo `.db` resultante abierto de
+      forma independiente por el propio CLI `sqlite3` real (`PRAGMA integrity_check` pasando) como
+      la prueba real de round-trip — el mismo patrón de verificación "herramienta externa real, sin
+      modificar" que usa `examples/openxml-demo` para su propia salida `.docx`.
+      `SqliteDemoWrapper.csproj` referencia el paquete NuGet real `Microsoft.Data.Sqlite` SOLO para
+      chequeo de tipos en tiempo de compilación — su DLL nunca se carga en vmnet en tiempo de
+      ejecución, solo `Dapper.dll` se adjunta como dependencia.
+
+**Encontrado, no arreglado** (misma causa raíz que la Fase 3.52, confirmada acá como
+independiente del proveedor, no específica de la conexión fake): cualquier llamada de Dapper que
+pase un objeto de parámetros real todavía escanea incondicionalmente el texto SQL vía el regex de
+token literal `{=name}` que el motor RE2 de Go nunca puede compilar, sin importar qué
+`IDbConnection` real haya por debajo. `examples/sqlite-demo` solo pasa SQL literal, el mismo
+workaround ya documentado. `System.Decimal` todavía no tiene representación distinta en ningún
+lugar de este código (el propio `formatValue` de `system_misc.go` ya lo pliega en
+`Double`/`Single`) — una columna vinculada o leída como `DbType.Decimal` se maneja como un
+`double` ordinario.
+
+### Cómo verificar Fase 3.53
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+cd examples/sqlite-demo && dotnet build SqliteDemoWrapper.csproj -c Release && go run .
+```
+
+---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
 
@@ -4607,7 +4696,16 @@ con benchmarks — el paquete completo para que un equipo de ingeniería apruebe
 - [x] `MaxArrayLength` — adelantado a Fase 3.5 junto con el soporte de `System.Array` (tenía que
       existir desde el día uno de `newarr`, no tenía sentido esperar a Fase 4)
 - [ ] `MaxStringBytes`
-- [ ] `docs/security.md` — threat model, qué se bloquea por default
+- [x] `docs/en/security.md`/`docs/es/security.md` — threat model, qué se bloquea por default
+      (agregado después de la Fase 3.53, adelantado respecto al resto de esta sección — ver esos
+      archivos para el estado actual y honesto: hoy no existe ninguna superficie de
+      `System.IO.File`/`System.Diagnostics.Process`/sockets, así que todavía no hay nada que un
+      modelo `Permissions` deba controlar en ese frente)
+- [ ] **Diferido explícitamente hasta después del release actual**: soporte real de
+      `System.IO.File`/`System.Diagnostics.Process`/sockets. Agregar esto ANTES de que el modelo
+      `Permissions` de arriba esté completo le daría al código interpretado capacidad real de
+      filesystem/proceso/red sin ninguna puerta deny-by-default — el modelo `Permissions` necesita
+      llegar primero o junto con esto, no después.
 
 **Modelo de errores**
 - [ ] Catálogo completo de códigos `VMNET_*` (spec §30.2) implementado consistentemente

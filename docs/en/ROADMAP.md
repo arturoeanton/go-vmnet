@@ -4552,7 +4552,15 @@ benchmarked — the complete package for an engineering team to approve a real p
 - [x] `MaxArrayLength` — pulled forward into Fase 3.5 alongside `System.Array` support (it had to
       exist from day one of `newarr`, no point waiting for Fase 4)
 - [ ] `MaxStringBytes`
-- [ ] `docs/security.md` — threat model, what gets blocked by default
+- [x] `docs/en/security.md`/`docs/es/security.md` — threat model, what gets blocked by default
+      (added post-Fase 3.53, ahead of the rest of this section — see those files for the current,
+      honest state: no `System.IO.File`/`System.Diagnostics.Process`/socket surface exists at all
+      today, so there's nothing for a `Permissions` model to gate yet on that front)
+- [ ] **Explicitly deferred until after the current release**: real `System.IO.File`/
+      `System.Diagnostics.Process`/socket support. Adding these BEFORE the `Permissions` model
+      above is complete would hand interpreted code real filesystem/process/network capability
+      with no deny-by-default gate — the `Permissions` model needs to land first or alongside,
+      not after.
 
 **Error model**
 - [ ] Full catalog of `VMNET_*` codes (spec §30.2) implemented consistently

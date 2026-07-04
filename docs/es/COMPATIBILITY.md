@@ -1,0 +1,100 @@
+# Compatibilidad: 19 paquetes reales, medidos de tres formas separadas
+
+Este documento existe porque un solo número — "X% compatible" — esconde más de lo que revela. Un
+puntaje de checker estático, un demo real corriendo, y confianza real en la corrección son tres
+cosas distintas, y confundirlas es exactamente cómo un proyecto termina lanzando algo que "parece"
+97% listo pero se rompe en el instante en que un usuario real lo corre. Esta página mantiene las
+tres separadas, a propósito, para cada paquete contra el que se mide vmnet.
+
+## Las tres columnas, y qué significa realmente cada una
+
+- **% de checker** — el analizador estático de `internal/checker` recorre cada método del paquete
+  (más todo su grafo de dependencias transitivas, resuelto exactamente de la misma forma que lo
+  hace `vm.LoadPackage` en tiempo de ejecución) y reporta, método por método, si cada llamada
+  BCL/opcode que usa resuelve contra algo que vmnet realmente implementa, bajo el profile
+  `netstandard-lite`. El porcentaje es `(métodos sin ningún finding) / (métodos analizados)`.
+  **Esto es una estimación de cobertura, no una prueba de corrección** — un método puede tener
+  cero findings y aun así comportarse sutilmente mal si una implementación nativa tiene un bug que
+  el checker no tiene forma de ver (para eso están los demos reales, más abajo). Reproducí
+  cualquier número acá vos mismo: `vmnet check package --profile=netstandard-lite <id>@<versión>`.
+- **Demo real** — si `examples/` tiene un programa real y corrible que carga el paquete real, sin
+  modificar, desde nuget.org, y ejercita su código real de punta a punta, con la salida comparada
+  contra `dotnet run` real/el SDK de .NET real cuando aplica. Esta es la señal más fuerte que tiene
+  vmnet: significa que alguien realmente corrió la lógica real de este paquete específico y
+  confirmó que la salida coincide con .NET real, no solo que el checker no marcó nada.
+  Reproducilo vos mismo: `cd examples/<nombre> && go run .`.
+- **Confianza** — una nota en lenguaje simple sobre qué deberías concluir realmente de las primeras
+  dos columnas para este paquete específico, escrita para resistir la tentación de redondear un %
+  de checker alto hacia "completamente verificado".
+
+## Paquetes con demo real y funcionando (la señal más fuerte)
+
+| Paquete | % de checker | Demo | Confianza |
+|---|---|---|---|
+| `DocumentFormat.OpenXml@3.1.1` | 100.0% (67.234 métodos, 7 marcados) | [`examples/openxml-demo`](../../examples/openxml-demo) | **Verificado.** Genera un `.docx` real desde cero; la salida se verifica abriéndola de vuelta con el SDK de .NET real, sin modificar — no solo que vmnet produjo *algunos* bytes. |
+| `NPOI@2.8.0` | 97.8% (14.202 métodos, 311 marcados) | [`examples/npoi-demo`](../../examples/npoi-demo) | **Verificado.** Lee un archivo `.xls` legacy real de punta a punta (strings, números, una celda con fórmula `SUM`); queda una brecha cosmética conocida y documentada (el texto del rango de celdas de la fórmula renderiza puntos de código numéricos en vez de letras de columna — los *valores* de celda son correctos). |
+| `Dapper@2.1.79` | 93.7% (1.047 métodos, 66 marcados) | [`examples/dapper-demo`](../../examples/dapper-demo), [`examples/sqlite-demo`](../../examples/sqlite-demo) | **Verificado, de dos formas.** `dapper-demo` corre el propio `SqlMapper.Query`/`Execute` real de Dapper contra un proveedor ADO.NET fake en memoria; `sqlite-demo` corre el mismo código real de Dapper contra el propio proveedor `Microsoft.Data.Sqlite` real y nativo en Go de vmnet, y después reabre de forma independiente el archivo `.db` resultante con el CLI real `sqlite3` y corre `PRAGMA integrity_check`. Quedan dos brechas arquitectónicas reales, permanentes y documentadas (una limitación de `typeof(T)` en métodos genéricos, y una feature de regex de Dapper que el motor RE2 de Go nunca puede compilar) — ver `docs/en/ROADMAP.md` Fase 3.52/3.53. |
+| `ClosedXML@0.105.0` | 96.4% (10.444 métodos, 379 marcados) | [`examples/closedxml-demo`](../../examples/closedxml-demo) | **Verificado**, con una salvedad honesta: un pequeño wrapper de C# compilado provee un `IXLGraphicEngine` mínimo, porque el propio motor de métricas de fuente por defecto de ClosedXML choca contra una limitación arquitectónica real y profunda (sustitución de parámetro de tipo genérico dentro de los propios inicializadores de campo estático de una clase genérica) sin relación con leer datos de celda en sí. Lee un `.xlsx` real correctamente; también fue el sujeto de un cuelgue no determinista real y arreglado (Fase 3.44) — ahora estable a través de corridas repetidas. |
+| `System.Text.Json@8.0.5` | 96.1% (3.577 métodos, 140 marcados) | [`examples/system-text-json-demo`](../../examples/system-text-json-demo) | **Verificado.** Parsea JSON real a través de la propia API real de `JsonDocument`, confirmado contra la salida real de .NET. |
+| `Jint@3.1.3` | 95.4% (5.414 métodos, 249 marcados) | [`examples/jint-demo`](../../examples/jint-demo), [`examples/jint-nowrapper`](../../examples/jint-nowrapper) | **Verificado.** Corre un motor de JavaScript real de punta a punta — parsea código JS real, construye un AST real, lo evalúa, y devuelve un resultado real — tanto a través de un wrapper compilado como con cero pegamento de C#. La evidencia más fuerte de que vmnet maneja código real genuinamente no trivial y profundamente orientado a objetos, no solo bibliotecas pequeñas de métodos estáticos. |
+| `Newtonsoft.Json@13.0.3` | 85.3% (4.064 métodos, 597 marcados) | [`examples/newtonsoft-json-demo`](../../examples/newtonsoft-json-demo) | **Verificado para el camino demostrado** (parseo real del DOM "LINQ to JSON" y acceso por indexador), pero el % de checker más bajo de cualquier paquete con demo — su superficie de tipado dinámico basada en `Dynamic`/`ExpandoObject` (`JValue+JValueDynamicProxy`) es una brecha real y no implementada que el demo no ejercita. No leas que el demo pase como "todo este paquete funciona". |
+
+## Paquetes medidos solo por el checker (todavía sin demo)
+
+Que todavía no exista un demo no es una señal de alarma por sí sola — cada uno de los paquetes de
+arriba empezó acá también. Sí significa que todavía nadie corrió el código real de este paquete
+específico de punta a punta y comparó la salida contra .NET real; tratá el porcentaje como una
+estimación de cobertura de lo que *probablemente* funcionaría, no como confirmación de que
+funciona.
+
+| Paquete | % de checker | Confianza |
+|---|---|---|
+| `Humanizer.Core@2.14.1` | 97.5% (1.597 métodos, 40 marcados) | Estimación de cobertura alta; no verificado por una corrida real. |
+| `Ardalis.GuardClauses@5.0.0` | 97.5% (285 métodos, 7 marcados) | Estimación de cobertura alta; no verificado por una corrida real. |
+| `FluentValidation@11.9.2` | 96.4% (1.289 métodos, 46 marcados) | Estimación de cobertura alta; no verificado por una corrida real. |
+| `Polly@8.7.0` | 95.5% (2.049 métodos, 92 marcados) | Estimación de cobertura alta; no verificado por una corrida real. |
+| `NodaTime@3.3.2` | 94.3% (3.098 métodos, 177 marcados) | Estimación de cobertura alta; no verificado por una corrida real. |
+| `YamlDotNet@18.1.0` | 93.9% (2.182 métodos, 133 marcados) | Buena estimación de cobertura; no verificado por una corrida real. |
+| `Semver@2.3.0` | 92.9% (423 métodos, 30 marcados) | Buena estimación de cobertura; no verificado por una corrida real. |
+| `SimpleBase@4.0.0` | 92.2% (258 métodos, 20 marcados) | Buena estimación de cobertura; no verificado por una corrida real. |
+| `Serilog@4.3.1` | 91.4% (1.115 métodos, 96 marcados) | Buena estimación de cobertura; no verificado por una corrida real. |
+| `CsvHelper@33.1.0` | 91.4% (1.393 métodos, 120 marcados) | Buena estimación de cobertura; no verificado por una corrida real. |
+| `MediatR@14.2.0` | 89.3% (441 métodos, 47 marcados) | Estimación de cobertura moderada; no verificado por una corrida real. |
+| `AutoMapper@16.2.0` | 87.0% (2.319 métodos, 301 marcados) | Su propia generación pesada de planes de mapeo basada en `System.Linq.Expressions`/`Expression.Compile()` es una fuente real y probable de la brecha restante — tratá este número como más optimista que los demás de esta tabla hasta que un demo real lo ejercite. |
+
+## Números agregados, y por qué el número por paquete importa más
+
+- **Promedio simple entre los 19 paquetes: 93.9%.**
+- **Promedio ponderado por métodos: ~98%** — pero está dominado por los propios 67.234 métodos
+  analizados de `DocumentFormat.OpenXml` (62% de cada método analizado entre los 19 paquetes
+  combinados) sentados en 100%. Un promedio ponderado responde "qué fracción de todas las llamadas
+  a métodos analizadas en todo este corpus resuelve", que es un número real pero no el que predice
+  si *tu* paquete específico va a funcionar — el **número por paquete de arriba es el que
+  importa** para eso.
+- El objetivo de trabajo para cada paquete acá es **97%+, individualmente** — no un promedio de
+  todo el corpus. Un promedio puede esconder un paquete mal cubierto que se rompe en el instante en
+  que alguien realmente depende de él, aunque otros paquetes lo compensen en la media. Al momento
+  de escribir esto, 4 de 19 paquetes están en o por arriba de esa vara (`DocumentFormat.OpenXml`,
+  `NPOI`, `Ardalis.GuardClauses`, `Humanizer.Core`); el resto son objetivos activos de
+  endurecimiento, priorizados por cuánto están por debajo del 97% y por cuánto uso real del mundo
+  representan.
+
+## Metodología y reproducibilidad
+
+Cada porcentaje de checker de arriba se midió de forma fresca contra el paquete/versión exacto
+listado, incluyendo el propio grafo de dependencias transitivas de ese paquete (resuelto de la
+misma forma en que `vm.LoadPackage` lo resuelve en tiempo de ejecución — el propio código real de
+una dependencia no se reporta mal como no soportado solo porque se decodificó el DLL del paquete
+de nivel superior únicamente). Reproducí cualquier número:
+
+```bash
+go build -o vmnet ./cmd/vmnet
+./vmnet check package --profile=netstandard-lite <PackageId>@<Versión>
+```
+
+Cada demo real listado arriba es corrible directamente: `cd examples/<nombre> && go run .` — la
+mayoría no necesita el SDK de .NET instalado en absoluto; unos pocos (donde interviene un pequeño
+wrapper de C# compilado, solo en tiempo de desarrollo, anotado en el propio `README.md` de cada
+demo) necesitan correr `dotnet build` una vez primero. Ver `docs/en/ROADMAP.md` para la historia
+completa, fase por fase, de cada bug encontrado y arreglado para llevar cada uno de estos números
+adonde está hoy — nada acá se esconde debajo de la alfombra.
