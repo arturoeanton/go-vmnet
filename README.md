@@ -38,10 +38,12 @@ Go, no compilation step beyond `go run`) and
 tiny compiled C# wrapper, for APIs that lean on C#-only sugar).
 
 ```txt
-Status: Fase 3.28 complete — checker + NuGet + real virtual dispatch +
-multi-assembly resolution + an instance-object API (Assembly.New /
-Instance.Call). Fase 4 (production readiness: benchmarks, full sandbox,
-docs polish) is next. See docs/en/ROADMAP.md.
+Status: Fase 3 complete (Fase 3.39) — checker + NuGet + real virtual
+dispatch + multi-assembly resolution + an instance-object API
+(Assembly.New / Instance.Call) + real System.Reflection
+(ConstructorInfo/MethodInfo/FieldInfo Invoke) + a real legacy-.xls demo
+via NPOI. Fase 4 (production readiness: benchmarks, full sandbox, docs
+polish) is next. See docs/en/ROADMAP.md.
 ```
 
 *[Léelo en español →](README.es.md)*
@@ -63,10 +65,14 @@ built for:
 
 Before you load a third-party assembly, `vmnet check` tells you exactly
 which methods will run and which won't — with a concrete reason for each
-gap — instead of failing midway through execution. Averaged across 7 real,
-popular NuGet packages plus Jint, ~89% of methods run clean under vmnet's
-`netstandard-lite` profile today (see [`docs/en/ROADMAP.md`](docs/en/ROADMAP.md)
-for the per-package breakdown and methodology).
+gap — instead of failing midway through execution. Checked against 9 real,
+popular NuGet packages plus Jint today: the original 7 (Ardalis.
+GuardClauses, FluentValidation, System.Text.Json, Newtonsoft.Json, Semver,
+SimpleBase, Humanizer.Core) plus Jint average ~89% clean under vmnet's
+`netstandard-lite` profile, and the two most recently added — NPOI (the
+legacy-`.xls` demo below) and ClosedXML — sit at 97.3% and 93.9%
+respectively (see [`docs/en/ROADMAP.md`](docs/en/ROADMAP.md) for the
+per-package breakdown and methodology).
 
 The full technical specification is in [`docs/en/spec.md`](docs/en/spec.md).
 
@@ -91,12 +97,17 @@ The full technical specification is in [`docs/en/spec.md`](docs/en/spec.md).
 - **Multi-assembly resolution**: `vm.LoadPackage` loads a NuGet package's
   full transitive dependency graph automatically, with per-method
   assembly-scoped symbol resolution (no cross-assembly name collisions).
-- **LINQ, `async`/`await`** (modeled synchronously), reflection-lite
-  (`typeof`/`GetType`/`System.Type` introspection, `Enum.GetValues`/
-  `HasFlag`), `DateTime`/`Span<T>`/`ReadOnlySpan<T>`, `System.Text.
-  RegularExpressions`, `HashSet<T>`/`Stack<T>`/`ConcurrentDictionary`, and
-  a broad, steadily growing slice of `System.String`/`System.Math`/
-  `System.Text.Encoding`/`StringBuilder`.
+- **LINQ, `async`/`await`** (modeled synchronously), real `System.
+  Reflection` (`Type.GetConstructor`/`GetMethod`/`GetField` plus
+  `ConstructorInfo`/`MethodInfo`/`FieldInfo`'s own `Invoke`/`GetValue` —
+  not `Reflection.Emit`, no code generation, every target is a real
+  method/field vmnet already knows how to run), `Enum.GetValues`/
+  `HasFlag`, `DateTime`/`Span<T>`/`ReadOnlySpan<T>`, `System.Text.
+  RegularExpressions`, both the generic (`HashSet<T>`/`Stack<T>`/
+  `ConcurrentDictionary`) and legacy non-generic (`ArrayList`/
+  `Hashtable`/`SortedList`/`Stack`) collections, and a broad, steadily
+  growing slice of `System.String`/`System.Math`/`System.Text.Encoding`/
+  `StringBuilder`.
 - **Go↔C# bridge**: call a method directly with typed arguments
   (`Assembly.Call`), construct and drive an object graph
   (`Assembly.New`/`Instance.Call`), or pass/return raw `byte[]`/JSON
@@ -175,6 +186,7 @@ Runnable, documented examples in [`examples/`](examples/):
 | [`examples/nuget-basic`](examples/nuget-basic) | Adding and restoring a real published NuGet package, then calling a real function from it |
 | [`examples/jint-demo`](examples/jint-demo) | Real JavaScript execution via the real Jint NuGet package + its full dependency chain, driven through a small compiled C# wrapper |
 | [`examples/jint-nowrapper`](examples/jint-nowrapper) | The same Jint demo with zero C# wrapper — `Assembly.New`/`Instance.Call` driving `Jint.Engine` directly from Go |
+| [`examples/npoi-demo`](examples/npoi-demo) | Reading a real legacy `.xls` binary file (strings, numbers, a formula cell) through the real NPOI NuGet package, zero C# wrapper |
 
 ## CLI
 

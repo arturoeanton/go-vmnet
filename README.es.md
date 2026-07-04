@@ -40,9 +40,11 @@ un wrapper compilado en C# chiquito, para APIs que dependen de azúcar
 sintáctico exclusivo de C#).
 
 ```txt
-Estado: Fase 3.28 completa — checker + NuGet + despacho virtual real +
-resolución multi-ensamblado + una API de instancias de objetos
-(Assembly.New / Instance.Call). Sigue la Fase 4 (listo para producción:
+Estado: Fase 3 completa (Fase 3.39) — checker + NuGet + despacho virtual
+real + resolución multi-ensamblado + una API de instancias de objetos
+(Assembly.New / Instance.Call) + System.Reflection real
+(ConstructorInfo/MethodInfo/FieldInfo con Invoke) + un demo real de
+`.xls` legacy vía NPOI. Sigue la Fase 4 (listo para producción:
 benchmarks, sandbox completo, docs finales). Ver docs/es/ROADMAP.md.
 ```
 
@@ -67,9 +69,13 @@ para:
 
 Antes de cargar un assembly de terceros, `vmnet check` dice exactamente
 qué métodos van a correr y cuáles no —con una razón concreta para cada
-falta— en vez de fallar a mitad de la ejecución. Promediando 7 paquetes
-NuGet reales y populares más Jint, hoy ~89% de los métodos corren limpio
-bajo el perfil `netstandard-lite` de vmnet (ver
+falta— en vez de fallar a mitad de la ejecución. Chequeado hoy contra 9
+paquetes NuGet reales y populares más Jint: los 7 originales
+(Ardalis.GuardClauses, FluentValidation, System.Text.Json,
+Newtonsoft.Json, Semver, SimpleBase, Humanizer.Core) más Jint promedian
+~89% limpio bajo el perfil `netstandard-lite` de vmnet, y los dos
+agregados más recientemente — NPOI (el demo de `.xls` legacy de abajo) y
+ClosedXML — están en 97.3% y 93.9% respectivamente (ver
 [`docs/es/ROADMAP.md`](docs/es/ROADMAP.md) para el desglose por paquete y
 la metodología).
 
@@ -99,12 +105,17 @@ La especificación técnica completa está en [`docs/es/spec.md`](docs/es/spec.m
   el grafo completo de dependencias transitivas de un paquete NuGet, con
   resolución de símbolos con ámbito de ensamblado por método (sin
   colisiones de nombres entre ensamblados).
-- **LINQ, `async`/`await`** (modelado de forma síncrona), reflection-lite
-  (introspección de `typeof`/`GetType`/`System.Type`, `Enum.GetValues`/
-  `HasFlag`), `DateTime`/`Span<T>`/`ReadOnlySpan<T>`, `System.Text.
-  RegularExpressions`, `HashSet<T>`/`Stack<T>`/`ConcurrentDictionary`, y
-  una porción amplia y en crecimiento constante de `System.String`/
-  `System.Math`/`System.Text.Encoding`/`StringBuilder`.
+- **LINQ, `async`/`await`** (modelado de forma síncrona), `System.
+  Reflection` real (`Type.GetConstructor`/`GetMethod`/`GetField` más el
+  propio `Invoke`/`GetValue` de `ConstructorInfo`/`MethodInfo`/
+  `FieldInfo` — no `Reflection.Emit`, sin generación de código, cada
+  target es un método/campo real que vmnet ya sabe correr),
+  `Enum.GetValues`/`HasFlag`, `DateTime`/`Span<T>`/`ReadOnlySpan<T>`,
+  `System.Text.RegularExpressions`, tanto las colecciones genéricas
+  (`HashSet<T>`/`Stack<T>`/`ConcurrentDictionary`) como las legacy no
+  genéricas (`ArrayList`/`Hashtable`/`SortedList`/`Stack`), y una porción
+  amplia y en crecimiento constante de `System.String`/`System.Math`/
+  `System.Text.Encoding`/`StringBuilder`.
 - **Bridge Go↔C#**: llamar un método directamente con argumentos tipados
   (`Assembly.Call`), construir y manejar un grafo de objetos
   (`Assembly.New`/`Instance.Call`), o pasar/devolver `byte[]`/JSON crudo
@@ -187,6 +198,7 @@ Ejemplos corribles y documentados en [`examples/`](examples/):
 | [`examples/nuget-basic`](examples/nuget-basic) | Agregar y restaurar un paquete NuGet real publicado, y llamar una función real de ese paquete |
 | [`examples/jint-demo`](examples/jint-demo) | Ejecución de JavaScript real vía el paquete NuGet Jint real + toda su cadena de dependencias, manejado a través de un pequeño wrapper compilado en C# |
 | [`examples/jint-nowrapper`](examples/jint-nowrapper) | El mismo demo de Jint sin ningún wrapper de C# — `Assembly.New`/`Instance.Call` manejando `Jint.Engine` directamente desde Go |
+| [`examples/npoi-demo`](examples/npoi-demo) | Leer un archivo `.xls` legacy real (strings, números, una celda con fórmula) vía el paquete NuGet NPOI real, sin wrapper de C# |
 
 ## CLI
 
