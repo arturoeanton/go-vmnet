@@ -4458,6 +4458,86 @@ cd ../closedxml-demo && dotnet build GraphicEngineWrapper.csproj -c Release && f
 cd ../dapper-demo && dotnet build DapperDemoWrapper.csproj -c Release && go run .
 ```
 
+### Fase 3.53 — a real, Go-native ADO.NET provider: `Microsoft.Data.Sqlite` over
+`go-r2-sqlite`
+
+**Goal:** Fase 3.52 proved Dapper's real `SqlMapper` mapping code runs correctly against any real
+`IDbConnection` shape — but only ever against `examples/dapper-demo`'s own in-memory fake
+provider, never a real database engine. This phase adds one: a concrete, Go-backed
+`Microsoft.Data.Sqlite` implementation (`internal/bcl/system_data_sqlite.go`) backed by
+[`github.com/arturoeanton/go-r2-sqlite`](https://github.com/arturoeanton/go-r2-sqlite) — a pure-Go,
+zero-CGO SQLite engine exposing the standard `database/sql/driver` interface as `"r2sqlite"`.
+This is vmnet's first external Go dependency ever (`go.mod` had none before — a deliberate,
+project-owner-authorized, one-time exception, not a precedent).
+
+- [x] `go get github.com/arturoeanton/go-r2-sqlite` — the only `require` line in `go.mod` (bumped
+      `go 1.23` → `go 1.24`, the dependency's own minimum). `sql.Open("r2sqlite", path)` is the
+      whole integration surface; every other line of `system_data_sqlite.go` is plain
+      `database/sql` usage.
+- [x] Six real, concrete, Go-native BCL types registered under real Microsoft.Data.Sqlite type
+      names (`SqliteConnection`/`SqliteCommand`/`SqliteDataReader`/`SqliteParameter`/
+      `SqliteParameterCollection`/`SqliteTransaction`) — real C# doing
+      `using Microsoft.Data.Sqlite;` + `new SqliteConnection(...)` needs zero source changes to
+      run against this. Placed in `internal/bcl` (plain `Native`/`NativeCtor`, no Machine access)
+      rather than `internal/interpreter`'s `machineRegistry` (`adonet.go`'s own pattern): unlike
+      `adonet.go`'s `dbDataReaderDispose` (which genuinely needs `Machine.tryCall` to re-dispatch
+      to a PLUGIN subclass's own overridden `Dispose(bool)`), nothing here calls back into
+      interpreted plugin code — every operation is a leaf call into Go's own `database/sql`, the
+      same posture as `ZipArchive`'s real `archive/zip` calls or `MemoryStream`'s real
+      `bytes.Buffer` ones.
+- [x] Real `@name` and positional `?` parameter binding via Go's own `sql.Named` — found a real
+      boundary mismatch getting there: Go's own `database/sql` (`convert.go`'s
+      `validateNamedValueName`) requires a bare name with no sigil ("begins with a letter"), while
+      a real `SqliteParameter.ParameterName` normally includes one (`"@id"`). `bindParams` strips
+      it before calling `sql.Named`; go-r2-sqlite's own named-parameter lookup
+      (`engine/expr.go`) already tries the SQL text's own placeholder both with and without its
+      sigil, so this bridges the two conventions without vmnet needing to guess which one a given
+      command's SQL text used.
+- [x] A real `SqliteTransaction` (`BeginTransaction`/`Commit`/`Rollback`), backed by a genuine Go
+      `sql.Tx` — `SqliteCommand.target()` picks the bound `*sql.Tx` over the connection's pooled
+      `*sql.DB` only when one is explicitly set via `cmd.Transaction = tx`, matching real ADO.NET
+      (a command never auto-joins a transaction just because its connection has one open).
+- [x] `System.DBNull` (`internal/bcl/system_dbnull.go`) — net new, no prior representation
+      anywhere in this codebase. A real SQL `NULL` read back through `GetValue`/`ExecuteScalar`
+      needs to be `DBNull.Value` (a real, `is`-checkable, reference-comparable singleton), never
+      vmnet's own `KindNull` (a plain C# `null`) — real code (including Dapper's own `SqlMapper`)
+      commonly branches on `is DBNull` before falling back to an actual `null`.
+- [x] `GetFieldType(i)`/`GetDataTypeName(i)` must answer from column METADATA, available as soon
+      as the reader is open — independent of cursor position — unlike `GetValue`/`GetInt32`/...,
+      which need an actual row. Found via a real, load-bearing case: Dapper's own
+      `SqlMapper.GetDapperRowDeserializer` (the `typeof(object)` row path this project's own demos
+      use) calls `GetFieldType(i)` before the reader's current-row state is necessarily populated;
+      the initial strict "no current row" error broke every real Dapper query the moment it ran
+      against this provider.
+- [x] `examples/sqlite-demo` — a new, self-contained demo (left `examples/dapper-demo` completely
+      untouched): real `@name`/positional parameter binding and a real committed transaction
+      through plain ADO.NET, then the *same* real connection handed to Dapper's real
+      `SqlMapper.Query`/`Execute`, then the resulting `.db` file opened independently by the real
+      `sqlite3` CLI (`PRAGMA integrity_check` passing) as the actual round-trip proof — the same
+      "real, unmodified external tool" verification pattern `examples/openxml-demo` uses for its
+      own `.docx` output. `SqliteDemoWrapper.csproj` references the real `Microsoft.Data.Sqlite`
+      NuGet package for compile-time type-checking ONLY — its DLL is never loaded into vmnet at
+      runtime, only `Dapper.dll` is attached as a dependency.
+
+**Found, not fixed** (same root cause as Fase 3.52, confirmed here to be provider-independent, not
+specific to the fake connection): any Dapper call passing an actual parameters object still
+unconditionally scans the SQL text via the `{=name}`-literal-token regex Go's RE2 engine can never
+compile, regardless of which real `IDbConnection` is underneath. `examples/sqlite-demo` only ever
+passes literal SQL, the same documented workaround. `System.Decimal` still has no distinct
+representation anywhere in this codebase (`system_misc.go`'s own `formatValue` already folds it
+into `Double`/`Single`) — a column bound or read as `DbType.Decimal` is handled as an ordinary
+`double`.
+
+### How to verify Fase 3.53
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+cd examples/sqlite-demo && dotnet build SqliteDemoWrapper.csproj -c Release && go run .
+```
+
 ---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 

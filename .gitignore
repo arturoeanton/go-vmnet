@@ -59,6 +59,16 @@ examples/calculator/coreclr/obj/
 examples/dapper-demo/bin/
 examples/dapper-demo/obj/
 
+# .NET build output for the examples/sqlite-demo wrapper (same rationale
+# as jint-demo above — SqliteDemoWrapper.cs is committed source, the
+# compiled SqliteDemoWrapper.dll it produces is not), plus the real
+# SQLite file main.go writes fresh on every run (a build artifact, same
+# posture as openxml-demo's own report.docx below — not committed test
+# data, unlike the *.xls/*.xlsx fixtures other demos ship as real input).
+examples/sqlite-demo/bin/
+examples/sqlite-demo/obj/
+examples/sqlite-demo/*.db
+
 # macOS Finder metadata
 .DS_Store
 

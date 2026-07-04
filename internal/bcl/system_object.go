@@ -231,6 +231,27 @@ func NativeTypeName(native any) (string, bool) {
 		// reached through `group.Key`/`foreach (var x in group)`, both
 		// interface-declared call sites needing the same redirection.
 		return "VmnetInternal.Grouping", true
+	case *nativeDBNull:
+		return "System.DBNull", true
+	case *nativeSqliteConnection:
+		// Real, Go-native ADO.NET provider (Fase 3.53, system_data_sqlite.go)
+		// — needed for the exact same reason nativeStringComparer's own case
+		// above is: a Dapper SqlMapper.Query/Execute call site is declared
+		// against IDbConnection, not SqliteConnection directly, so the
+		// virtual-dispatch ancestor walk (calls.go) needs this receiver's
+		// concrete type name to redirect back to this package's own
+		// registered "Microsoft.Data.Sqlite.SqliteConnection::..." natives.
+		return "Microsoft.Data.Sqlite.SqliteConnection", true
+	case *nativeSqliteCommand:
+		return "Microsoft.Data.Sqlite.SqliteCommand", true
+	case *nativeSqliteDataReader:
+		return "Microsoft.Data.Sqlite.SqliteDataReader", true
+	case *nativeSqliteParameter:
+		return "Microsoft.Data.Sqlite.SqliteParameter", true
+	case *nativeSqliteParameterCollection:
+		return "Microsoft.Data.Sqlite.SqliteParameterCollection", true
+	case *nativeSqliteTransaction:
+		return "Microsoft.Data.Sqlite.SqliteTransaction", true
 	case *runtime.ManagedException:
 		// A bare exception object (no TypeDef — either a plain BCL
 		// exception type like ArgumentException, or ex.Object unset

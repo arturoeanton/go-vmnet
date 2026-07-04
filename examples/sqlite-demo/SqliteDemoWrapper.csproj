@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="SqliteDemoWrapper.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Dapper" Version="2.1.79" />
+    <!-- Referenced ONLY so `dotnet build` has the real Microsoft.Data.Sqlite
+         type surface to check SqliteDemoWrapper.cs against — its actual
+         DLL is never loaded into vmnet at runtime (main.go only attaches
+         Dapper.dll as a dependency). Every SqliteConnection/SqliteCommand/
+         SqliteDataReader/SqliteParameter/SqliteTransaction call in this
+         assembly resolves against vmnet's own native Go implementation
+         instead (internal/bcl/system_data_sqlite.go), registered under
+         this exact real namespace/type names. -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.10" />
+  </ItemGroup>
+</Project>
