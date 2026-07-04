@@ -38,30 +38,34 @@ Go, no compilation step beyond `go run`) and
 tiny compiled C# wrapper, for APIs that lean on C#-only sugar).
 
 ```txt
-Status: Fase 3.53 complete — real NuGet demos across Jint, Office/JSON
-libraries, Dapper, and a real embedded SQLite database; multi-assembly
-loading, virtual/interface dispatch, reflection hardening, ADO.NET
-surface, and a compatibility checker.
+Status: Fase 3.52 complete — real NuGet demos across Jint,
+Office/JSON libraries, and Dapper; multi-assembly loading,
+virtual/interface dispatch, reflection hardening, ADO.NET surface, and
+a compatibility checker.
 
 Current corpus: 19 real NuGet packages checked with transitive
 dependencies under netstandard-lite. Average clean-method coverage:
-~93.9% (see docs/en/COMPATIBILITY.md for the per-package breakdown —
-checker %, real demo, and confidence kept deliberately separate).
+~92.5% (see docs/en/COMPATIBILITY.md for the always-current per-package
+breakdown — checker %, real demo, and confidence kept deliberately
+separate).
 
 Next: Fase 4 — production readiness: a real Permissions/sandbox model
 (see docs/en/security.md for today's honest threat model), benchmarks,
-CI, and release packaging.
+compatibility matrix, CI, and release packaging.
 ```
 
-Verified demos:
-- **Jint**: a real JavaScript engine, end to end
-- **NPOI**: reads a real legacy `.xls`
-- **DocumentFormat.OpenXml**: generates a real `.docx`, round-tripped through the real .NET SDK
-- **ClosedXML**: reads a real `.xlsx`
-- **System.Text.Json** / **Newtonsoft.Json**: real JSON parsing
-- **Dapper**: `Query`/`Execute` over both a fake ADO.NET provider and a real embedded SQLite
-  database (via a new, Go-native `Microsoft.Data.Sqlite` provider — vmnet's first external Go
-  dependency — independently verified with the real `sqlite3` CLI)
+**Runtime-verified demos** — each one loads the real, unmodified package from nuget.org and
+compares its output against real .NET:
+
+| Package | What it proves |
+|---|---|
+| [Jint](examples/jint-demo) | A real JavaScript engine — parses, builds a real AST, evaluates |
+| [NPOI](examples/npoi-demo) | Reads a real legacy `.xls` binary file |
+| [DocumentFormat.OpenXml](examples/openxml-demo) | Generates a real `.docx`, round-tripped through the real .NET SDK |
+| [ClosedXML](examples/closedxml-demo) | Reads a real `.xlsx` file |
+| [System.Text.Json](examples/system-text-json-demo) / [Newtonsoft.Json](examples/newtonsoft-json-demo) | Real JSON parsing |
+| [Dapper](examples/dapper-demo) | `Query`/`Execute` over a fake in-memory ADO.NET provider |
+| [Dapper + Microsoft.Data.Sqlite](examples/sqlite-demo) | The same real Dapper code over a real, Go-native SQLite provider — independently verified with the real `sqlite3` CLI |
 
 *[Léelo en español →](README.es.md)*
 
@@ -83,7 +87,7 @@ built for:
 Before you load a third-party assembly, `vmnet check` tells you exactly
 which methods will run and which won't — with a concrete reason for each
 gap — instead of failing midway through execution. Checked against 19
-real, popular NuGet packages today, averaging 93.9% clean under vmnet's
+real, popular NuGet packages today, averaging ~92.5% clean under vmnet's
 `netstandard-lite` profile — but the average isn't the number that
 matters: see [`docs/en/COMPATIBILITY.md`](docs/en/COMPATIBILITY.md) for
 the full per-package breakdown, which deliberately keeps the static

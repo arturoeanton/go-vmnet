@@ -40,32 +40,35 @@ un wrapper compilado en C# chiquito, para APIs que dependen de azúcar
 sintáctico exclusivo de C#).
 
 ```txt
-Estado: Fase 3.53 completa — demos reales de NuGet en Jint, librerías de
-Office/JSON, Dapper, y una base de datos SQLite embebida real; carga
-multi-ensamblado, despacho virtual/de interfaz, endurecimiento de
-reflection, superficie ADO.NET, y un checker de compatibilidad.
+Estado: Fase 3.52 completa — demos reales de NuGet en Jint, librerías
+de Office/JSON, y Dapper; carga multi-ensamblado, despacho virtual/de
+interfaz, endurecimiento de reflection, superficie ADO.NET, y un
+checker de compatibilidad.
 
 Corpus actual: 19 paquetes NuGet reales chequeados con dependencias
 transitivas bajo netstandard-lite. Cobertura promedio de métodos
-limpios: ~93.9% (ver docs/es/COMPATIBILITY.md para el desglose por
-paquete — % de checker, demo real, y confianza, mantenidos
-deliberadamente separados).
+limpios: ~92.5% (ver docs/es/COMPATIBILITY.md para el desglose por
+paquete siempre actualizado — % de checker, demo real, y confianza,
+mantenidos deliberadamente separados).
 
 Sigue: Fase 4 — listo para producción: un modelo real de
 Permissions/sandbox (ver docs/es/security.md para el modelo de amenazas
-honesto de hoy), benchmarks, CI, y empaquetado de release.
+honesto de hoy), benchmarks, matriz de compatibilidad, CI, y empaquetado
+de release.
 ```
 
-Demos verificados:
-- **Jint**: un motor de JavaScript real, de punta a punta
-- **NPOI**: lee un `.xls` legacy real
-- **DocumentFormat.OpenXml**: genera un `.docx` real, verificado abriéndolo con el SDK de .NET real
-- **ClosedXML**: lee un `.xlsx` real
-- **System.Text.Json** / **Newtonsoft.Json**: parseo de JSON real
-- **Dapper**: `Query`/`Execute` tanto sobre un proveedor ADO.NET fake como sobre una base de datos
-  SQLite embebida real (vía un proveedor `Microsoft.Data.Sqlite` nuevo y nativo en Go — la primera
-  dependencia externa de Go de vmnet — verificado de forma independiente con el CLI real de
-  `sqlite3`)
+**Demos verificados en tiempo de ejecución** — cada uno carga el paquete real, sin modificar,
+desde nuget.org, y compara su salida contra .NET real:
+
+| Paquete | Qué demuestra |
+|---|---|
+| [Jint](examples/jint-demo) | Un motor de JavaScript real — parsea, construye un AST real, evalúa |
+| [NPOI](examples/npoi-demo) | Lee un archivo binario `.xls` legacy real |
+| [DocumentFormat.OpenXml](examples/openxml-demo) | Genera un `.docx` real, verificado abriéndolo con el SDK de .NET real |
+| [ClosedXML](examples/closedxml-demo) | Lee un archivo `.xlsx` real |
+| [System.Text.Json](examples/system-text-json-demo) / [Newtonsoft.Json](examples/newtonsoft-json-demo) | Parseo de JSON real |
+| [Dapper](examples/dapper-demo) | `Query`/`Execute` sobre un proveedor ADO.NET fake en memoria |
+| [Dapper + Microsoft.Data.Sqlite](examples/sqlite-demo) | El mismo código real de Dapper sobre un proveedor SQLite real y nativo en Go — verificado de forma independiente con el CLI real de `sqlite3` |
 
 *[Read it in English →](README.md)*
 
@@ -89,7 +92,7 @@ para:
 Antes de cargar un assembly de terceros, `vmnet check` dice exactamente
 qué métodos van a correr y cuáles no —con una razón concreta para cada
 falta— en vez de fallar a mitad de la ejecución. Chequeado hoy contra 19
-paquetes NuGet reales y populares, con un promedio de 93.9% limpio bajo
+paquetes NuGet reales y populares, con un promedio de ~92.5% limpio bajo
 el perfil `netstandard-lite` de vmnet — pero el promedio no es el número
 que importa: ver [`docs/es/COMPATIBILITY.md`](docs/es/COMPATIBILITY.md)
 para el desglose completo por paquete, que deliberadamente mantiene
