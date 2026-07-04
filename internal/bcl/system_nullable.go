@@ -92,3 +92,29 @@ func nullableGetValueOrDefault(args []runtime.Value) (runtime.Value, error) {
 	}
 	return s.Fields[1], nil
 }
+
+// UnwrapNullable collapses a Nullable<T> struct Value (system_nullable.go)
+// into either its underlying T (HasValue == true) or a plain KindNull
+// (HasValue == false) — v unchanged for every other Kind. A LINQ key/
+// aggregation callback typed to return `int?`/`double?`/etc. (e.g.
+// `xs.OrderBy(x => x.NullableAge)`, `xs.Sum(x => x.NullableScore)`) hands
+// back exactly this struct shape verbatim; the CLR only ever unboxes it
+// to a bare value or a real null reference at a `box`/pattern-match site,
+// neither of which a plain delegate return passes through. Comparison
+// (interpreter/comparer.go) and the numeric LINQ aggregates (Sum/
+// Average/Min/Max, interpreter/linq.go) both need the T underneath (or
+// "no value, sorts/counts as null") rather than an opaque two-field
+// struct they have no other reason to know about.
+func UnwrapNullable(v runtime.Value) runtime.Value {
+	if v.Kind != runtime.KindStruct || v.Struct == nil || v.Struct.Type == nil {
+		return v
+	}
+	t := v.Struct.Type
+	if t.Namespace != "System" || t.Name != "Nullable`1" {
+		return v
+	}
+	if !v.Struct.Fields[0].Truthy() {
+		return runtime.Null()
+	}
+	return v.Struct.Fields[1]
+}

@@ -37,14 +37,41 @@ func handlersContaining(method *runtime.Method, ip int) []ir.Handler {
 	return out
 }
 
-// handlersLeaving returns method's finally/fault handlers a `leave` from
-// ip to target must run: those whose try region contains ip but does NOT
+// handlersLeaving returns method's finally handlers a `leave` from ip to
+// target must run: those whose try region contains ip but does NOT
 // contain target (a leave that stays within the same try, jumping between
 // two points inside it, doesn't need to unwind out of it at all).
+//
+// Fault handlers are deliberately excluded here (Fase 3.42, found via a
+// real, minimal repro: a `yield return` method whose body does `foreach`
+// over another collection — the exact shape the C# compiler generates a
+// `fault` clause for around the inner foreach's own MoveNext/Dispose, to
+// guarantee cleanup only on an abnormal exit). Per ECMA-335 III.3.65
+// (leave) and I.12.4.2.5, a `fault` handler is a "finally that only runs
+// when an exception is propagating" — ordinary `leave` is BY DEFINITION
+// the non-exceptional path, so a fault handler must never run for it,
+// only for an exception actually unwinding through (handlersContaining,
+// consulted from dispatchException, correctly has no such Catch-only
+// filter to begin with). Before this fix, a real `MoveNext()`'s own
+// ordinary `leave` (taken every time a `yield return` successfully
+// returns true) incorrectly ran the surrounding fault handler as if
+// leaving via an exception — calling the state machine's own Dispose()/
+// `<>m__FinallyN()` immediately after its FIRST successful yield, which
+// disposes the hoisted inner enumerator and resets `<>1__state` to its
+// terminal value. The first yielded item still came back correctly
+// (already captured before the errant dispose ran), but every
+// subsequent MoveNext() call then saw an already-disposed, terminal
+// state and returned false — silently truncating every such iterator to
+// exactly one element, regardless of the real collection's length
+// (confirmed both via a standalone repro and via the real bug this was
+// chasing: DocumentFormat.OpenXml's own PackageFeatureBase.
+// RelationshipCollection.GetEnumerator(), `foreach (var v in
+// Relationships.Values) { yield return v; }`, only ever yielding the
+// first real package relationship out of a real .rels file's several).
 func handlersLeaving(method *runtime.Method, ip, target int) []ir.Handler {
 	var out []ir.Handler
 	for _, h := range method.Handlers {
-		if h.Kind == ir.HandlerCatch {
+		if h.Kind != ir.HandlerFinally {
 			continue
 		}
 		inTry := h.TryStart <= ip && ip < h.TryEnd

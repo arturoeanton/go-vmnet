@@ -43,6 +43,8 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool, ehClaus
 			out = append(out, Dup{})
 		case "pop":
 			out = append(out, Pop{})
+		case "localloc":
+			out = append(out, LocalAlloc{})
 
 		case "ldarg.0":
 			out = append(out, LoadArg{0})
@@ -277,27 +279,27 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool, ehClaus
 
 		case "call":
 			token := instr.Operand.(uint32)
-			fullName, hasThis, argCount, hasReturn, err := resolveCallTarget(md, token)
+			fullName, hasThis, argCount, hasReturn, paramTypeNames, methodGenericArgs, err := resolveCallTarget(md, token)
 			if err != nil {
 				return nil, nil, fmt.Errorf("ir: call at IL offset %d: %w", instr.Offset, err)
 			}
-			out = append(out, Call{FullName: fullName, ArgCount: argCount, HasThis: hasThis, HasReturn: hasReturn})
+			out = append(out, Call{FullName: fullName, ArgCount: argCount, HasThis: hasThis, HasReturn: hasReturn, ParamTypeNames: paramTypeNames, MethodGenericArgs: methodGenericArgs})
 
 		case "callvirt":
 			token := instr.Operand.(uint32)
-			fullName, _, argCount, hasReturn, err := resolveCallTarget(md, token)
+			fullName, _, argCount, hasReturn, paramTypeNames, methodGenericArgs, err := resolveCallTarget(md, token)
 			if err != nil {
 				return nil, nil, fmt.Errorf("ir: callvirt at IL offset %d: %w", instr.Offset, err)
 			}
-			out = append(out, Call{FullName: fullName, ArgCount: argCount, HasThis: true, HasReturn: hasReturn, Virtual: true})
+			out = append(out, Call{FullName: fullName, ArgCount: argCount, HasThis: true, HasReturn: hasReturn, Virtual: true, ParamTypeNames: paramTypeNames, MethodGenericArgs: methodGenericArgs})
 
 		case "newobj":
 			token := instr.Operand.(uint32)
-			typeFullName, ctorFullName, argCount, err := resolveNewObjTarget(md, token)
+			typeFullName, ctorFullName, argCount, paramTypeNames, err := resolveNewObjTarget(md, token)
 			if err != nil {
 				return nil, nil, fmt.Errorf("ir: newobj at IL offset %d: %w", instr.Offset, err)
 			}
-			out = append(out, NewObj{TypeFullName: typeFullName, CtorFullName: ctorFullName, ArgCount: argCount})
+			out = append(out, NewObj{TypeFullName: typeFullName, CtorFullName: ctorFullName, ArgCount: argCount, ParamTypeNames: paramTypeNames})
 
 		case "ldfld":
 			token := instr.Operand.(uint32)
@@ -411,7 +413,7 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool, ehClaus
 
 		case "ldftn":
 			token := instr.Operand.(uint32)
-			fullName, _, _, _, err := resolveCallTarget(md, token)
+			fullName, _, _, _, _, _, err := resolveCallTarget(md, token)
 			if err != nil {
 				return nil, nil, fmt.Errorf("ir: ldftn at IL offset %d: %w", instr.Offset, err)
 			}
@@ -419,13 +421,13 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool, ehClaus
 
 		case "ldvirtftn":
 			token := instr.Operand.(uint32)
-			fullName, _, _, _, err := resolveCallTarget(md, token)
+			fullName, _, _, _, _, _, err := resolveCallTarget(md, token)
 			if err != nil {
 				return nil, nil, fmt.Errorf("ir: ldvirtftn at IL offset %d: %w", instr.Offset, err)
 			}
 			out = append(out, LoadFtn{FullName: fullName, Virtual: true})
 
-		case "constrained.", "volatile.", "readonly.":
+		case "constrained.", "volatile.", "readonly.", "unaligned.":
 			// Prefixes vmnet doesn't need: constrained. only matters for
 			// choosing between boxing and a value type's own override at a
 			// following callvirt — vmnet's Value is already a tagged union
@@ -435,7 +437,13 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool, ehClaus
 			// volatile./readonly. are pure optimizer hints (memory
 			// ordering, "won't mutate through this address") that don't
 			// affect a single-goroutine-per-call interpreter with
-			// Value-based storage instead of raw memory.
+			// Value-based storage instead of raw memory. unaligned. (Fase
+			// 3.40, found via System.Runtime.CompilerServices.Unsafe's own
+			// WriteUnaligned/ReadUnaligned) marks the following ldind/stind/
+			// ldobj/stobj/cpblk/initblk as safe on an unaligned address — a
+			// real concern for hardware that faults on misaligned loads,
+			// meaningless for vmnet's Value-based storage which has no
+			// notion of memory alignment at all.
 			out = append(out, Nop{})
 
 		case "ret":
@@ -469,6 +477,24 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool, ehClaus
 				}
 				out = append(out, LoadTypeToken{TypeFullName: typeFullName})
 			case metadata.TableTypeSpec:
+				sig, err := md.TypeSpecSignature(token.RID())
+				if err != nil {
+					return nil, nil, fmt.Errorf("ir: ldtoken at IL offset %d: %w", instr.Offset, err)
+				}
+				parsed, err := metadata.ParseTypeSpec(sig)
+				if err != nil {
+					return nil, nil, fmt.Errorf("ir: ldtoken at IL offset %d: %w", instr.Offset, err)
+				}
+				if parsed.Kind == metadata.SigGenericParam && parsed.GenericParamIsMethod {
+					// `typeof(TFeature)` on the ENCLOSING method's own
+					// generic parameter (Fase 3.40) — resolved at runtime
+					// from the call site's own MethodGenericArgs, not
+					// here (every instantiation of this same method body
+					// needs a different answer; see ir.Call.
+					// MethodGenericArgs's own doc comment).
+					out = append(out, LoadTypeToken{MethodGenericParamIndex: int(parsed.GenericParamIndex), IsMethodGenericParam: true})
+					break
+				}
 				// Unlike resolveTypeTokenOrGeneric (used by initobj/ldobj/
 				// stobj and MemberRef class resolution, which only ever need
 				// the open generic type name), typeof(T) on a closed generic
@@ -487,6 +513,22 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool, ehClaus
 					return nil, nil, fmt.Errorf("ir: ldtoken at IL offset %d: %w", instr.Offset, err)
 				}
 				out = append(out, LoadFieldToken{TypeFullName: typeFullName, FieldName: fieldName})
+			case metadata.TableMethodDef, metadata.TableMemberRef:
+				// ldtoken on a Method (RuntimeMethodHandle) — see
+				// LoadMethodToken's own doc comment. resolveCallTarget
+				// already resolves both tables down to a single
+				// "Type::Method" full name; only the name is needed here
+				// (argument count/generic-instantiation info, also
+				// returned, is irrelevant to a bare method-handle token).
+				fullName, _, _, _, _, _, err := resolveCallTarget(md, uint32(token))
+				if err != nil {
+					return nil, nil, fmt.Errorf("ir: ldtoken at IL offset %d: %w", instr.Offset, err)
+				}
+				sep := strings.LastIndex(fullName, "::")
+				if sep < 0 {
+					return nil, nil, fmt.Errorf("ir: ldtoken at IL offset %d: malformed method full name %q", instr.Offset, fullName)
+				}
+				out = append(out, LoadMethodToken{TypeFullName: fullName[:sep], MethodName: fullName[sep+2:]})
 			default:
 				return nil, nil, &UnsupportedOpcodeError{OpCode: name, Offset: instr.Offset}
 			}
@@ -603,63 +645,147 @@ func operandIndex(operand any) int {
 	return 0
 }
 
-func resolveCallTarget(md *metadata.Metadata, token uint32) (fullName string, hasThis bool, argCount int, hasReturn bool, err error) {
+func resolveCallTarget(md *metadata.Metadata, token uint32) (fullName string, hasThis bool, argCount int, hasReturn bool, paramTypeNames []string, methodGenericArgs []string, err error) {
 	t := metadata.Token(token)
 	switch t.Table() {
 	case metadata.TableMethodDef:
 		row, err := md.MethodDef(t.RID())
 		if err != nil {
-			return "", false, 0, false, err
+			return "", false, 0, false, nil, nil, err
 		}
 		typeRID, err := md.MethodDefOwner(t.RID())
 		if err != nil {
-			return "", false, 0, false, err
+			return "", false, 0, false, nil, nil, err
 		}
 		typeDef, err := md.TypeDef(typeRID)
 		if err != nil {
-			return "", false, 0, false, err
+			return "", false, 0, false, nil, nil, err
 		}
 		sig, err := metadata.ParseMethodSig(row.Signature)
 		if err != nil {
-			return "", false, 0, false, err
+			return "", false, 0, false, nil, nil, err
 		}
 		typeName, err := QualifyTypeDefName(md, typeRID, typeDef)
 		if err != nil {
-			return "", false, 0, false, err
+			return "", false, 0, false, nil, nil, err
 		}
 		full := typeName + "::" + row.Name
-		return full, sig.HasThis, int(sig.ParamCount), sig.RetType.Kind != metadata.SigVoid, nil
+		return full, sig.HasThis, int(sig.ParamCount), sig.RetType.Kind != metadata.SigVoid, sigParamTypeNames(md, sig), nil, nil
 
 	case metadata.TableMemberRef:
 		row, err := md.MemberRef(t.RID())
 		if err != nil {
-			return "", false, 0, false, err
+			return "", false, 0, false, nil, nil, err
 		}
 		sig, err := metadata.ParseMethodSig(row.Signature)
 		if err != nil {
-			return "", false, 0, false, err
+			return "", false, 0, false, nil, nil, err
 		}
 		typeName, err := resolveMemberRefClassName(md, row.Class)
 		if err != nil {
-			return "", false, 0, false, err
+			return "", false, 0, false, nil, nil, err
 		}
 		full := typeName + "::" + row.Name
-		return full, sig.HasThis, int(sig.ParamCount), sig.RetType.Kind != metadata.SigVoid, nil
+		return full, sig.HasThis, int(sig.ParamCount), sig.RetType.Kind != metadata.SigVoid, sigParamTypeNames(md, sig), nil, nil
 
 	case metadata.TableMethodSpec:
 		// A generic method instantiation (e.g. Guard.Against.Null<string>)
 		// unwraps to a regular MethodDef/MemberRef call — vmnet's
 		// runtime.Value is already type-erased, so the type arguments in
-		// row.Instantiation aren't needed to execute it.
+		// row.Instantiation usually aren't needed to execute it. The one
+		// real exception (Fase 3.40): `typeof(TFeature)` inside the
+		// method's own body (a generic method parameter, not a generic
+		// TYPE's), which a fixed-at-build-time IR has no other way to
+		// resolve — so the instantiation's own type names are resolved
+		// here and carried on the call site for exactly that.
 		row, err := md.MethodSpec(t.RID())
 		if err != nil {
-			return "", false, 0, false, err
+			return "", false, 0, false, nil, nil, err
 		}
-		return resolveCallTarget(md, uint32(row.Method))
+		name, hasThis, argCount, hasReturn, paramTypeNames, _, err := resolveCallTarget(md, uint32(row.Method))
+		if err != nil {
+			return "", false, 0, false, nil, nil, err
+		}
+		genericArgs, gerr := methodSpecGenericArgNames(md, row.Instantiation)
+		if gerr != nil {
+			genericArgs = nil
+		}
+		return name, hasThis, argCount, hasReturn, paramTypeNames, genericArgs, nil
 
 	default:
-		return "", false, 0, false, fmt.Errorf("unsupported call target table %#x", byte(t.Table()))
+		return "", false, 0, false, nil, nil, fmt.Errorf("unsupported call target table %#x", byte(t.Table()))
 	}
+}
+
+// methodSpecGenericArgNames resolves a MethodSpec's own Instantiation blob
+// to each type argument's full name, reusing SigTypeFullName the same way
+// ldtoken's closed-TypeSpec handling already does — see
+// resolveCallTarget's TableMethodSpec case for why this matters.
+func methodSpecGenericArgNames(md *metadata.Metadata, instantiation []byte) ([]string, error) {
+	types, err := metadata.ParseMethodSpec(instantiation)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, len(types))
+	for i, t := range types {
+		name, err := SigTypeFullName(md, t)
+		if err != nil {
+			return nil, err
+		}
+		names[i] = name
+	}
+	return names, nil
+}
+
+// sigParamTypeNames resolves each of sig's declared parameter types to a
+// plain "Namespace.Type" name where possible (Fase 3.40) — "" for a
+// parameter whose type doesn't resolve this way (an open generic method
+// parameter, most commonly; see ir.Call.ParamTypeNames's own doc comment
+// for why this exists at all). Best-effort: a resolution error for one
+// parameter degrades that slot to "" rather than failing the whole call
+// site, since this is only ever an optional disambiguation aid, never a
+// hard requirement for the call to resolve at all.
+//
+// SigGenericInst must resolve through SigTypeFullName (which keeps the
+// closed type arguments, e.g. "System.ReadOnlyMemory`1[[System.Char]]"),
+// not the bare open-generic resolveTypeToken(md, p.Token) this used to
+// call — found running real System.Text.Json 8.0.5:
+// JsonDocument.Parse(string, JsonDocumentOptions)'s own real IL calls
+// `Parse(json.AsMemory(), options)`, whose target overload set has BOTH
+// Parse(ReadOnlyMemory<byte>, JsonDocumentOptions) and
+// Parse(ReadOnlyMemory<char>, JsonDocumentOptions) — same arity, and
+// (with the open-name-only resolution) the identical erased param name
+// "System.ReadOnlyMemory`1" for both, so pickMethodOverload's exact-match
+// bonus (assembly.go) applied equally to either candidate and the tie
+// silently fell to whichever came first in the metadata table (the byte
+// overload) — feeding the JSON's raw UTF-16 char buffer straight into the
+// UTF-8 Utf8JsonReader with no transcoding at all, corrupting the parse
+// (Utf8JsonReader then desyncs mid-token, surfacing as a confusing
+// downstream "JsonReaderException: EndOfStringNotFound" with no hint the
+// real bug was overload resolution). Retaining the closed generic
+// argument here makes the two overloads' captured ParamTypeNames actually
+// differ ("...[[System.Byte]]" vs "...[[System.Char]]"), so the
+// exact-match bonus only ever applies to the real target.
+func sigParamTypeNames(md *metadata.Metadata, sig metadata.MethodSig) []string {
+	names := make([]string, len(sig.Params))
+	for i, p := range sig.Params {
+		switch p.Kind {
+		case metadata.SigClass, metadata.SigValueType, metadata.SigGenericInst:
+			if name, err := SigTypeFullName(md, p); err == nil {
+				names[i] = name
+			}
+		case metadata.SigChar:
+			// The one primitive worth resolving here (rather than every
+			// ELEMENT_TYPE primitive): char and int32 both collapse to
+			// the same KindI4 Value at runtime with nothing else to tell
+			// them apart (spec §17.1, no distinct char Kind) — needed by
+			// convertCharArgsForNative (internal/interpreter/calls.go,
+			// Fase 3.40) to recover which KindI4 call-site argument was
+			// actually a char, e.g. StringBuilder.Append('/').
+			names[i] = "System.Char"
+		}
+	}
+	return names
 }
 
 // qualifyTypeRefName resolves a TypeRef's full name, walking ResolutionScope
@@ -781,16 +907,16 @@ func resolveClosedTypeSpecName(md *metadata.Metadata, rid uint32) (string, error
 	if err != nil {
 		return "", err
 	}
-	return sigTypeFullName(md, t)
+	return SigTypeFullName(md, t)
 }
 
-// sigTypeFullName resolves any parsed SigType to a reflection-style full
+// SigTypeFullName resolves any parsed SigType to a reflection-style full
 // name — for a closed generic instantiation, recursively including its
 // type arguments as "Open`N[[Arg1],[Arg2]]" (a simplified form of real
 // .NET's assembly-qualified closed-generic FullName: good enough for
 // vmnet's own Type.FullName-string-based equality/parsing, since nothing
 // here ever needs to round-trip through a real CLR loader).
-func sigTypeFullName(md *metadata.Metadata, t metadata.SigType) (string, error) {
+func SigTypeFullName(md *metadata.Metadata, t metadata.SigType) (string, error) {
 	switch t.Kind {
 	case metadata.SigBoolean:
 		return "System.Boolean", nil
@@ -830,7 +956,7 @@ func sigTypeFullName(md *metadata.Metadata, t metadata.SigType) (string, error) 
 		if t.Elem == nil {
 			return "", fmt.Errorf("ir: array type signature with no element type")
 		}
-		elemName, err := sigTypeFullName(md, *t.Elem)
+		elemName, err := SigTypeFullName(md, *t.Elem)
 		if err != nil {
 			return "", err
 		}
@@ -845,7 +971,7 @@ func sigTypeFullName(md *metadata.Metadata, t metadata.SigType) (string, error) 
 		}
 		argNames := make([]string, len(t.Args))
 		for i, arg := range t.Args {
-			argName, err := sigTypeFullName(md, arg)
+			argName, err := SigTypeFullName(md, arg)
 			if err != nil {
 				return "", err
 			}
@@ -917,49 +1043,49 @@ func resolveTypeToken(md *metadata.Metadata, tok metadata.Token) (string, error)
 	}
 }
 
-func resolveNewObjTarget(md *metadata.Metadata, token uint32) (typeFullName, ctorFullName string, argCount int, err error) {
+func resolveNewObjTarget(md *metadata.Metadata, token uint32) (typeFullName, ctorFullName string, argCount int, paramTypeNames []string, err error) {
 	t := metadata.Token(token)
 	switch t.Table() {
 	case metadata.TableMethodDef:
 		row, err := md.MethodDef(t.RID())
 		if err != nil {
-			return "", "", 0, err
+			return "", "", 0, nil, err
 		}
 		typeRID, err := md.MethodDefOwner(t.RID())
 		if err != nil {
-			return "", "", 0, err
+			return "", "", 0, nil, err
 		}
 		typeDef, err := md.TypeDef(typeRID)
 		if err != nil {
-			return "", "", 0, err
+			return "", "", 0, nil, err
 		}
 		sig, err := metadata.ParseMethodSig(row.Signature)
 		if err != nil {
-			return "", "", 0, err
+			return "", "", 0, nil, err
 		}
 		typeFullName, err = QualifyTypeDefName(md, typeRID, typeDef)
 		if err != nil {
-			return "", "", 0, err
+			return "", "", 0, nil, err
 		}
-		return typeFullName, typeFullName + "::" + row.Name, int(sig.ParamCount), nil
+		return typeFullName, typeFullName + "::" + row.Name, int(sig.ParamCount), sigParamTypeNames(md, sig), nil
 
 	case metadata.TableMemberRef:
 		row, err := md.MemberRef(t.RID())
 		if err != nil {
-			return "", "", 0, err
+			return "", "", 0, nil, err
 		}
 		sig, err := metadata.ParseMethodSig(row.Signature)
 		if err != nil {
-			return "", "", 0, err
+			return "", "", 0, nil, err
 		}
 		typeFullName, err = resolveMemberRefClassName(md, row.Class)
 		if err != nil {
-			return "", "", 0, err
+			return "", "", 0, nil, err
 		}
-		return typeFullName, typeFullName + "::" + row.Name, int(sig.ParamCount), nil
+		return typeFullName, typeFullName + "::" + row.Name, int(sig.ParamCount), sigParamTypeNames(md, sig), nil
 
 	default:
-		return "", "", 0, fmt.Errorf("unsupported newobj target table %#x", byte(t.Table()))
+		return "", "", 0, nil, fmt.Errorf("unsupported newobj target table %#x", byte(t.Table()))
 	}
 }
 

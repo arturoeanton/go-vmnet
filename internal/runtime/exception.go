@@ -9,11 +9,24 @@ import "fmt"
 type ManagedException struct {
 	TypeName string
 	Message  string
+	// Inner is the real Exception object passed to a
+	// `new SomeException(message, innerException)`-shaped constructor
+	// (real .NET's Exception.InnerException) — nil when none was given.
+	// Kept as the original *Object (not just its ManagedException) so
+	// `.InnerException` returns something every other Exception member
+	// (Message, GetType, ToString, ...) still works against transparently.
+	Inner *Object
 }
 
 func (e *ManagedException) Error() string {
-	if e.Message == "" {
-		return e.TypeName
+	msg := e.TypeName
+	if e.Message != "" {
+		msg = fmt.Sprintf("%s: %s", e.TypeName, e.Message)
 	}
-	return fmt.Sprintf("%s: %s", e.TypeName, e.Message)
+	if e.Inner != nil {
+		if inner, ok := e.Inner.Native.(*ManagedException); ok {
+			msg += " ---> " + inner.Error()
+		}
+	}
+	return msg
 }

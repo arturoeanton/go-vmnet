@@ -33,6 +33,19 @@ func init() {
 	register("System.StringComparer::Equals", true, stringComparerEquals)
 	register("System.StringComparer::Compare", true, stringComparerCompare)
 	register("System.StringComparer::GetHashCode", true, stringComparerGetHashCode)
+	register("System.StringComparer::Create", true, stringComparerCreate)
+}
+
+// stringComparerCreate backs the static StringComparer.Create(CultureInfo,
+// bool ignoreCase) factory — the culture argument is ignored (no culture
+// support anywhere in vmnet, same simplification every comparer property
+// above already makes); only ignoreCase is honored.
+func stringComparerCreate(args []runtime.Value) (runtime.Value, error) {
+	ignoreCase := len(args) > 0 && args[len(args)-1].Kind == runtime.KindI4 && args[len(args)-1].I4 != 0
+	if ignoreCase {
+		return stringComparerOrdinalIgnoreCase(nil)
+	}
+	return stringComparerOrdinal(nil)
 }
 
 func stringComparerOrdinal(args []runtime.Value) (runtime.Value, error) {

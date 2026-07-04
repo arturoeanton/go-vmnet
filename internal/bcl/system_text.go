@@ -35,6 +35,8 @@ func init() {
 	register("System.Text.Encoding::GetEncoding", true, encodingGetEncodingByName)
 	register("System.Text.Encoding::GetString", true, encodingGetString)
 	register("System.Text.Encoding::GetBytes", true, encodingGetBytes)
+	register("System.Text.Encoding::GetByteCount", true, encodingGetByteCount)
+	register("System.Text.Encoding::GetMaxByteCount", true, encodingGetMaxByteCount)
 	// RegisterProvider(CodePagesEncodingProvider.Instance) is a real,
 	// common NPOI/StringUtil startup call (registering support for
 	// legacy codepages like windows-1252/big5 beyond .NET Core's
@@ -45,6 +47,32 @@ func init() {
 	register("System.Text.Encoding::RegisterProvider", false, encodingNoopArg)
 	registerStaticFieldHost(codePagesProviderStaticsType)
 	register("System.Text.CodePagesEncodingProvider::get_Instance", true, encodingGetUTF8)
+
+	// The concrete Encoding subclasses (System.Text.UTF8Encoding/
+	// ASCIIEncoding/UnicodeEncoding) are directly `newobj`-constructible,
+	// not just reachable via Encoding.UTF8/.ASCII/.Unicode's static
+	// getters (Fase 3.40, found via a real, load-bearing case:
+	// ClosedXML's own XLHelper..cctor does `new UTF8Encoding(...)`
+	// directly). Registered under their own concrete names too (not just
+	// the base Encoding::* names) so a call site whose declared local
+	// variable type is the concrete class still resolves — same
+	// "register under both the concrete and base name" precedent
+	// MemoryStream/Stream already established.
+	registerCtor("System.Text.UTF8Encoding", func([]runtime.Value) (*runtime.Object, error) {
+		return &runtime.Object{}, nil
+	})
+	registerCtor("System.Text.ASCIIEncoding", func([]runtime.Value) (*runtime.Object, error) {
+		return &runtime.Object{}, nil
+	})
+	registerCtor("System.Text.UnicodeEncoding", func(args []runtime.Value) (*runtime.Object, error) {
+		bigEndian := len(args) > 0 && args[0].Kind == runtime.KindI4 && args[0].I4 != 0
+		return &runtime.Object{Native: &nativeEncoding{utf16BigEndian: bigEndian}}, nil
+	})
+	for _, prefix := range []string{"System.Text.UTF8Encoding", "System.Text.ASCIIEncoding", "System.Text.UnicodeEncoding"} {
+		register(prefix+"::GetString", true, encodingGetString)
+		register(prefix+"::GetBytes", true, encodingGetBytes)
+		register(prefix+"::GetByteCount", true, encodingGetByteCount)
+	}
 }
 
 func encodingNoopArg(args []runtime.Value) (runtime.Value, error) {
@@ -120,7 +148,16 @@ func encodingAsUTF16(receiver runtime.Value) (bigEndian, ok bool) {
 // rejecting the far more common real-array case — found opening a real
 // NPOI workbook, whose own internal string decoding calls
 // Encoding.GetString/GetBytes against genuine interpreted byte[] locals.
+// byteArrayArgToBytes accepts either a real byte[] (KindArray/KindBytes)
+// or a Span<byte>/ReadOnlySpan<byte> struct (Fase 3.41, found via a real,
+// load-bearing case: System.Text.Json's own JsonElement.GetString calls
+// the real Encoding.UTF8.GetString(ReadOnlySpan<byte>) overload, not the
+// plain-array one) — the span case reads exactly its own (backing,
+// start, length) window, not the whole backing array.
 func byteArrayArgToBytes(v runtime.Value) ([]byte, bool) {
+	if v.Kind == runtime.KindRef && v.Ref != nil {
+		v = *v.Ref
+	}
 	switch v.Kind {
 	case runtime.KindBytes:
 		return v.Bytes, true
@@ -131,6 +168,20 @@ func byteArrayArgToBytes(v runtime.Value) ([]byte, bool) {
 		out := make([]byte, len(v.Arr.Elems))
 		for i, e := range v.Arr.Elems {
 			out[i] = byte(e.I4)
+		}
+		return out, true
+	case runtime.KindStruct:
+		backing, start, length, ok := SpanBacking(v)
+		if !ok || backing.Kind != runtime.KindArray || backing.Arr == nil {
+			return nil, false
+		}
+		elems := backing.Arr.Elems
+		if start+length > len(elems) {
+			return nil, false
+		}
+		out := make([]byte, length)
+		for i := 0; i < length; i++ {
+			out[i] = byte(elems[start+i].I4)
 		}
 		return out, true
 	default:
@@ -195,6 +246,16 @@ func encodeUTF16(s string, bigEndian bool) []byte {
 }
 
 func encodingGetBytes(args []runtime.Value) (runtime.Value, error) {
+	// Encoding.GetBytes(ReadOnlySpan<char>, Span<byte>) -> int and its
+	// netstandard2.0 pointer-taking twin GetBytes(char*, int, byte*, int)
+	// -> int (Fase 3.41) both collapse into this same native, same
+	// "overload-name-collapse" convention as every other multi-overload
+	// native in this file (Fase 3.12) — their 3-arg (this, chars, bytes)
+	// and 5-arg (this, chars, charCount, bytes, byteCount) shapes are
+	// both unambiguous against the (this, string) shape below.
+	if len(args) == 3 || len(args) == 5 {
+		return encodingGetBytesSpan(args)
+	}
 	if len(args) != 2 || args[1].Kind != runtime.KindString {
 		return runtime.Value{}, fmt.Errorf("bcl: Encoding.GetBytes expects a string argument")
 	}
@@ -212,4 +273,137 @@ func encodingGetBytes(args []runtime.Value) (runtime.Value, error) {
 		elems[i] = runtime.Int32(int32(b))
 	}
 	return runtime.ArrRef(&runtime.Array{Elems: elems}), nil
+}
+
+// spanStructArg unwraps a Span<T>/ReadOnlySpan<T> argument to its backing
+// Struct, however it arrives: a plain by-value KindStruct (the ordinary
+// ReadOnlySpan<char>/Span<byte>-typed parameter shape), a KindRef to one
+// (an actual `ref`/`in` parameter), OR a KindRef produced by
+// spanGetPinnableReference (system_span.go) — which, per its own doc
+// comment, hands back a ref to a freshly reboxed copy of the same span
+// struct as vmnet's stand-in for a real `fixed (T* p = span)` pointer.
+// Both KindRef shapes collapse to the same deref here, so callers below
+// don't need to know which one they got.
+func spanStructArg(v runtime.Value) (*runtime.Struct, bool) {
+	if v.Kind == runtime.KindRef && v.Ref != nil {
+		v = *v.Ref
+	}
+	if v.Kind != runtime.KindStruct || v.Struct == nil {
+		return nil, false
+	}
+	return v.Struct, true
+}
+
+// spanCharArg extracts a ReadOnlySpan<char>/Span<char> argument's actual
+// character content (Fase 3.41) — shared by the Encoding.GetByteCount/
+// GetBytes natives below. Needed for a real, load-bearing case: System.
+// Text.Json 8.0.5's netstandard2.0 build (the TFM vmnet's own nuget.go
+// actually selects, favoring netstandard2.0 over net8.0) has
+// JsonReaderHelper.GetUtf8ByteCount/GetUtf8FromText (JsonDocument.Parse
+// (string, JsonDocumentOptions)'s real transcoding step) do `fixed (char*
+// chars = text) { return s_utf8Encoding.GetByteCount(chars, text.Length);
+// }` — real Encoding pointer-taking overloads with no IL vmnet has
+// loaded anywhere (no real System.Private.CoreLib assembly), and no
+// native registered here at all before this Fase, unlike the plain
+// (string)-shaped GetBytes/GetString above. Before spanGetPinnableReference
+// (system_span.go) existed, the `fixed` pattern's own pointer conversion
+// failed outright ("cannot convert value kind 9 (KindRef) to integer",
+// arithmetic.go's evalConv) — now the "pointer" arriving here is a
+// KindRef to a reboxed span struct (spanStructArg unwraps either that or
+// a plain by-value span, so the same native serves BOTH the pointer-
+// taking overloads AND the plain ReadOnlySpan<char>-taking ones a
+// different TFM build might call instead).
+func spanCharArg(v runtime.Value) (string, bool) {
+	s, ok := spanStructArg(v)
+	if !ok {
+		return "", false
+	}
+	return spanToStringValue(s)
+}
+
+// encodingGetByteCount backs Encoding.GetByteCount for BOTH real
+// overloads that reach it (Fase 3.41): the plain ReadOnlySpan<char>-
+// taking one (args = this, span — 2 total) and netstandard2.0's pointer-
+// taking one (args = this, chars-pointer, charCount — 3 total, the extra
+// int simply not needed since spanCharArg already reads the exact
+// pinned span's own bounded content). See spanCharArg's doc comment for
+// which real call site needs which shape.
+// encodingGetMaxByteCount backs Encoding.GetMaxByteCount(int charCount) —
+// real UTF8Encoding's own worst-case formula ((charCount+1)*3, the "+1"
+// covering a possible trailing incomplete surrogate needing a
+// replacement character) — found via a real, load-bearing case (Fase
+// 3.41): System.Text.Json's own JsonDocument.TryGetNamedPropertyValue
+// sizes a stackalloc scratch buffer from this before transcoding a
+// property name for comparison.
+func encodingGetMaxByteCount(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 2 || args[1].Kind != runtime.KindI4 {
+		return runtime.Value{}, fmt.Errorf("bcl: Encoding.GetMaxByteCount expects an int charCount")
+	}
+	return runtime.Int32((args[1].I4 + 1) * 3), nil
+}
+
+func encodingGetByteCount(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 2 {
+		return runtime.Value{}, fmt.Errorf("bcl: Encoding.GetByteCount expects a ReadOnlySpan<char> argument")
+	}
+	text, ok := spanCharArg(args[1])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: Encoding.GetByteCount expects a ReadOnlySpan<char> argument")
+	}
+	if bigEndian, ok := encodingAsUTF16(args[0]); ok {
+		return runtime.Int32(int32(len(encodeUTF16(text, bigEndian)))), nil
+	}
+	// vmnet stores every managed string as a Go string, which is always
+	// already UTF-8 — its own byte length IS the real UTF-8 encoding's
+	// byte count, no actual transcoding needed.
+	return runtime.Int32(int32(len(text))), nil
+}
+
+// encodingGetBytesSpan backs Encoding.GetBytes for BOTH real overloads
+// that reach it (Fase 3.41, see spanCharArg's doc comment): the plain
+// (ReadOnlySpan<char>, Span<byte>) one (args = this, chars, dest — 3
+// total) and netstandard2.0's pointer-taking one (args = this, chars-
+// pointer, charCount, bytes-pointer, byteCount — 5 total). Either way,
+// writes the UTF-8 (or UTF-16, for a real Encoding.Unicode/
+// BigEndianUnicode receiver) encoding of the source into destination's
+// own backing array and returns the number of bytes written, real
+// semantics (ArgumentException when destination is too short) included.
+func encodingGetBytesSpan(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 3 && len(args) != 5 {
+		return runtime.Value{}, fmt.Errorf("bcl: Encoding.GetBytes: unsupported argument count %d", len(args))
+	}
+	text, ok := spanCharArg(args[1])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: Encoding.GetBytes: first argument isn't a char span")
+	}
+	// destArg is args[2] for the (ReadOnlySpan<char>, Span<byte>) shape,
+	// args[3] for the (char*, int, byte*, int) pointer shape — the extra
+	// int in between (charCount) isn't needed, same reasoning as
+	// encodingGetByteCount above.
+	destArg := args[2]
+	if len(args) == 5 {
+		destArg = args[3]
+	}
+	destStruct, ok := spanStructArg(destArg)
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: Encoding.GetBytes: destination argument isn't a byte span")
+	}
+	var encoded []byte
+	if bigEndian, ok := encodingAsUTF16(args[0]); ok {
+		encoded = encodeUTF16(text, bigEndian)
+	} else {
+		encoded = []byte(text)
+	}
+	backing := destStruct.Fields[0]
+	if backing.Kind != runtime.KindArray || backing.Arr == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: Encoding.GetBytes: destination span has no backing array")
+	}
+	start, length := int(destStruct.Fields[1].I4), int(destStruct.Fields[2].I4)
+	if len(encoded) > length {
+		return runtime.Value{}, &runtime.ManagedException{TypeName: "System.ArgumentException", Message: "Destination is too short."}
+	}
+	for i, b := range encoded {
+		backing.Arr.Elems[start+i] = runtime.Int32(int32(b))
+	}
+	return runtime.Int32(int32(len(encoded))), nil
 }

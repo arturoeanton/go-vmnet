@@ -24,6 +24,17 @@ func init() {
 		"System.NotImplementedException",
 		"System.IO.IOException",
 		"System.IO.EndOfStreamException",
+		// DocumentFormat.OpenXml.Framework's own OpenXmlPartRootElement.
+		// LoadFromPart(part, stream) (Fase 3.41, found reading a real
+		// .xlsx: /tmp/openxmlfw_ns20/DocumentFormat.OpenXml/
+		// OpenXmlPartRootElement.cs:109-157) throws this both directly
+		// (an unexpected root element name) and via a catch/rethrow
+		// wrapper in OpenXmlPart.LoadDomTree<T> (loaddomtree.go's own doc
+		// comment) — without it, even a real, well-formed .xlsx failed
+		// with an unrelated "type System.IO.InvalidDataException not
+		// found" the moment any part's root-element validation path ran
+		// at all, real error or not.
+		"System.IO.InvalidDataException",
 	} {
 		registerCtor(name, newExceptionCtor(name))
 		// A plugin's own exception subclass (`class MyException :
@@ -39,6 +50,24 @@ func init() {
 		register(name+"::.ctor", false, baseExceptionCtorInPlace(name))
 	}
 	register("System.Exception::get_Message", true, exceptionGetMessage)
+	register("System.Exception::get_InnerException", true, exceptionGetInnerException)
+}
+
+// innerExceptionArg finds a real Exception argument among ctorArgs (the
+// `(string message, Exception innerException)` overload's 2nd parameter)
+// — every real BCL/plugin exception is an Object whose Native is a
+// *runtime.ManagedException, so that's what identifies one here rather
+// than trusting a fixed argument position (some exception types have
+// (message, paramName) with a second *string*, not an inner exception).
+func innerExceptionArg(args []runtime.Value) *runtime.Object {
+	for _, a := range args {
+		if a.Kind == runtime.KindObject && a.Obj != nil {
+			if _, ok := a.Obj.Native.(*runtime.ManagedException); ok {
+				return a.Obj
+			}
+		}
+	}
+	return nil
 }
 
 func newExceptionCtor(typeName string) NativeCtor {
@@ -47,7 +76,7 @@ func newExceptionCtor(typeName string) NativeCtor {
 		if len(args) > 0 && args[0].Kind == runtime.KindString {
 			msg = args[0].Str
 		}
-		return &runtime.Object{Native: &runtime.ManagedException{TypeName: typeName, Message: msg}}, nil
+		return &runtime.Object{Native: &runtime.ManagedException{TypeName: typeName, Message: msg, Inner: innerExceptionArg(args)}}, nil
 	}
 }
 
@@ -89,7 +118,7 @@ func baseExceptionCtorInPlace(typeName string) Native {
 				name = t.Name
 			}
 		}
-		args[0].Obj.Native = &runtime.ManagedException{TypeName: name, Message: msg}
+		args[0].Obj.Native = &runtime.ManagedException{TypeName: name, Message: msg, Inner: innerExceptionArg(args[1:])}
 		return runtime.Value{}, nil
 	}
 }
@@ -103,4 +132,18 @@ func exceptionGetMessage(args []runtime.Value) (runtime.Value, error) {
 		return runtime.Value{}, fmt.Errorf("bcl: receiver is not an Exception")
 	}
 	return runtime.String(ex.Message), nil
+}
+
+func exceptionGetInnerException(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 1 || args[0].Kind != runtime.KindObject || args[0].Obj == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Exception.get_InnerException expects a receiver")
+	}
+	ex, ok := args[0].Obj.Native.(*runtime.ManagedException)
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: receiver is not an Exception")
+	}
+	if ex.Inner == nil {
+		return runtime.Null(), nil
+	}
+	return runtime.ObjRef(ex.Inner), nil
 }

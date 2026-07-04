@@ -90,6 +90,19 @@ func newMemoryStreamCtor(args []runtime.Value) (*runtime.Object, error) {
 	return &runtime.Object{Native: newMemoryStreamBuf(args)}, nil
 }
 
+// NewMemoryStreamValue wraps data as a real MemoryStream-shaped value —
+// the same native backing `new MemoryStream(bytes)` produces, so the
+// result is a valid source for any other MemoryStream/Stream method
+// (Read/Seek/CopyTo/...). Used by Assembly.GetManifestResourceStream
+// (Fase 3.40, internal/interpreter/reflection.go), which needs to hand
+// back a real stream without importing bcl's own unexported
+// nativeMemoryStream type.
+func NewMemoryStreamValue(data []byte) runtime.Value {
+	buf := make([]byte, len(data))
+	copy(buf, data)
+	return runtime.ObjRef(&runtime.Object{Native: &nativeMemoryStream{buf: buf}})
+}
+
 // memoryStreamCtorInPlace backs "System.IO.MemoryStream::.ctor" as a
 // plain (non-newobj) call — the shape a derived package class's
 // constructor uses to chain to its base via `: base()`/`: base(bytes)`.
@@ -109,22 +122,21 @@ func streamCtorNoop(args []runtime.Value) (runtime.Value, error) {
 	return runtime.Value{}, nil
 }
 
+// asMemoryStream resolves a Stream-typed receiver to the nativeMemoryStream
+// backing it — walking through any real managed wrapper Stream first (see
+// valueAsMemoryStream's own doc comment). This matters even for plain
+// Stream method calls (Read/Write/Seek/Close/...), not just ZipArchive's
+// constructor: a real wrapper like System.IO.Packaging.ZipWrappingStream
+// overrides most Stream members to forward to its own inner stream, but
+// leaves a few (Close/Dispose/ReadByte/WriteByte/CopyTo) unoverridden —
+// those calls fall through vmnet's virtual dispatch to this native
+// System.IO.Stream fallback with the WRAPPER itself as the receiver, not
+// its inner stream (Fase 3.40).
 func asMemoryStream(args []runtime.Value) (*nativeMemoryStream, error) {
 	if len(args) == 0 {
 		return nil, fmt.Errorf("bcl: Stream method called without a receiver")
 	}
-	v := args[0]
-	if v.Kind == runtime.KindRef && v.Ref != nil {
-		v = *v.Ref
-	}
-	if v.Kind != runtime.KindObject || v.Obj == nil {
-		return nil, fmt.Errorf("bcl: Stream method called without a receiver")
-	}
-	ms, ok := v.Obj.Native.(*nativeMemoryStream)
-	if !ok {
-		return nil, fmt.Errorf("bcl: receiver is not a vmnet-native Stream (only System.IO.MemoryStream and its subclasses are supported)")
-	}
-	return ms, nil
+	return valueAsMemoryStream(args[0])
 }
 
 func arrayToBytes(v runtime.Value) ([]byte, error) {

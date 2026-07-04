@@ -12,13 +12,14 @@ import (
 // ResolveType supplies field layouts for anything that isn't a BCL native
 // (bcl.Lookup / bcl.LookupCtor).
 type Machine struct {
-	Resolve             Resolver
-	ResolveType         TypeResolver
-	ResolveExplicitImpl ExplicitImplResolver
-	ResolveEnum         EnumResolver
-	ResolveFieldBytes   FieldBytesResolver
-	ResolveMember       MemberResolver
-	Limits              Limits
+	Resolve                 Resolver
+	ResolveType             TypeResolver
+	ResolveExplicitImpl     ExplicitImplResolver
+	ResolveEnum             EnumResolver
+	ResolveFieldBytes       FieldBytesResolver
+	ResolveMember           MemberResolver
+	ResolveManifestResource ManifestResourceResolver
+	Limits                  Limits
 
 	// cctorsRunning tracks static constructors currently executing on
 	// this Machine's own call chain (a Machine is never shared across
@@ -74,6 +75,14 @@ func (m *Machine) WithMemberResolver(r MemberResolver) *Machine {
 	return m
 }
 
+// WithManifestResourceResolver attaches a ManifestResourceResolver (Fase
+// 3.40, Assembly.GetManifestResourceStream) — same rationale as
+// WithFieldBytesResolver/WithMemberResolver.
+func (m *Machine) WithManifestResourceResolver(r ManifestResourceResolver) *Machine {
+	m.ResolveManifestResource = r
+	return m
+}
+
 // Invoke runs method with args and returns its result (the zero Value if
 // method is void).
 //
@@ -125,7 +134,7 @@ func (m *Machine) CallInstance(fullName string, args []runtime.Value) (result ru
 		}
 	}()
 	instrCount := new(int64)
-	result, hasReturn, err = m.call(fullName, args, true, 0, instrCount)
+	result, hasReturn, err = m.call(fullName, args, true, 0, instrCount, nil, nil)
 	return
 }
 
@@ -154,6 +163,7 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 		prevResolveExplicitImpl, prevResolveEnum := m.ResolveExplicitImpl, m.ResolveEnum
 		prevResolveFieldBytes := m.ResolveFieldBytes
 		prevResolveMember := m.ResolveMember
+		prevResolveManifestResource := m.ResolveManifestResource
 		if method.Resolvers.Resolve != nil {
 			m.Resolve = method.Resolvers.Resolve
 		}
@@ -172,11 +182,15 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 		if method.Resolvers.ResolveMember != nil {
 			m.ResolveMember = method.Resolvers.ResolveMember
 		}
+		if method.Resolvers.ResolveManifestResource != nil {
+			m.ResolveManifestResource = method.Resolvers.ResolveManifestResource
+		}
 		defer func() {
 			m.Resolve, m.ResolveType = prevResolve, prevResolveType
 			m.ResolveExplicitImpl, m.ResolveEnum = prevResolveExplicitImpl, prevResolveEnum
 			m.ResolveFieldBytes = prevResolveFieldBytes
 			m.ResolveMember = prevResolveMember
+			m.ResolveManifestResource = prevResolveManifestResource
 		}()
 	}
 
@@ -243,6 +257,24 @@ func (m *Machine) runFrame(frame *Frame, method *runtime.Method, depth int, inst
 
 		case ir.Pop:
 			frame.pop()
+
+		case ir.LocalAlloc:
+			// See ir.LocalAlloc's own doc comment: a real runtime.Array
+			// of zeroed "bytes" (KindI4 0..255 per element, matching the
+			// byte[] convention internal/bcl/system_unsafe.go and
+			// memorymarshal.go both already rely on), addressed the same
+			// way an RVA-backed static array's managed pointer already is.
+			size := frame.pop()
+			n := int(size.I4)
+			if n < 0 {
+				n = 0
+			}
+			arr := runtime.NewArray(n)
+			for i := range arr.Elems {
+				arr.Elems[i] = runtime.Int32(0)
+			}
+			boxed := runtime.ArrRef(arr)
+			frame.push(runtime.RefTo(&boxed))
 
 		case ir.LoadArg:
 			if in.Index < 0 || in.Index >= len(frame.Args) {
@@ -387,7 +419,7 @@ func (m *Machine) runFrame(frame *Frame, method *runtime.Method, depth int, inst
 			if in.HasThis && callArgs[0].Kind == runtime.KindFunc {
 				result, hasReturn, err = m.invokeFunc(callArgs[0].Func, callArgs[1:], depth, instrCount)
 			} else {
-				result, hasReturn, err = m.call(in.FullName, callArgs, in.Virtual, depth, instrCount)
+				result, hasReturn, err = m.call(in.FullName, callArgs, in.Virtual, depth, instrCount, in.ParamTypeNames, in.MethodGenericArgs)
 			}
 			if err != nil {
 				return runtime.Value{}, err
@@ -425,7 +457,7 @@ func (m *Machine) runFrame(frame *Frame, method *runtime.Method, depth int, inst
 			ctorArgs := append([]runtime.Value(nil), frame.Stack[len(frame.Stack)-in.ArgCount:]...)
 			frame.Stack = frame.Stack[:len(frame.Stack)-in.ArgCount]
 
-			v, err := m.newObj(newObjArgs{TypeFullName: in.TypeFullName, CtorFullName: in.CtorFullName, Args: ctorArgs}, depth, instrCount)
+			v, err := m.newObj(newObjArgs{TypeFullName: in.TypeFullName, CtorFullName: in.CtorFullName, Args: ctorArgs, ParamTypeNames: in.ParamTypeNames}, depth, instrCount)
 			if err != nil {
 				return runtime.Value{}, err
 			}
@@ -433,7 +465,7 @@ func (m *Machine) runFrame(frame *Frame, method *runtime.Method, depth int, inst
 
 		case ir.LoadField:
 			obj := frame.pop()
-			slot, err := fieldSlot(obj, in.TypeFullName, in.FieldName)
+			slot, err := m.fieldSlot(obj, in.TypeFullName, in.FieldName)
 			if err != nil {
 				return runtime.Value{}, err
 			}
@@ -442,7 +474,7 @@ func (m *Machine) runFrame(frame *Frame, method *runtime.Method, depth int, inst
 		case ir.StoreField:
 			val := frame.pop()
 			obj := frame.pop()
-			slot, err := fieldSlot(obj, in.TypeFullName, in.FieldName)
+			slot, err := m.fieldSlot(obj, in.TypeFullName, in.FieldName)
 			if err != nil {
 				return runtime.Value{}, err
 			}
@@ -450,7 +482,7 @@ func (m *Machine) runFrame(frame *Frame, method *runtime.Method, depth int, inst
 
 		case ir.LoadFieldAddr:
 			obj := frame.pop()
-			slot, err := fieldSlot(obj, in.TypeFullName, in.FieldName)
+			slot, err := m.fieldSlot(obj, in.TypeFullName, in.FieldName)
 			if err != nil {
 				return runtime.Value{}, err
 			}
@@ -610,9 +642,19 @@ func (m *Machine) runFrame(frame *Frame, method *runtime.Method, depth int, inst
 			if in.Virtual {
 				frame.pop() // ldvirtftn's receiver — see ir.LoadFtn's doc comment
 			}
-			frame.push(runtime.FuncVal(&runtime.Func{FullName: in.FullName}))
+			frame.push(runtime.FuncVal(&runtime.Func{FullName: in.FullName, Virtual: in.Virtual}))
 
 		case ir.LoadTypeToken:
+			// IsMethodGenericParam (Fase 3.40): typeof(T) on the enclosing
+			// method's own generic parameter, which this interpreted path
+			// has no way to resolve (the same IR runs for every different
+			// call site's instantiation — see ir.Call.MethodGenericArgs's
+			// own doc comment). Pushing an empty-name Type here is the
+			// same "" degenerate behavior this already fell back to
+			// before MethodGenericArgs existed at all; the real fix for
+			// specific, load-bearing cases (FeatureCollectionBase.Get<T>)
+			// is genericMachineRegistry (calls.go), which intercepts the
+			// call before its body ever reaches this ldtoken.
 			frame.push(bcl.NewTypeValue(in.TypeFullName))
 
 		case ir.LoadFieldToken:
@@ -621,6 +663,16 @@ func (m *Machine) runFrame(frame *Frame, method *runtime.Method, depth int, inst
 			// InitializeArray (the only real consumer) needs to look the
 			// field back up via Machine.ResolveFieldBytes.
 			frame.push(runtime.String(in.TypeFullName + "::" + in.FieldName))
+
+		case ir.LoadMethodToken:
+			// Same identity shortcut LoadTypeToken takes for typeof(T)/
+			// Type.GetTypeFromHandle: push the real System.Reflection.
+			// MethodInfo value directly rather than modeling a
+			// RuntimeMethodHandle as its own distinct thing —
+			// MethodBase.GetMethodFromHandle (the only real consumer,
+			// see LoadMethodToken's own doc comment) is just an identity
+			// passthrough over it.
+			frame.push(bcl.NewMethodInfoValue(in.TypeFullName, in.MethodName))
 
 		case ir.Leave:
 			if finallys := handlersLeaving(method, frame.IP, in.Target); len(finallys) > 0 {
@@ -682,8 +734,64 @@ func fieldIndex(obj *runtime.Object, name string) int {
 // local's address has already been taken earlier in the same
 // expression. Spec §III.4.10/4.28: ldfld/stfld accept all three shapes
 // uniformly.
-func fieldSlot(receiver runtime.Value, typeFullName, fieldName string) (*runtime.Value, error) {
+func (m *Machine) fieldSlot(receiver runtime.Value, typeFullName, fieldName string) (*runtime.Value, error) {
 	switch receiver.Kind {
+	case runtime.KindArray:
+		// The classic "array reinterpreted as Pinnable<T>" idiom
+		// (`Unsafe.As<Pinnable<T>>(array).Data`, System.Memory's own
+		// SpanHelpers.PerTypeValues<T>.MeasureArrayAdjustment) — a real,
+		// deliberate unsafe memory-layout trick treating an array's own
+		// object reference as if it pointed at a `class Pinnable<T> {
+		// public T Data; }`, exploiting the CLR's real object layout to
+		// get a byref to element 0 without `fixed`. vmnet's Unsafe.As
+		// native (internal/bcl) is an identity passthrough — the array
+		// value itself never actually changes shape — so by the time
+		// `.Data` reaches here the receiver is still a genuine KindArray.
+		// There's no real memory model to reinterpret through in
+		// general, but this ONE specific, extremely common idiom maps
+		// exactly onto "the array's own first element": Data always
+		// means Elems[0] for a Pinnable<T> reinterpretation, by
+		// construction of the trick itself.
+		if receiver.Arr == nil {
+			return nil, &runtime.ManagedException{
+				TypeName: "System.NullReferenceException",
+				Message:  fmt.Sprintf("Object reference not set to an instance of an object (%s.%s)", typeFullName, fieldName),
+			}
+		}
+		if bcl.GenericOpenName(typeFullName) != "System.Pinnable`1" || fieldName != "Data" {
+			return nil, fmt.Errorf("interpreter: %s has no field %q (array received where an object was expected)", typeFullName, fieldName)
+		}
+		if len(receiver.Arr.Elems) == 0 {
+			// A real empty (non-null) array still needs a valid, addressable
+			// slot for this trick's "byref to element 0" — real code reaching
+			// here (MemoryMarshal.GetReference, SpanHelpers's own
+			// MeasureArrayAdjustment probe array, ...) always treats the
+			// result as a base pointer for arithmetic a 0-length caller never
+			// actually dereferences, never a real read. A throwaway zero
+			// value is the same convention spanGetItem already uses for a Go
+			// string's own non-addressable runes.
+			placeholder := runtime.Value{}
+			return &placeholder, nil
+		}
+		return &receiver.Arr.Elems[0], nil
+	case runtime.KindString:
+		// The same Pinnable<T>.Data trick (see the KindArray case's doc
+		// comment) applied to a string-backed ReadOnlySpan<char> — real
+		// CLR strings are just as "pinnable" as an array, and
+		// MemoryMarshal.GetReference on a string-backed span goes through
+		// this exact idiom. A fresh boxed rune is fine here for the same
+		// reason spanGetItem's own KindString branch already boxes one:
+		// this result is a transient byref immediately deref'd or used as
+		// a bounded-arithmetic base, never retained.
+		if bcl.GenericOpenName(typeFullName) != "System.Pinnable`1" || fieldName != "Data" {
+			return nil, fmt.Errorf("interpreter: %s has no field %q (string received where an object was expected)", typeFullName, fieldName)
+		}
+		runes := []rune(receiver.Str)
+		var v runtime.Value
+		if len(runes) > 0 {
+			v = runtime.Int32(runes[0])
+		}
+		return &v, nil
 	case runtime.KindObject:
 		if receiver.Obj == nil {
 			return nil, &runtime.ManagedException{
@@ -697,6 +805,48 @@ func fieldSlot(receiver runtime.Value, typeFullName, fieldName string) (*runtime
 		}
 		return &receiver.Obj.Fields[idx], nil
 	case runtime.KindRef:
+		if receiver.Ref != nil && receiver.Ref.Kind == runtime.KindNull {
+			// A managed pointer to a Null slot that this field access
+			// declares to be a value type (Fase 3.43): the one real way
+			// this arises is a `static T field;`/`T local;` whose declared
+			// type is a still-open generic parameter at IR-build time, so
+			// its default(T) seeded Null() instead of a zeroed struct
+			// (assembly.go's fieldOrLocalDefault has no T to resolve — the
+			// same shared-statics-per-generic-class limitation
+			// attribute_metadata.go documents). Found via a real,
+			// load-bearing case reading a real .xlsx through ClosedXML
+			// 0.105.0: Slice<TElement>.Lut<T>'s own `private static
+			// readonly T DefaultValue;` (decompiled ClosedXML.Excel/
+			// Slice.cs:356) is handed out BY REFERENCE (`return ref
+			// DefaultValue`, Slice.cs:378-390) for every unused cell slot,
+			// and ValueSlice.GetCellValue immediately reads `.Type`/`.Value`
+			// through that ref (ValueSlice.cs:111-113). The declared
+			// typeFullName at THIS access is the real closed value type
+			// (XLValueSliceContent), so a zeroed struct of it — exactly the
+			// default(T) the real CLR would have materialized eagerly — is
+			// substituted as the read target. A fresh TRANSIENT struct,
+			// deliberately NOT written back through the ref: the slot it
+			// points at is the one static shared across every closed
+			// instantiation of the generic class (the same limitation
+			// above), and a different instantiation may legitimately need
+			// that same slot to stay a null CLASS reference (Slice's own
+			// outer Lut<Lut<TElement>> reads DefaultValue as a nullable
+			// Lut<TElement> and null-checks it, Slice.cs:539) — writing a
+			// struct into it corrupts those readers, found the hard way on
+			// the first version of this fix. Reads through the transient
+			// see all-zero fields (the correct answer); real code never
+			// writes through this `ref readonly` handout. Non-value-type
+			// declared names stay on the NRE path below (defaultValueFor
+			// returns Null() for them).
+			if def := m.defaultValueFor(typeFullName); def.Kind == runtime.KindStruct {
+				receiver = def
+				idx := receiver.Struct.Type.FieldIndex(fieldName)
+				if idx < 0 {
+					return nil, fmt.Errorf("interpreter: %s has no field %q", typeFullName, fieldName)
+				}
+				return &receiver.Struct.Fields[idx], nil
+			}
+		}
 		if receiver.Ref == nil || receiver.Ref.Kind != runtime.KindStruct || receiver.Ref.Struct == nil {
 			return nil, &runtime.ManagedException{
 				TypeName: "System.NullReferenceException",

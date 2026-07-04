@@ -34,6 +34,12 @@ func init() {
 	register("System.String::ToCharArray", true, stringToCharArray)
 	register("System.String::Replace", true, stringReplace)
 	register("System.String::Trim", true, stringTrim)
+	register("System.String::TrimStart", true, stringTrimStart)
+	register("System.String::TrimEnd", true, stringTrimEnd)
+	register("System.String::PadLeft", true, stringPadLeft)
+	register("System.String::PadRight", true, stringPadRight)
+	register("System.String::Insert", true, stringInsert)
+	register("System.String::Remove", true, stringRemove)
 	register("System.String::Contains", true, stringContains)
 	register("System.String::EndsWith", true, stringEndsWith)
 	register("System.String::ToUpper", true, stringToUpper)
@@ -42,6 +48,7 @@ func init() {
 	register("System.String::ToLowerInvariant", true, stringToLower)
 	register("System.String::Compare", true, stringCompare)
 	register("System.String::CompareTo", true, stringCompare)
+	register("System.String::CompareOrdinal", true, stringCompare)
 }
 
 // stringToUpper backs both ToUpper() and ToUpperInvariant() — vmnet has
@@ -153,8 +160,15 @@ func stringJoin(args []runtime.Value) (runtime.Value, error) {
 		case values[0].Kind == runtime.KindArray:
 			values = values[0].Arr.Elems
 		case values[0].Kind == runtime.KindObject && values[0].Obj != nil:
-			if l, ok := values[0].Obj.Native.(*nativeList); ok {
-				values = l.items
+			// NativeListItems (not a direct *nativeList assertion) so this
+			// also covers a LINQ OrderBy/ThenBy result (bcl.NativeOrdered)
+			// passed straight to Join without an intervening ToList() —
+			// found via a real, hand-written probe:
+			// `string.Join(",", xs.OrderBy(...))` silently printed the
+			// receiver's own placeholder ToString() instead of its sorted
+			// elements before this widened to the shared helper (Fase 3.44).
+			if items, ok := NativeListItems(values[0].Obj.Native); ok {
+				values = items
 			}
 		}
 	}
@@ -464,6 +478,120 @@ func stringTrim(args []runtime.Value) (runtime.Value, error) {
 	return runtime.String(strings.TrimSpace(args[0].Str)), nil
 }
 
+// trimCutset reads TrimStart/TrimEnd's own optional `params char[]`
+// argument — empty (whitespace, matching real TrimStart()/TrimEnd()'s
+// no-arg overload) when absent.
+func trimCutset(args []runtime.Value) string {
+	if len(args) >= 2 && args[1].Kind == runtime.KindArray && args[1].Arr != nil && len(args[1].Arr.Elems) > 0 {
+		var cutset []rune
+		for _, e := range args[1].Arr.Elems {
+			if e.Kind == runtime.KindI4 {
+				cutset = append(cutset, rune(e.I4))
+			}
+		}
+		return string(cutset)
+	}
+	return ""
+}
+
+// stringTrimStart/stringTrimEnd (Fase 3.42, general IL/BCL hardening
+// pass) cover both the no-arg (whitespace) and `params char[]` cutset
+// overloads, the same shape stringTrim already handles for the two-
+// sided Trim().
+func stringTrimStart(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 || args[0].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.TrimStart expects a string receiver")
+	}
+	if cutset := trimCutset(args); cutset != "" {
+		return runtime.String(strings.TrimLeft(args[0].Str, cutset)), nil
+	}
+	return runtime.String(strings.TrimLeft(args[0].Str, " \t\n\r\v\f")), nil
+}
+
+func stringTrimEnd(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 || args[0].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.TrimEnd expects a string receiver")
+	}
+	if cutset := trimCutset(args); cutset != "" {
+		return runtime.String(strings.TrimRight(args[0].Str, cutset)), nil
+	}
+	return runtime.String(strings.TrimRight(args[0].Str, " \t\n\r\v\f")), nil
+}
+
+// stringPadLeft/stringPadRight (Fase 3.42) cover both PadLeft(width) and
+// PadLeft(width, char) — real .NET pads with plain spaces when no fill
+// character is given, and does nothing when the string is already at
+// least totalWidth long (never truncates).
+func stringPadLeft(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 2 || args[0].Kind != runtime.KindString || args[1].Kind != runtime.KindI4 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.PadLeft expects (int) or (int, char)")
+	}
+	pad := byte(' ')
+	if len(args) >= 3 && args[2].Kind == runtime.KindI4 {
+		pad = byte(args[2].I4)
+	}
+	runes := []rune(args[0].Str)
+	width := int(args[1].I4)
+	if len(runes) >= width {
+		return args[0], nil
+	}
+	prefix := strings.Repeat(string(rune(pad)), width-len(runes))
+	return runtime.String(prefix + args[0].Str), nil
+}
+
+func stringPadRight(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 2 || args[0].Kind != runtime.KindString || args[1].Kind != runtime.KindI4 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.PadRight expects (int) or (int, char)")
+	}
+	pad := byte(' ')
+	if len(args) >= 3 && args[2].Kind == runtime.KindI4 {
+		pad = byte(args[2].I4)
+	}
+	runes := []rune(args[0].Str)
+	width := int(args[1].I4)
+	if len(runes) >= width {
+		return args[0], nil
+	}
+	suffix := strings.Repeat(string(rune(pad)), width-len(runes))
+	return runtime.String(args[0].Str + suffix), nil
+}
+
+// stringInsert backs String.Insert(int startIndex, string value) — real
+// semantics throw ArgumentOutOfRangeException for an index outside
+// [0, Length], matching Substring's own bounds-checking posture.
+func stringInsert(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 3 || args[0].Kind != runtime.KindString || args[1].Kind != runtime.KindI4 || args[2].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.Insert expects (int startIndex, string value)")
+	}
+	runes := []rune(args[0].Str)
+	idx := int(args[1].I4)
+	if idx < 0 || idx > len(runes) {
+		return runtime.Value{}, &runtime.ManagedException{TypeName: "System.ArgumentOutOfRangeException", Message: "startIndex"}
+	}
+	return runtime.String(string(runes[:idx]) + args[2].Str + string(runes[idx:])), nil
+}
+
+// stringRemove covers both Remove(int startIndex) (removes to the end)
+// and Remove(int startIndex, int count).
+func stringRemove(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 2 || args[0].Kind != runtime.KindString || args[1].Kind != runtime.KindI4 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.String.Remove expects (int startIndex[, int count])")
+	}
+	runes := []rune(args[0].Str)
+	start := int(args[1].I4)
+	end := len(runes)
+	if len(args) >= 3 {
+		if args[2].Kind != runtime.KindI4 {
+			return runtime.Value{}, fmt.Errorf("bcl: System.String.Remove count must be int")
+		}
+		end = start + int(args[2].I4)
+	}
+	if start < 0 || end < start || end > len(runes) {
+		return runtime.Value{}, &runtime.ManagedException{TypeName: "System.ArgumentOutOfRangeException", Message: "startIndex or count"}
+	}
+	return runtime.String(string(runes[:start]) + string(runes[end:])), nil
+}
+
 func stringSubstring(args []runtime.Value) (runtime.Value, error) {
 	if len(args) < 2 || args[0].Kind != runtime.KindString || args[1].Kind != runtime.KindI4 {
 		return runtime.Value{}, fmt.Errorf("bcl: System.String.Substring expects (int) or (int, int)")
@@ -507,6 +635,17 @@ func stringGetChars(args []runtime.Value) (runtime.Value, error) {
 // single trailing array argument, expanded here so both shapes share one
 // composite-format parser.
 func stringFormat(args []runtime.Value) (runtime.Value, error) {
+	// String.Format(IFormatProvider provider, string format, object[] args)
+	// — a real, common overload (library code following the "always pass
+	// a culture" analyzer convention) whose first argument is a format
+	// provider (vmnet's CultureInfo stub or similar), not the format
+	// string itself. vmnet has no real culture-sensitive formatting
+	// anywhere (CultureInfo's stub since Fase 3.6) — the provider is
+	// simply ignored, same simplification every other culture-aware
+	// native already makes.
+	if len(args) >= 2 && args[0].Kind != runtime.KindString && args[1].Kind == runtime.KindString {
+		args = args[1:]
+	}
 	if len(args) < 1 || args[0].Kind != runtime.KindString {
 		return runtime.Value{}, fmt.Errorf("bcl: System.String.Format expects a format string")
 	}

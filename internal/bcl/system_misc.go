@@ -3,6 +3,7 @@ package bcl
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/arturoeanton/go-vmnet/internal/runtime"
 )
@@ -28,6 +29,13 @@ func init() {
 	// null/missing variable gracefully by falling back to its own
 	// built-in default.
 	register("System.Environment::GetEnvironmentVariable", true, environmentGetEnvironmentVariableNull)
+	// UserName/MachineName: vmnet has no host-environment permission
+	// model yet (Fase 4, same posture as GetEnvironmentVariable above) —
+	// a plausible constant, matching real code's common use (document
+	// Author/Creator metadata defaults) without exposing anything about
+	// the actual host.
+	register("System.Environment::get_UserName", true, environmentUserName)
+	register("System.Environment::get_MachineName", true, environmentUserName)
 	register("System.Convert::ToInt32", true, convertToInt32)
 	register("System.Convert::ToInt64", true, convertToInt64)
 	register("System.Double::ToString", true, doubleToString)
@@ -48,6 +56,16 @@ func init() {
 	register("System.Boolean::CompareTo", true, boolCompareTo)
 	register("System.Boolean::GetHashCode", true, boolGetHashCode)
 	register("System.Convert::ToString", true, convertToString)
+	register("System.Convert::ToDouble", true, convertToDouble)
+	register("System.Convert::ToBoolean", true, convertToBoolean)
+	register("System.Convert::ChangeType", true, convertChangeType)
+	register("System.Convert::ToByte", true, convertToByte)
+	register("System.Convert::ToSByte", true, convertToSByte)
+	register("System.Convert::ToInt16", true, convertToInt16)
+	register("System.Convert::ToUInt16", true, convertToUInt16)
+	register("System.Convert::ToUInt32", true, convertToUInt32)
+	register("System.Convert::ToUInt64", true, convertToUInt64)
+	register("System.Convert::ToSingle", true, convertToSingle)
 	register("System.Char::ConvertFromUtf32", true, charConvertFromUtf32)
 	// System.IO.FileSystemInfo (FileInfo/DirectoryInfo's real BCL base):
 	// vmnet has no arbitrary-disk-file permissions model yet (Fase 4),
@@ -211,17 +229,47 @@ func convertToInt64(args []runtime.Value) (runtime.Value, error) {
 }
 
 // doubleTryParse's `out double result` uses the same managed-pointer
-// mechanism as any other `ref`/`out` primitive since Fase 3.5.
+// mechanism as any other `ref`/`out` primitive since Fase 3.5. Both real
+// overload shapes are covered (Fase 3.43, the second found reading a real
+// .xlsx through ClosedXML 0.105.0's own worksheet reader — the identical
+// widening int32TryParse got, see its doc comment): the plain
+// `TryParse(string, out double)` and the culture-explicit `TryParse(
+// string, NumberStyles, IFormatProvider, out double)` — the out parameter
+// is always LAST, the string always first, and the styles/provider pair
+// is always NumberStyles.Float + InvariantCulture in these packages,
+// which is exactly what ParseFloat already implements.
 func doubleTryParse(args []runtime.Value) (runtime.Value, error) {
-	if len(args) < 2 || args[0].Kind != runtime.KindString || args[1].Kind != runtime.KindRef || args[1].Ref == nil {
+	if len(args) < 2 {
 		return runtime.Value{}, fmt.Errorf("bcl: System.Double.TryParse expects (string, out double)")
 	}
-	f, err := strconv.ParseFloat(args[0].Str, 64)
+	text := args[0].Str
+	switch {
+	case args[0].Kind == runtime.KindString:
+		// text already set above
+	case args[0].Kind == runtime.KindStruct || args[0].Kind == runtime.KindRef:
+		// Double.TryParse(ReadOnlySpan<char>, out double) (Fase 3.49,
+		// found via a real, load-bearing case: ClosedXML 0.105.0's own
+		// number-parsing helpers call this span-based overload rather
+		// than the plain-string one) — spanCharArg already extracts a
+		// char span's real text content (system_text.go).
+		s, ok := spanCharArg(args[0])
+		if !ok {
+			return runtime.Value{}, fmt.Errorf("bcl: System.Double.TryParse expects (string, out double)")
+		}
+		text = s
+	default:
+		return runtime.Value{}, fmt.Errorf("bcl: System.Double.TryParse expects (string, out double)")
+	}
+	out := args[len(args)-1]
+	if out.Kind != runtime.KindRef || out.Ref == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Double.TryParse expects an out parameter")
+	}
+	f, err := strconv.ParseFloat(strings.TrimSpace(text), 64)
 	if err != nil {
-		*args[1].Ref = runtime.Float64(0)
+		*out.Ref = runtime.Float64(0)
 		return runtime.Bool(false), nil
 	}
-	*args[1].Ref = runtime.Float64(f)
+	*out.Ref = runtime.Float64(f)
 	return runtime.Bool(true), nil
 }
 
@@ -255,6 +303,10 @@ func environmentGetEnvironmentVariableNull(args []runtime.Value) (runtime.Value,
 	return runtime.Null(), nil
 }
 
+func environmentUserName(args []runtime.Value) (runtime.Value, error) {
+	return runtime.String("vmnet"), nil
+}
+
 // convertToInt32 covers the string/double/int64/bool/object-typed
 // overloads by inspecting the actual argument Kind, same approach as
 // every other multi-overload native in this package — a IFormatProvider
@@ -283,6 +335,210 @@ func convertToInt32(args []runtime.Value) (runtime.Value, error) {
 		return runtime.Int32(0), nil
 	default:
 		return runtime.Value{}, fmt.Errorf("bcl: System.Convert.ToInt32: unsupported argument kind")
+	}
+}
+
+func convertToDouble(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Convert.ToDouble expects an argument")
+	}
+	switch v := args[0]; v.Kind {
+	case runtime.KindI4:
+		return runtime.Float64(float64(v.I4)), nil
+	case runtime.KindI8:
+		return runtime.Float64(float64(v.I8)), nil
+	case runtime.KindR4:
+		return runtime.Float64(float64(v.R4)), nil
+	case runtime.KindR8:
+		return v, nil
+	case runtime.KindString:
+		f, err := strconv.ParseFloat(v.Str, 64)
+		if err != nil {
+			return runtime.Value{}, &runtime.ManagedException{TypeName: "System.FormatException", Message: fmt.Sprintf("Input string %q was not in a correct format.", v.Str)}
+		}
+		return runtime.Float64(f), nil
+	case runtime.KindNull:
+		return runtime.Float64(0), nil
+	default:
+		return runtime.Value{}, fmt.Errorf("bcl: System.Convert.ToDouble: unsupported argument kind")
+	}
+}
+
+// convertToIntegral is the shared implementation behind ToByte/ToSByte/
+// ToInt16/ToUInt16/ToUInt32/ToUInt64 (Fase 3.42, general IL/BCL hardening
+// pass) — every one of these differs from convertToInt32/ToInt64 only in
+// its final range/wraparound width, so the real string/double/int-typed
+// dispatch logic is shared here rather than duplicated six times. bits
+// and unsigned select the target's real range for the string-parse path
+// (matching real OverflowException/FormatException behavior on
+// out-of-range or malformed input) and the final truncation width for a
+// numeric source (matching real Convert's own narrowing-conversion
+// semantics, not silently wrapping like a bare `(byte)` cast would).
+func convertToIntegral(methodName string, bits int, unsigned bool, args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Convert.%s expects an argument", methodName)
+	}
+	var asI64 int64
+	switch v := args[0]; v.Kind {
+	case runtime.KindI4:
+		asI64 = int64(v.I4)
+	case runtime.KindI8:
+		asI64 = v.I8
+	case runtime.KindR4:
+		asI64 = int64(v.R4 + sign(v.R4)*0.5)
+	case runtime.KindR8:
+		asI64 = int64(v.R8 + sign(v.R8)*0.5)
+	case runtime.KindNull:
+		return runtime.Int32(0), nil
+	case runtime.KindString:
+		var err error
+		if unsigned {
+			var u uint64
+			u, err = strconv.ParseUint(v.Str, 10, bits)
+			asI64 = int64(u)
+		} else {
+			asI64, err = strconv.ParseInt(v.Str, 10, bits)
+		}
+		if err != nil {
+			if numErr, ok := err.(*strconv.NumError); ok && numErr.Err == strconv.ErrRange {
+				return runtime.Value{}, &runtime.ManagedException{TypeName: "System.OverflowException", Message: "Value was either too large or too small."}
+			}
+			return runtime.Value{}, &runtime.ManagedException{TypeName: "System.FormatException", Message: fmt.Sprintf("Input string %q was not in a correct format.", v.Str)}
+		}
+		return runtime.Int32(int32(asI64)), nil
+	default:
+		return runtime.Value{}, fmt.Errorf("bcl: System.Convert.%s: unsupported argument kind", methodName)
+	}
+	if unsigned {
+		switch bits {
+		case 8:
+			return runtime.Int32(int32(uint8(asI64))), nil
+		case 16:
+			return runtime.Int32(int32(uint16(asI64))), nil
+		case 32:
+			return runtime.Int32(int32(uint32(asI64))), nil
+		default:
+			return runtime.Int32(int32(uint64(asI64))), nil
+		}
+	}
+	switch bits {
+	case 8:
+		return runtime.Int32(int32(int8(asI64))), nil
+	case 16:
+		return runtime.Int32(int32(int16(asI64))), nil
+	default:
+		return runtime.Int32(int32(asI64)), nil
+	}
+}
+
+func convertToByte(args []runtime.Value) (runtime.Value, error) {
+	return convertToIntegral("ToByte", 8, true, args)
+}
+
+func convertToSByte(args []runtime.Value) (runtime.Value, error) {
+	return convertToIntegral("ToSByte", 8, false, args)
+}
+
+func convertToInt16(args []runtime.Value) (runtime.Value, error) {
+	return convertToIntegral("ToInt16", 16, false, args)
+}
+
+func convertToUInt16(args []runtime.Value) (runtime.Value, error) {
+	return convertToIntegral("ToUInt16", 16, true, args)
+}
+
+func convertToUInt32(args []runtime.Value) (runtime.Value, error) {
+	return convertToIntegral("ToUInt32", 32, true, args)
+}
+
+func convertToUInt64(args []runtime.Value) (runtime.Value, error) {
+	return convertToIntegral("ToUInt64", 64, true, args)
+}
+
+// convertToSingle mirrors convertToDouble but narrows to float32 —
+// real Convert.ToSingle, needed by real code that stores values as
+// System.Single specifically (e.g. graphics/measurement APIs) rather
+// than the more common double.
+func convertToSingle(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Convert.ToSingle expects an argument")
+	}
+	switch v := args[0]; v.Kind {
+	case runtime.KindI4:
+		return runtime.Float32(float32(v.I4)), nil
+	case runtime.KindI8:
+		return runtime.Float32(float32(v.I8)), nil
+	case runtime.KindR4:
+		return v, nil
+	case runtime.KindR8:
+		return runtime.Float32(float32(v.R8)), nil
+	case runtime.KindString:
+		f, err := strconv.ParseFloat(v.Str, 32)
+		if err != nil {
+			return runtime.Value{}, &runtime.ManagedException{TypeName: "System.FormatException", Message: fmt.Sprintf("Input string %q was not in a correct format.", v.Str)}
+		}
+		return runtime.Float32(float32(f)), nil
+	case runtime.KindNull:
+		return runtime.Float32(0), nil
+	default:
+		return runtime.Value{}, fmt.Errorf("bcl: System.Convert.ToSingle: unsupported argument kind")
+	}
+}
+
+func convertToBoolean(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Convert.ToBoolean expects an argument")
+	}
+	switch v := args[0]; v.Kind {
+	case runtime.KindI4:
+		return runtime.Bool(v.I4 != 0), nil
+	case runtime.KindI8:
+		return runtime.Bool(v.I8 != 0), nil
+	case runtime.KindString:
+		b, err := strconv.ParseBool(v.Str)
+		if err != nil {
+			return runtime.Value{}, &runtime.ManagedException{TypeName: "System.FormatException", Message: fmt.Sprintf("String %q was not recognized as a valid Boolean.", v.Str)}
+		}
+		return runtime.Bool(b), nil
+	case runtime.KindNull:
+		return runtime.Bool(false), nil
+	default:
+		return runtime.Value{}, fmt.Errorf("bcl: System.Convert.ToBoolean: unsupported argument kind")
+	}
+}
+
+// convertChangeType backs Convert.ChangeType(object value, Type
+// conversionType) — a real, common pattern in generic serialization/
+// data-binding code (found via a real, load-bearing case: ClosedXML's
+// own value-coercion helpers) that converts a boxed value to whatever
+// Type a caller only knows dynamically at runtime. Dispatches by the
+// target type's full name to the same conversion natives Convert's own
+// typed ToXxx methods already implement — covering every primitive kind
+// this loop's target packages have been found to actually request;
+// anything else falls through to returning the source value unchanged
+// (a reasonable identity default when vmnet has no real reflection-based
+// arbitrary-type conversion machinery to fall back on).
+func convertChangeType(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 2 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Convert.ChangeType expects (value, type)")
+	}
+	typeName, ok := TypeFullNameOf(args[1])
+	if !ok {
+		return args[0], nil
+	}
+	switch GenericOpenName(typeName) {
+	case "System.Int32":
+		return convertToInt32(args[:1])
+	case "System.Int64":
+		return convertToInt64(args[:1])
+	case "System.Double", "System.Single", "System.Decimal":
+		return convertToDouble(args[:1])
+	case "System.Boolean":
+		return convertToBoolean(args[:1])
+	case "System.String":
+		return convertToString(args[:1])
+	default:
+		return args[0], nil
 	}
 }
 

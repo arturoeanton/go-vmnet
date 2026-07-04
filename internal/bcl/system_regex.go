@@ -7,16 +7,36 @@ import (
 	"github.com/arturoeanton/go-vmnet/internal/runtime"
 )
 
-// nativeRegex wraps a compiled Go regexp.Regexp. vmnet compiles patterns
-// with Go's RE2 engine, not .NET's real regex engine — the two dialects
-// mostly overlap (character classes, quantifiers, anchors, groups,
-// alternation all match), but RE2 has no backreferences and no
-// lookaround ((?=...)/(?<=...)/(?!...)); a pattern using either fails to
-// compile here with a clear error rather than silently matching
-// something different than real .NET would (spec: never a
-// plausible-but-wrong result).
+// nativeRegex wraps a Go regexp.Regexp, compiled lazily (Fase 3.40) — see
+// compiled() below for why. vmnet compiles patterns with Go's RE2
+// engine, not .NET's real regex engine — the two dialects mostly overlap
+// (character classes, quantifiers, anchors, groups, alternation all
+// match), but RE2 has no backreferences and no lookaround
+// ((?=...)/(?<=...)/(?!...)); a pattern using either fails to compile
+// with a clear error rather than silently matching something different
+// than real .NET would (spec: never a plausible-but-wrong result).
 type nativeRegex struct {
-	re *regexp.Regexp
+	pattern    string
+	re         *regexp.Regexp
+	compileErr error
+	didCompile bool
+}
+
+// compiled lazily compiles nr's pattern on first actual use (IsMatch/
+// Match/Replace), caching the result either way — not at construction
+// time. Found via a real, load-bearing case: ClosedXML's own
+// XLWorkbook..cctor constructs several validation-regex static fields
+// eagerly, at least one of which (a backreference-based quoted-sheet-
+// name check) RE2 can't compile — but real code very often builds more
+// regexes than any single code path actually exercises, so a real .NET-
+// incompatible pattern that's simply never matched against shouldn't
+// block everything downstream of its mere construction.
+func (nr *nativeRegex) compiled() (*regexp.Regexp, error) {
+	if !nr.didCompile {
+		nr.re, nr.compileErr = compileRegex(nr.pattern)
+		nr.didCompile = true
+	}
+	return nr.re, nr.compileErr
 }
 
 // nativeGroupVal backs both Group and (via the shared get_Value/
@@ -71,11 +91,7 @@ func regexCtor(args []runtime.Value) (*runtime.Object, error) {
 	if len(args) < 1 || args[0].Kind != runtime.KindString {
 		return nil, fmt.Errorf("bcl: Regex constructor expects a pattern string")
 	}
-	re, err := compileRegex(args[0].Str)
-	if err != nil {
-		return nil, err
-	}
-	return &runtime.Object{Native: &nativeRegex{re: re}}, nil
+	return &runtime.Object{Native: &nativeRegex{pattern: args[0].Str}}, nil
 }
 
 // resolveRegexAndInput disambiguates the static (input, pattern) and
@@ -91,7 +107,11 @@ func resolveRegexAndInput(args []runtime.Value) (*regexp.Regexp, string, error) 
 		if !ok || args[1].Kind != runtime.KindString {
 			return nil, "", fmt.Errorf("bcl: Regex instance method: unsupported argument shape")
 		}
-		return nr.re, args[1].Str, nil
+		re, err := nr.compiled()
+		if err != nil {
+			return nil, "", err
+		}
+		return re, args[1].Str, nil
 	}
 	if args[0].Kind == runtime.KindString && args[1].Kind == runtime.KindString {
 		re, err := compileRegex(args[1].Str)
@@ -126,7 +146,11 @@ func resolveRegexReplace(args []runtime.Value) (re *regexp.Regexp, input, replac
 		if !ok || args[1].Kind != runtime.KindString || args[2].Kind != runtime.KindString {
 			return nil, "", "", fmt.Errorf("bcl: Regex.Replace instance method: unsupported argument shape")
 		}
-		return nr.re, args[1].Str, args[2].Str, nil
+		re, err := nr.compiled()
+		if err != nil {
+			return nil, "", "", err
+		}
+		return re, args[1].Str, args[2].Str, nil
 	}
 	if args[0].Kind == runtime.KindString && args[1].Kind == runtime.KindString && args[2].Kind == runtime.KindString {
 		re, err := compileRegex(args[1].Str)

@@ -3,17 +3,13 @@ package bcl
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/arturoeanton/go-vmnet/internal/runtime"
 )
 
 // nativeTypeInfo backs a System.Type instance: just the full name it
-// represents. vmnet doesn't give System.Type objects real reference
-// identity (typeof(X) called twice produces two distinct
-// *nativeTypeInfo, unlike the CLR's single canonical Type per real
-// type) — every comparison/lookup below works on the FullName string,
-// never Go pointer identity, so this doesn't matter for any supported
-// operation (Fase 3.14).
+// represents.
 type nativeTypeInfo struct {
 	FullName string
 }
@@ -31,7 +27,16 @@ func init() {
 	// same simple-name property, just reached through a MemberInfo-typed
 	// expression (`someMember.Name` where someMember happens to hold a
 	// Type). vmnet doesn't model MemberInfo as a distinct hierarchy; this
-	// covers the call site shape directly.
+	// covers the call site shape directly. Registered ONLY here (Fase
+	// 3.41 bug: system_linq_expressions.go used to register this same
+	// "System.Reflection.MemberInfo::get_Name" key a second time for its
+	// own *nativeMemberInfo receiver shape — since register() always
+	// overwrites, whichever init() ran last silently won, and Go's
+	// alphabetical-by-filename init order made system_type.go's entry
+	// win, breaking every real MemberExpression.Member.Name lookup
+	// ConfigureMetadata/AddAttribute<T> depends on with "System.Type
+	// method receiver is not a Type". typeGetName below now handles both
+	// receiver shapes directly instead of two competing registrations.
 	register("System.Reflection.MemberInfo::get_Name", true, typeGetName)
 
 	// Generics reflection (Fase 3.25) — all pure string manipulation over
@@ -54,6 +59,25 @@ func init() {
 	register("System.Type::get_Assembly", true, typeGetAssembly)
 	register("System.Reflection.Assembly::ToString", true, assemblyToString)
 	register("System.Reflection.Assembly::get_FullName", true, assemblyToString)
+	register("System.Reflection.Assembly::GetExecutingAssembly", true, assemblyGetExecuting)
+	register("System.Reflection.Assembly::GetCallingAssembly", true, assemblyGetExecuting)
+	register("System.Reflection.Assembly::GetEntryAssembly", true, assemblyGetExecuting)
+	// IntrospectionExtensions.GetTypeInfo(this Type) is a netstandard1.x
+	// compatibility shim: TypeInfo IS Type on every modern runtime (a
+	// TypeInfo-returning API exists only for source compat with old
+	// portable-class-library code) — an identity function, since vmnet's
+	// own System.Type reflection-lite model has no separate TypeInfo
+	// shape at all. Found via a real, load-bearing case: System.Span's
+	// own internal SpanHelpers+PerTypeValues`1..cctor, reached just from
+	// ClosedXML's own real ReadOnlySpan<byte> use of embedded font data.
+	register("System.Reflection.IntrospectionExtensions::GetTypeInfo", true, typeInfoIdentity)
+}
+
+func typeInfoIdentity(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: IntrospectionExtensions.GetTypeInfo expects 1 argument")
+	}
+	return args[0], nil
 }
 
 // nativeAssembly is a stub System.Reflection.Assembly — vmnet has no real
@@ -76,6 +100,14 @@ func typeGetAssembly(args []runtime.Value) (runtime.Value, error) {
 
 func assemblyToString(args []runtime.Value) (runtime.Value, error) {
 	return runtime.String("vmnet, Version=0.0.0.0"), nil
+}
+
+// assemblyGetExecuting backs the static Assembly.GetExecutingAssembly/
+// GetCallingAssembly/GetEntryAssembly — all the same nativeAssembly stub
+// (see its own doc comment: vmnet has no real multi-assembly identity
+// model, every Assembly value is interchangeable).
+func assemblyGetExecuting(args []runtime.Value) (runtime.Value, error) {
+	return runtime.ObjRef(&runtime.Object{Native: &nativeAssembly{}}), nil
 }
 
 // genericOpenName strips a closed generic instantiation's "[[Arg1],
@@ -227,12 +259,39 @@ func nullableGetUnderlyingType(args []runtime.Value) (runtime.Value, error) {
 	return NewTypeValue(argNames[0]), nil
 }
 
+// typeValueCache interns System.Type values by full name (Fase 3.40):
+// real .NET Type objects are canonical per-AppDomain (`typeof(X) ==
+// typeof(X)` is always true, by reference), but constructing a fresh
+// *runtime.Object on every NewTypeValue call broke that — found via a
+// real, load-bearing case, DocumentFormat.OpenXml.Packaging's own
+// FeatureCollectionBase (a real Dictionary<Type,object>-backed "feature
+// bag"): every lookup's key is a FRESH Type value from its own
+// `typeof(TFeature)`, encoded by identity (encodeDictKey's KindObject
+// case uses the Go pointer itself, %p, since most native objects
+// genuinely don't have value semantics) — two separate typeof(X) calls
+// for the very same X produced two different pointers, so every single
+// feature lookup silently missed regardless of whether the feature had
+// actually been registered.
+var (
+	typeValueCacheMu sync.Mutex
+	typeValueCache   = map[string]*runtime.Object{}
+)
+
 // NewTypeValue builds a System.Type value for fullName — the runtime
 // counterpart of ir.LoadTypeToken (typeof(T)), called directly from
 // internal/interpreter/eval.go rather than through the normal
-// bcl.Lookup/native-call path, since ldtoken isn't a call at all.
+// bcl.Lookup/native-call path, since ldtoken isn't a call at all. Always
+// returns the same *runtime.Object for the same fullName (see
+// typeValueCache's own doc comment).
 func NewTypeValue(fullName string) runtime.Value {
-	return runtime.ObjRef(&runtime.Object{Native: &nativeTypeInfo{FullName: fullName}})
+	typeValueCacheMu.Lock()
+	defer typeValueCacheMu.Unlock()
+	obj, ok := typeValueCache[fullName]
+	if !ok {
+		obj = &runtime.Object{Native: &nativeTypeInfo{FullName: fullName}}
+		typeValueCache[fullName] = obj
+	}
+	return runtime.ObjRef(obj)
 }
 
 // typeGetTypeFromHandle is the identity function: LoadTypeToken already
@@ -301,7 +360,22 @@ func objectGetType(args []runtime.Value) (runtime.Value, error) {
 	}
 }
 
+// typeFullName mirrors internal/interpreter/typecheck.go's own
+// fullTypeName exactly (kept as a separate copy to avoid a bcl<->
+// interpreter import cycle): QualifiedName must be checked first for a
+// nested type ("Outer+Inner") — found via a real, load-bearing case
+// (Fase 3.40): Object.GetType() on a real nested private class
+// (DocumentFormat.OpenXml.Packaging.SpreadsheetDocument's own nested
+// SpreadsheetDocumentFeatures) fell back to the bare "SpreadsheetDocument
+// Features" with neither its enclosing type nor namespace, since a
+// nested TypeDef's own Namespace column is always empty by definition —
+// every reflection/interface-matching check downstream (Type.
+// IsAssignableFrom's own real BCL-metadata-backed base/interface walk,
+// most critically) failed to resolve that bare, unqualified name at all.
 func typeFullName(t *runtime.Type) string {
+	if t.QualifiedName != "" {
+		return t.QualifiedName
+	}
 	if t.Namespace == "" {
 		return t.Name
 	}
@@ -352,6 +426,15 @@ func typeGetFullName(args []runtime.Value) (runtime.Value, error) {
 func typeGetName(args []runtime.Value) (runtime.Value, error) {
 	if len(args) != 1 {
 		return runtime.Value{}, fmt.Errorf("bcl: System.Type.Name expects a receiver")
+	}
+	// This same native also backs "System.Reflection.MemberInfo::get_Name"
+	// (see its registration comment above) — a MemberExpression.Member
+	// (Fase 3.41, system_linq_expressions.go's Expression.Property
+	// support) is backed by *nativeMemberInfo, not *nativeTypeInfo; check
+	// that shape first rather than routing it through asTypeInfo, which
+	// only ever understands a real Type receiver.
+	if mi, ok := nativeOf[*nativeMemberInfo](args[0]); ok {
+		return runtime.String(mi.name), nil
 	}
 	ti, err := asTypeInfo(args[0])
 	if err != nil {

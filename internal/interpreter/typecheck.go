@@ -144,7 +144,47 @@ func receiverTypeName(v runtime.Value) (string, bool) {
 		if v.Obj.Type != nil {
 			return fullTypeName(v.Obj.Type), true
 		}
+		// interpreterNativeTypeName (elementfactory.go) covers native-
+		// backed types that live in THIS package rather than bcl —
+		// nativeKnownChildBuilder/nativeElementFactoryThunk (Fase 3.41)
+		// need Machine access (m.newObj/m.call) their real dispatch
+		// can't get from bcl's own Native map, so they're defined here
+		// instead of alongside bcl's other native-backed BCL types.
+		if name, ok := interpreterNativeTypeName(v.Obj.Native); ok {
+			return name, true
+		}
 		return bcl.NativeTypeName(v.Obj.Native)
+	case runtime.KindArray:
+		// A real CIL SZArray (`T[]`) implicitly implements IEnumerable`1/
+		// ICollection`1/IList`1 per the CLR's own array-covariance rules
+		// (ECMA-335 §II.9.9) — there's no TypeDef or bcl.NativeTypeName
+		// entry for "the receiver's own array type", but "System.Array"
+		// itself already has a real GetEnumerator registered (Fase 3.5),
+		// so reporting that here lets the virtual-dispatch chain walk
+		// retry it. Found via a real case: ClosedXML's own XLWorkbook
+		// constructor does `foreach` over a plain `T[]` through an
+		// `IEnumerable<T>`-declared call site, reached just from opening
+		// a real .xlsx workbook.
+		return "System.Array", true
+	case runtime.KindI4:
+		// A boxed/constrained primitive receiver (Fase 3.40, found via a
+		// real, load-bearing case: some generic collection's own internal
+		// comparer calling `x.Equals(y)` through a `constrained. !!0
+		// callvirt IEquatable\`1::Equals` on an int/enum/bool-typed T,
+		// none of which have a real TypeDef the chain walk could resolve
+		// anyway — reported as "System.Int32" purely so the walk has a
+		// name to try before falling through to the System.Object::
+		// Equals/GetHashCode/ToString last resort, which is what
+		// actually answers it).
+		return "System.Int32", true
+	case runtime.KindI8:
+		return "System.Int64", true
+	case runtime.KindR4:
+		return "System.Single", true
+	case runtime.KindR8:
+		return "System.Double", true
+	case runtime.KindString:
+		return "System.String", true
 	default:
 		return "", false
 	}
@@ -197,32 +237,46 @@ var exceptionBaseType = map[string]string{
 // the exact name, and `catch (Exception e)` still matches too, by
 // resolving MyException's own TypeDef and following its base chain back
 // into the hand-maintained map once it reaches a real BCL name.
-// Anything else (List/Dictionary/StringBuilder) has no interface
-// modeling yet — a documented gap (docs/en/ROADMAP.md Fase 3.8), not a
-// silent wrong answer, since it only ever returns false (isinst -> null,
-// castclass -> throws), never a false positive.
+//
+// Any other native-backed type (Fase 3.41) falls back to
+// bcl.NativeTypeName + bcl.NativeBaseTypeName's own hand-maintained chain
+// (the same one assembly.go's valueIsAssignableToTypeName already uses
+// for overload scoring) — found via a real, load-bearing case:
+// DocumentFormat.OpenXml.Framework's own AddAttribute<T> does
+// `expression.Body is MemberExpression` (a real `isinst`) against
+// vmnet's own natively-constructed Expression-tree stand-ins
+// (system_linq_expressions.go). Anything with no NativeTypeName entry at
+// all still correctly returns false (isinst -> null, castclass ->
+// throws), never a false positive — a documented gap (docs/en/
+// ROADMAP.md Fase 3.8), not a silent wrong answer.
 func (m *Machine) nativeMatches(native any, target string) bool {
-	ex, ok := native.(*runtime.ManagedException)
-	if !ok {
+	if ex, ok := native.(*runtime.ManagedException); ok {
+		name := ex.TypeName
+		for name != "" {
+			if name == target {
+				return true
+			}
+			if next, ok := exceptionBaseType[name]; ok {
+				name = next
+				continue
+			}
+			if m.ResolveType == nil {
+				return false
+			}
+			t, err := m.ResolveType(name)
+			if err != nil {
+				return false
+			}
+			name = t.BaseTypeFullName
+		}
 		return false
 	}
-	name := ex.TypeName
-	for name != "" {
+	name, ok := bcl.NativeTypeName(native)
+	for ok {
 		if name == target {
 			return true
 		}
-		if next, ok := exceptionBaseType[name]; ok {
-			name = next
-			continue
-		}
-		if m.ResolveType == nil {
-			return false
-		}
-		t, err := m.ResolveType(name)
-		if err != nil {
-			return false
-		}
-		name = t.BaseTypeFullName
+		name, ok = bcl.NativeBaseTypeName(name)
 	}
 	return false
 }

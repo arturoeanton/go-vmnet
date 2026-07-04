@@ -1,0 +1,8 @@
+{
+  "packages": [
+    {
+      "ID": "DocumentFormat.OpenXml",
+      "Version": "3.1.1"
+    }
+  ]
+}

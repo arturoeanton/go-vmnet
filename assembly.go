@@ -1,6 +1,7 @@
 package vmnet
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math"
 	"strings"
@@ -38,6 +39,26 @@ type Assembly struct {
 	// doesn't disambiguate same-named types across different deps).
 	deps []*Assembly
 
+	// globalTypeIndex maps every TypeDef full name declared ANYWHERE in
+	// one LoadPackage call's full transitive graph to the specific
+	// Assembly that declares it (Fase 3.40) — shared (same map instance)
+	// across every assembly LoadPackage loads together. deps only ever
+	// resolves "down" a package's own declared dependency edges, which
+	// breaks for a shared dependency's own generic method resolving
+	// typeof(T) where T is a real type from a package that depends ON
+	// that shared dependency, not the other way around (found via a
+	// real, load-bearing case: System.Memory's own SpanHelpers.
+	// IsReferenceOrContainsReferencesCore checking a real struct
+	// declared in SixLabors.Fonts, reached just from ClosedXML's own
+	// font-metrics engine). Consulted only as an absolute last resort,
+	// after this assembly's own metadata and its own deps chain both
+	// fail — and even then it jumps directly to the one specific owning
+	// assembly's buildType, never recursing through that assembly's own
+	// deps/globalTypeIndex again, so it can never loop no matter how the
+	// real dependency graph is shaped. nil for an Assembly loaded via
+	// LoadFile/LoadBytes directly (no package graph context at all).
+	globalTypeIndex map[string]*Assembly
+
 	cacheMu sync.RWMutex
 	// methods is keyed by MethodDef RID, not "Namespace.Type::Method"
 	// (Fase 3.27) — a real method can be overloaded (same name, different
@@ -47,6 +68,35 @@ type Assembly struct {
 	// needs building or caching (overload resolution happens first).
 	methods map[uint32]*runtime.Method
 	types   map[string]*runtime.Type // keyed by "Namespace.Type"
+
+	// explicitImpls memoizes resolveExplicitImpl's own result (Fase
+	// 3.45) — keyed by "concreteType\x00interfaceType\x00methodName".
+	// Found via a real, load-bearing perf case: DocumentFormat.OpenXml's
+	// own FeatureCollectionBase.Get<TFeature>() (features.go) calls
+	// through IPackageInitializer/IMainPartFeature-style explicit-impl
+	// dispatch on every single Get<T>() across every part opened, and
+	// resolveExplicitImpl's own per-ancestor resolveExplicitImplExact
+	// step does a fresh linear FindTypeDef scan of the metadata TypeDef
+	// table every time (metadata/resolver.go) — with DocumentFormat.
+	// OpenXml.dll's own thousands of TypeDefs, repeating that scan for
+	// every Get<TFeature>() call while opening a real (even small) .xlsx
+	// compounds into a multi-minute hang instead of the sub-second real
+	// answer this deterministic, metadata-only resolution always
+	// produces for the same three inputs. explicitImpls is safe to share
+	// across concurrent Machines the same way methods/types already are
+	// (cacheMu): resolveExplicitImpl is a pure function of the loaded
+	// metadata, which never changes after LoadBytes/LoadFile returns.
+	explicitImpls map[string]explicitImplResult
+}
+
+// explicitImplResult is resolveExplicitImpl's cached return value —
+// Go's map can't cache a (string, bool) pair as a "found vs. not found"
+// zero-value-ambiguous single string, so the miss case (ok == false) is
+// cached explicitly too (a real miss re-walking the same expensive ancestor
+// chain on every call would defeat the whole cache).
+type explicitImplResult struct {
+	name string
+	ok   bool
 }
 
 // WithDependencies attaches other loaded assemblies asm can resolve
@@ -54,8 +104,41 @@ type Assembly struct {
 // Returns asm for chaining (`vm.LoadFile(...).WithDependencies(...)`),
 // same style as interpreter.Machine's WithExplicitImplResolver/
 // WithEnumResolver.
+//
+// asm also JOINS its deps' shared cross-package type index, when one
+// exists (Fase 3.43): deps edges only resolve "down" (asm's own IL naming
+// a dep's types), but a real library routinely calls BACK into a type its
+// caller registered with it — found via a real, load-bearing case:
+// examples/closedxml-demo's wrapper assembly (loaded via LoadBytes,
+// depending on the LoadPackage-loaded ClosedXML graph) sets
+// `LoadOptions.DefaultGraphicEngine = new NullGraphicEngine()`
+// (GraphicEngineWrapper.cs:70), and ClosedXML's own real column-width
+// code later dispatches `workbook.GraphicEngine.GetMaxDigitWidth(...)`
+// (decompiled ClosedXML.Excel/XLColumn.cs:183) on it. That callvirt runs
+// with ClosedXML's resolvers active, and "VmnetClosedXmlDemo.
+// NullGraphicEngine" exists neither in ClosedXML's own metadata nor
+// anywhere down its deps — exactly the reverse-edge shape globalTypeIndex
+// (see its doc comment) already exists to cover within one LoadPackage
+// graph. Indexing asm's own TypeDefs into that same shared map (same
+// instance, so every already-loaded assembly in the graph sees them
+// immediately) extends the identical last-resort mechanism across the
+// LoadBytes/LoadPackage boundary; when no dep carries an index at all
+// (plain LoadFile/LoadBytes on both sides), nothing changes.
 func (asm *Assembly) WithDependencies(deps ...*Assembly) *Assembly {
 	asm.deps = append(asm.deps, deps...)
+	index := asm.globalTypeIndex
+	if index == nil {
+		for _, dep := range deps {
+			if dep.globalTypeIndex != nil {
+				index = dep.globalTypeIndex
+				break
+			}
+		}
+	}
+	if index != nil {
+		asm.indexOwnTypesInto(index)
+		asm.globalTypeIndex = index
+	}
 	return asm
 }
 
@@ -82,7 +165,12 @@ func (asm *Assembly) resolveMethod(typeName, methodName string, args []runtime.V
 	if err != nil {
 		return asm.resolveMethodInDeps(typeName, methodName, args, notFoundErr(typeName, methodName, err))
 	}
-	methodRID, row, err := asm.pickMethodOverload(typeRID, methodName, args)
+	// A host-driven Assembly.Call/CallBytes call site (the only caller of
+	// resolveMethod, see call.go) never carries generic-method-argument
+	// information — genericArgCount is always 0, matching a plain,
+	// non-generic method (the overwhelming majority of host-driven
+	// calls; a generic-method target from Go isn't supported here yet).
+	methodRID, row, err := asm.pickMethodOverload(typeRID, methodName, args, nil, 0)
 	if err != nil {
 		return asm.resolveMethodInDeps(typeName, methodName, args, notFoundErr(typeName, methodName, err))
 	}
@@ -124,20 +212,59 @@ func (asm *Assembly) resolveMethodInDeps(typeName, methodName string, args []run
 // calls discovered while executing another method's IR. args (the
 // actual call-site arguments, receiver included for an instance call)
 // disambiguate a real overload set — see pickMethodOverload.
-func (asm *Assembly) resolveByFullName(fullName string, args []runtime.Value) (*runtime.Method, error) {
+func (asm *Assembly) resolveByFullName(fullName string, args []runtime.Value, paramTypeNames []string, genericArgCount int) (*runtime.Method, error) {
 	namespace, typeName, methodName, err := splitFullName(fullName)
 	if err != nil {
 		return nil, err
 	}
+	fullTypeName := qualify(namespace, typeName)
 	typeRID, _, err := asm.md.FindTypeDef(namespace, typeName)
 	if err != nil {
-		return asm.resolveByFullNameInDeps(fullName, args, notFoundErr(typeName, methodName, err))
+		if m, ok := asm.resolveByFullNameCrossPackage(fullTypeName, methodName, args, paramTypeNames, genericArgCount); ok {
+			return m, nil
+		}
+		return asm.resolveByFullNameInDeps(fullName, args, paramTypeNames, genericArgCount, notFoundErr(typeName, methodName, err))
 	}
-	methodRID, row, err := asm.pickMethodOverload(typeRID, methodName, args)
+	methodRID, row, err := asm.pickMethodOverload(typeRID, methodName, args, paramTypeNames, genericArgCount)
 	if err != nil {
-		return asm.resolveByFullNameInDeps(fullName, args, notFoundErr(typeName, methodName, err))
+		if m, ok := asm.resolveByFullNameCrossPackage(fullTypeName, methodName, args, paramTypeNames, genericArgCount); ok {
+			return m, nil
+		}
+		return asm.resolveByFullNameInDeps(fullName, args, paramTypeNames, genericArgCount, notFoundErr(typeName, methodName, err))
 	}
 	return asm.buildMethod(methodRID, row)
+}
+
+// resolveByFullNameCrossPackage is the same cross-package last resort
+// globalTypeIndex gives type resolution (Fase 3.40, see that field's own
+// doc comment) — a shared dependency's own method calling into a type
+// declared by one of ITS dependents, not the other way around (found
+// via a real, load-bearing case: DocumentFormat.OpenXml.Framework's own
+// OpenXmlPackageBuilder<T>.BuildPipeline calls the abstract Clone()
+// method, which is overridden on a private nested class declared in the
+// main DocumentFormat.OpenXml assembly — a real dependent of Framework,
+// never reachable through Framework's own tree-shaped deps list). Jumps
+// directly to the owning assembly's own pickMethodOverload/buildMethod,
+// never back through resolveByFullName/deps, so this can never recurse
+// regardless of how the real dependency graph is shaped.
+func (asm *Assembly) resolveByFullNameCrossPackage(fullTypeName, methodName string, args []runtime.Value, paramTypeNames []string, genericArgCount int) (*runtime.Method, bool) {
+	owner, ok := asm.globalTypeIndex[fullTypeName]
+	if !ok || owner == asm {
+		return nil, false
+	}
+	ownerTypeRID, _, err := owner.md.FindTypeDef(splitTypeName(fullTypeName))
+	if err != nil {
+		return nil, false
+	}
+	methodRID, row, err := owner.pickMethodOverload(ownerTypeRID, methodName, args, paramTypeNames, genericArgCount)
+	if err != nil {
+		return nil, false
+	}
+	m, err := owner.buildMethod(methodRID, row)
+	if err != nil {
+		return nil, false
+	}
+	return m, true
 }
 
 // resolveByFullNameInDeps is the multi-assembly fallback (Fase 3.27):
@@ -150,10 +277,10 @@ func (asm *Assembly) resolveByFullName(fullName string, args []runtime.Value) (*
 // "Jint.Engine::.ctor" reaches here, the assembly boundary is already
 // gone; this is what puts it back, by simply trying every attached dep
 // in turn).
-func (asm *Assembly) resolveByFullNameInDeps(fullName string, args []runtime.Value, notFound error) (*runtime.Method, error) {
+func (asm *Assembly) resolveByFullNameInDeps(fullName string, args []runtime.Value, paramTypeNames []string, genericArgCount int, notFound error) (*runtime.Method, error) {
 	lastErr := notFound
 	for _, dep := range asm.deps {
-		m, err := dep.resolveByFullName(fullName, args)
+		m, err := dep.resolveByFullName(fullName, args, paramTypeNames, genericArgCount)
 		if err == nil {
 			return m, nil
 		}
@@ -168,11 +295,21 @@ func (asm *Assembly) resolveByFullNameInDeps(fullName string, args []runtime.Val
 // overloads to score against) against the real call-site args before
 // pickMethodOverload trusts it — see that function's "len(rids) == 1"
 // comment for why this validation is needed at all.
-func candidateMatchesArgs(row metadata.MethodDefRow, args []runtime.Value) (metadata.MethodDefRow, bool) {
+func (asm *Assembly) candidateMatchesArgs(row metadata.MethodDefRow, args []runtime.Value, genericArgCount int) (metadata.MethodDefRow, bool) {
 	sig, err := metadata.ParseMethodSig(row.Signature)
 	if err != nil {
 		return row, false
 	}
+	// No generic-arity check here, deliberately, unlike the tie-break
+	// loop below: a single same-named candidate has nothing to
+	// disambiguate FROM, so it's always the right one regardless of its
+	// own generic arity — genericArgCount is 0 for every host-driven
+	// Instance.Call/Assembly.Call (Fase 3.28's public API has no way to
+	// name a specific generic instantiation at all), which would
+	// otherwise wrongly reject the sole real candidate for a generic-only
+	// member like OpenXmlCompositeElement's own `AppendChild<T>(T)` —
+	// found via a real regression while adding the tie-break loop's own
+	// GenParamCount filter (Fase 3.41).
 	declared := args
 	if sig.HasThis && len(declared) > 0 {
 		declared = declared[1:]
@@ -180,7 +317,7 @@ func candidateMatchesArgs(row metadata.MethodDefRow, args []runtime.Value) (meta
 	if len(declared) != len(sig.Params) {
 		return row, false
 	}
-	if hasHardShapeMismatch(sig.Params, declared) {
+	if asm.hasHardShapeMismatch(sig.Params, declared) {
 		return row, false
 	}
 	return row, true
@@ -203,10 +340,95 @@ func candidateMatchesArgs(row metadata.MethodDefRow, args []runtime.Value) (meta
 // without this check, a JsValue argument would silently "match" the
 // Key-typed candidate at a low-but-positive score instead of being
 // rejected outright.
-func hasHardShapeMismatch(params []metadata.SigType, args []runtime.Value) bool {
+func (asm *Assembly) hasHardShapeMismatch(params []metadata.SigType, args []runtime.Value) bool {
 	for i, p := range params {
 		if args[i].Kind == runtime.KindObject && p.Kind == metadata.SigValueType {
 			return true
+		}
+		// A real array argument (KindArray) is never a delegate: vmnet's
+		// own KindFunc is the only shape a real delegate value ever
+		// takes (runtime.Func's doc comment). A class-typed parameter
+		// (SigClass) whose real declared type turns out to be a delegate
+		// (BaseTypeFullName == System.MulticastDelegate) can therefore
+		// never legitimately bind an array argument — found the hard way
+		// (Fase 3.40): System.IO.Packaging.InternalRelationshipCollection
+		// calls `new XmlCompatibilityReader(reader, string[])`, which has
+		// two same-arity 2nd-parameter overloads (one
+		// IsXmlNamespaceSupportedCallback, one IEnumerable<string>) —
+		// without this, the array argument scored as a plausible match
+		// for the delegate-typed overload too, picking it at random
+		// instead of the only real match.
+		if args[i].Kind == runtime.KindArray && p.Kind == metadata.SigClass {
+			if name, ok := paramTypeName(asm.md, p); ok {
+				if t, err := asm.resolveTypeByFullName(name); err == nil && t != nil && t.BaseTypeFullName == "System.MulticastDelegate" {
+					return true
+				}
+			}
+		}
+		// A class-instance reference (KindObject) can never back an
+		// SZARRAY parameter either — arrays and class objects are
+		// distinct reference shapes in real CIL, and no implicit
+		// conversion between them exists (Fase 3.45). Found running real
+		// Newtonsoft.Json 13.0.3: JContainer.InsertItem's `ValidateToken
+		// (item, null)` — a callvirt to the virtual, 2-JToken-param
+		// `JContainer::ValidateToken(JToken,JToken)` (JContainer.cs:535,
+		// /tmp/nj_ns20/Newtonsoft.Json.Linq/JContainer.cs) — is NOT
+		// overridden by JProperty, so Machine.call's ancestor walk
+		// (internal/interpreter/calls.go's virtual-dispatch loop) tries
+		// every base class's own "ValidateToken" by name, including
+		// JToken, whose ONLY method of that name is the unrelated private
+		// static `ValidateToken(JToken o, JTokenType[] validTypes, bool
+		// nullable)` (JToken.cs:718). That candidate's arity (3)
+		// coincidentally equals the call site's own popped-arg count
+		// (receiver + item + null, since HasThis was true at the call
+		// site), so pickMethodOverload's single-candidate path
+		// (len(rids)==1) accepted it: a JToken/JValue argument (KindObject)
+		// silently "matched" the JTokenType[] validTypes parameter with no
+		// mismatch flagged, and ValidateToken ran with its own args
+		// misread as (o=the JProperty receiver, validTypes=the real item
+		// object, nullable=null) — corrupting the args Array.IndexOf(
+		// validTypes, o.Type) then received (bcl: Array.IndexOf expects
+		// (T[], T[, startIndex[, count]])). Rejecting the mismatch here
+		// makes pickMethodOverload correctly report "not found" for this
+		// wrong JToken candidate, so calls.go's chain walk keeps going
+		// past it to the real fallback: the exact declared-type name
+		// "JContainer::ValidateToken", which resolves the correct,
+		// signature-matching virtual method.
+		if args[i].Kind == runtime.KindObject && p.Kind == metadata.SigSZArray {
+			return true
+		}
+		// A numeric primitive (KindI4/I8/R4/R8) can never legitimately
+		// back a System.String parameter either — vmnet always
+		// represents a real string as KindString (Fase 1), never as any
+		// numeric Kind, and CIL has no implicit int/float-to-string
+		// coercion (Fase 3.46). Found running real Newtonsoft.Json
+		// 13.0.3: JObject's real ChildrenTokens (`_properties`, an
+		// IList<JToken>) is indexed by position in several places (e.g.
+		// JContainer.InsertItem's own `childrenTokens[index]`,
+		// JContainer.cs:533-534, /tmp/nj_ns20/Newtonsoft.Json.Linq/
+		// JContainer.cs) via the inherited `Collection<JToken>.get_Item
+		// (int)` (natively modeled — system_collection_objectmodel.go's
+		// listGetItem). JPropertyKeyedCollection (the real backing type,
+		// itself a `Collection<JToken>` subclass) separately declares its
+		// OWN, unrelated `this[string key]` indexer (JPropertyKeyedCollection.
+		// cs:15) — same compiled method name "get_Item", totally
+		// different parameter type. Machine.call's ancestor walk (calls.
+		// go) tries JPropertyKeyedCollection's own "get_Item" first (by
+		// name, from the concrete receiver type) and, same bug shape as
+		// the ValidateToken case just above, pickMethodOverload's single-
+		// candidate path accepted an int index argument against the
+		// string-typed candidate with no shape check catching it —
+		// running the real string indexer with key=<the int reinterpreted
+		// as a non-string, non-null Value>, which "if (key == null)"
+		// (JPropertyKeyedCollection.cs:19) then threw ArgumentNullException
+		// on. Rejecting the mismatch here makes the ancestor walk correctly
+		// fall through past this wrong candidate to Collection`1::get_Item,
+		// the real match.
+		if p.Kind == metadata.SigString {
+			switch args[i].Kind {
+			case runtime.KindI4, runtime.KindI8, runtime.KindR4, runtime.KindR8:
+				return true
+			}
 		}
 	}
 	return false
@@ -232,7 +454,7 @@ func hasHardShapeMismatch(params []metadata.SigType, args []runtime.Value) bool 
 // comparison, since vmnet's Value model doesn't carry one) — but it is
 // unconditionally better than "first match by name," which is wrong
 // every time there's more than one candidate.
-func (asm *Assembly) pickMethodOverload(typeRID uint32, methodName string, args []runtime.Value) (uint32, metadata.MethodDefRow, error) {
+func (asm *Assembly) pickMethodOverload(typeRID uint32, methodName string, args []runtime.Value, paramTypeNames []string, genericArgCount int) (uint32, metadata.MethodDefRow, error) {
 	rids, rows, err := asm.md.FindMethodDefCandidates(typeRID, methodName)
 	if err != nil {
 		return 0, metadata.MethodDefRow{}, err
@@ -259,7 +481,7 @@ func (asm *Assembly) pickMethodOverload(typeRID uint32, methodName string, args 
 		// genuinely-single-overload call (the overwhelming majority) is
 		// unaffected, since a real single overload's own arity/shape
 		// always does match its own call sites' real arguments.
-		if row, ok := candidateMatchesArgs(rows[0], args); ok {
+		if row, ok := asm.candidateMatchesArgs(rows[0], args, genericArgCount); ok {
 			return rids[0], row, nil
 		}
 		return 0, metadata.MethodDefRow{}, fmt.Errorf("metadata: %q candidate's signature doesn't match the call site's %d argument(s)", methodName, len(args))
@@ -271,6 +493,13 @@ func (asm *Assembly) pickMethodOverload(typeRID uint32, methodName string, args 
 		if err != nil {
 			continue
 		}
+		if sig.GenParamCount != uint32(genericArgCount) {
+			// Same hard generic-arity filter as candidateMatchesArgs'
+			// identical check above — a same-named, same-real-arity
+			// plain/generic method pair (Descendants()/Descendants<T>())
+			// must never tie here either.
+			continue
+		}
 		declared := args
 		if sig.HasThis && len(declared) > 0 {
 			declared = declared[1:]
@@ -278,7 +507,7 @@ func (asm *Assembly) pickMethodOverload(typeRID uint32, methodName string, args 
 		if len(declared) != len(sig.Params) {
 			continue
 		}
-		if hasHardShapeMismatch(sig.Params, declared) {
+		if asm.hasHardShapeMismatch(sig.Params, declared) {
 			continue
 		}
 		score := 0
@@ -296,6 +525,25 @@ func (asm *Assembly) pickMethodOverload(typeRID uint32, methodName string, args 
 			// (a SigClass/SigValueType/SigGenericInst token) and the
 			// actual argument's real type name is too, an exact match is
 			// worth far more than any coarse Kind-only score.
+			// Call-site exact match (Fase 3.40): the ORIGINAL call site's
+			// own compile-time-resolved parameter type name, if the
+			// caller has one at all (ir.Call.ParamTypeNames — nil for
+			// callers with no Call-level IR context, e.g. Machine.New).
+			// This is strictly more reliable than runtimeValueTypeName
+			// below for exactly the case that scoring alone can't
+			// resolve: a bool argument and any enum member both collapse
+			// to the same KindI4 shape, so runtimeValueTypeName(declared[j])
+			// can only ever report "System.Int32" for either — tying two
+			// overloads that differ only in "bool" vs "SomeEnum" forever.
+			// A confirmed call-site match short-circuits the whole
+			// per-parameter score with a bonus no coarse-Kind or subtype
+			// match could ever match or beat.
+			if j < len(paramTypeNames) && paramTypeNames[j] != "" {
+				if name, ok := paramTypeName(asm.md, p); ok && name == paramTypeNames[j] {
+					score += 1000
+					continue
+				}
+			}
 			if name, ok := paramTypeName(asm.md, p); ok {
 				if actual, ok := runtimeValueTypeName(declared[j]); ok {
 					switch {
@@ -426,10 +674,26 @@ func (asm *Assembly) valueIsAssignableToTypeName(v runtime.Value, targetName str
 // one (SigClass/SigValueType carry a Token directly; SigGenericInst's
 // Token names its open generic type) — used by pickMethodOverload's
 // exact-match refinement.
+//
+// This must go through ir.SigTypeFullName rather than the bare
+// resolveTypeTokenName(md, p.Token) it used to call directly: for
+// SigGenericInst, resolveTypeTokenName only ever resolves the OPEN
+// generic type (e.g. "System.ReadOnlyMemory`1"), discarding p.Args
+// entirely — so two overloads differing only in a generic argument
+// (Parse(ReadOnlyMemory<byte>, ...) vs Parse(ReadOnlyMemory<char>, ...),
+// the real System.Text.Json.JsonDocument::Parse overload set) produced
+// the exact same candidate name and could never be told apart by the
+// exact-match refinement below. ir.SigTypeFullName keeps the closed type
+// arguments ("System.ReadOnlyMemory`1[[System.Byte]]" vs
+// "...[[System.Char]]") and is also what sigParamTypeNames
+// (internal/ir/builder.go) now uses to build the call site's own
+// paramTypeNames — both sides of the j < len(paramTypeNames) comparison
+// below must use the same naming scheme or the exact-match bonus can
+// never fire at all.
 func paramTypeName(md *metadata.Metadata, p metadata.SigType) (string, bool) {
 	switch p.Kind {
 	case metadata.SigClass, metadata.SigValueType, metadata.SigGenericInst:
-		name, err := resolveTypeTokenName(md, p.Token)
+		name, err := ir.SigTypeFullName(md, p)
 		if err != nil {
 			return "", false
 		}
@@ -462,6 +726,16 @@ func runtimeValueTypeName(v runtime.Value) (string, bool) {
 		return "System.Single", true
 	case runtime.KindR8:
 		return "System.Double", true
+	case runtime.KindFunc:
+		// A delegate's own declared type (Fase 3.40, DelegateTypeName —
+		// see runtime.Func's own doc comment for why this needs its own
+		// case: every delegate collapses to the same KindFunc shape
+		// regardless of type, which previously made two different
+		// delegate-typed overload parameters indistinguishable here).
+		if v.Func == nil || v.Func.DelegateTypeName == "" {
+			return "", false
+		}
+		return v.Func.DelegateTypeName, true
 	case runtime.KindStruct:
 		if v.Struct == nil || v.Struct.Type == nil {
 			return "", false
@@ -646,16 +920,86 @@ func scoreParamMatch(sigKind metadata.SigTypeKind, argKind runtime.Kind) int {
 // both be a same-named method). Ordinary (non-explicit) interface
 // implementations need no help here — plain isLocalMethod/Resolve by
 // concrete-type-plus-method-name already finds those directly.
+// resolveExplicitImpl walks from concreteTypeFullName up through its own
+// BaseTypeFullName chain (Fase 3.40), not just the exact concrete type:
+// found via a real, load-bearing case, DocumentFormat.OpenXml.Framework's
+// own `void IPackageInitializer.Initialize(OpenXmlPackage package)`,
+// explicitly implemented on the ABSTRACT PackageFeatureBase rather than
+// any of its concrete leaf subclasses (StreamPackageFeature, ...) —
+// interface dispatch resolves against the receiver's most-derived type,
+// but the explicit MethodImpl entry itself can live on any ancestor, the
+// same way a plain (non-derived) override can.
+//
+// The returned name is already fully qualified as "<declaringType>::
+// <mangledMethod>" (declaringType being whichever ancestor's own
+// MethodImpl table actually matched, not necessarily concreteTypeFullName
+// itself) — ExplicitImplResolver's caller (Machine.call) used to combine
+// concrete+"::"+implMethod itself, which was only ever correct back when
+// this only ever checked the exact concrete type; now that it walks
+// ancestors too, the match's real owner has to travel with it.
 func (asm *Assembly) resolveExplicitImpl(concreteTypeFullName, interfaceFullName, methodName string) (string, bool) {
-	namespace, name := splitTypeName(concreteTypeFullName)
+	key := concreteTypeFullName + "\x00" + interfaceFullName + "\x00" + methodName
+	asm.cacheMu.RLock()
+	cached, hit := asm.explicitImpls[key]
+	asm.cacheMu.RUnlock()
+	if hit {
+		return cached.name, cached.ok
+	}
+
+	name, ok := asm.resolveExplicitImplUncached(concreteTypeFullName, interfaceFullName, methodName)
+
+	asm.cacheMu.Lock()
+	asm.explicitImpls[key] = explicitImplResult{name: name, ok: ok}
+	asm.cacheMu.Unlock()
+	return name, ok
+}
+
+// resolveExplicitImplUncached is resolveExplicitImpl's real ancestor-chain
+// walk, split out so resolveExplicitImpl's own cache check above can wrap
+// it without recursing back through the cache — see explicitImpls' own
+// doc comment for why this needs memoizing at all.
+func (asm *Assembly) resolveExplicitImplUncached(concreteTypeFullName, interfaceFullName, methodName string) (string, bool) {
+	seen := map[string]bool{}
+	for typeName := concreteTypeFullName; typeName != "" && !seen[typeName]; {
+		seen[typeName] = true
+		if m, ok := asm.resolveExplicitImplExact(typeName, interfaceFullName, methodName); ok {
+			return typeName + "::" + m, true
+		}
+		t, err := asm.resolveTypeByFullName(typeName)
+		if err != nil || t == nil {
+			break
+		}
+		typeName = t.BaseTypeFullName
+	}
+	return "", false
+}
+
+// resolveExplicitImplExact checks only typeFullName's own MethodImpl
+// table — resolveExplicitImpl's per-ancestor step.
+func (asm *Assembly) resolveExplicitImplExact(typeFullName, interfaceFullName, methodName string) (string, bool) {
+	namespace, name := splitTypeName(typeFullName)
 	typeRID, _, err := asm.md.FindTypeDef(namespace, name)
 	if err != nil {
-		// Multi-assembly fallback (Fase 3.27): concreteTypeFullName may
+		// Multi-assembly fallback (Fase 3.27 style): typeFullName may
 		// name a type that lives in a dependency, not this assembly.
+		// asm.deps alone isn't always enough — a generic base class one
+		// concrete leaf type's own assembly extends (found via a real,
+		// load-bearing case, Fase 3.40: DocumentFormat.OpenXml.dll's own
+		// SpreadsheetDocumentFeatures extends TypedPackageFeatureCollection
+		// `2, whose real MethodImpl for `IMainPartFeature.Part` lives in
+		// the SAME assembly — but that assembly isn't necessarily in
+		// *this* asm.deps if resolveExplicitImpl's own walk started from
+		// a receiver whose Resolvers happen to be scoped elsewhere) — so
+		// this also tries globalTypeIndex, the same cross-package
+		// last-resort owner lookup resolveTypeByFullNameAt itself already
+		// relies on (see that field's own doc comment).
 		for _, dep := range asm.deps {
-			if m, ok := dep.resolveExplicitImpl(concreteTypeFullName, interfaceFullName, methodName); ok {
+			if m, ok := dep.resolveExplicitImplExact(typeFullName, interfaceFullName, methodName); ok {
 				return m, true
 			}
+		}
+		if owner, ok := asm.globalTypeIndex[typeFullName]; ok && owner != asm {
+			return owner.resolveExplicitImplExact(typeFullName, interfaceFullName, methodName)
 		}
 		return "", false
 	}
@@ -851,13 +1195,44 @@ func (asm *Assembly) buildMethod(methodRID uint32, row metadata.MethodDefRow) (*
 // entry-point assembly's.
 func (asm *Assembly) resolvers() *runtime.Resolvers {
 	return &runtime.Resolvers{
-		Resolve:             asm.resolveByFullName,
-		ResolveType:         asm.resolveTypeByFullName,
-		ResolveExplicitImpl: asm.resolveExplicitImpl,
-		ResolveEnum:         asm.resolveEnumMembers,
-		ResolveFieldBytes:   asm.resolveFieldBytes,
-		ResolveMember:       asm.resolveMember,
+		Resolve:                 asm.resolveByFullName,
+		ResolveType:             asm.resolveTypeByFullName,
+		ResolveExplicitImpl:     asm.resolveExplicitImpl,
+		ResolveEnum:             asm.resolveEnumMembers,
+		ResolveFieldBytes:       asm.resolveFieldBytes,
+		ResolveMember:           asm.resolveMember,
+		ResolveManifestResource: asm.resolveManifestResource,
 	}
+}
+
+// resolveManifestResource backs Assembly.GetManifestResourceStream (Fase
+// 3.40) — looks up name in THIS assembly's own ManifestResource table
+// only (no dependency fallback: Assembly.GetExecutingAssembly() always
+// names one specific assembly, and Machine.invoke already swaps the
+// active resolver to match whichever assembly's method is currently
+// running, so there's never a "which assembly did the caller mean"
+// ambiguity the way a TypeRef into a dependency has). ok=false for a
+// resource that doesn't exist, or one whose Implementation names another
+// file/assembly entirely (a real but rare shape — every resource found
+// in real packages so far is embedded directly in the requesting
+// assembly's own PE image).
+func (asm *Assembly) resolveManifestResource(name string) ([]byte, bool) {
+	row, found, err := asm.md.FindManifestResource(name)
+	if err != nil || !found || !row.Implementation.IsNil() {
+		return nil, false
+	}
+	section, err := asm.file.RVA(asm.file.CLI.ResourcesRVA)
+	if err != nil || uint64(row.Offset)+4 > uint64(len(section)) {
+		return nil, false
+	}
+	entry := section[row.Offset:]
+	length := binary.LittleEndian.Uint32(entry[:4])
+	if uint64(4+length) > uint64(len(entry)) {
+		return nil, false
+	}
+	data := make([]byte, length)
+	copy(data, entry[4:4+length])
+	return data, true
 }
 
 // resolveFieldBytes backs the interpreter's FieldBytesResolver (Fase
@@ -1011,6 +1386,23 @@ func (asm *Assembly) resolveTypeByFullNameAt(fullName string, depth int) (*runti
 				return dt, nil
 			}
 		}
+		// Cross-package last resort (Fase 3.40) — see globalTypeIndex's
+		// own doc comment. Jumps directly to the owning assembly's own
+		// buildType, never back through resolveTypeByFullNameAt/deps, so
+		// this can never recurse regardless of how the real dependency
+		// graph is shaped.
+		if owner, ok := asm.globalTypeIndex[fullName]; ok && owner != asm {
+			if dt, derr := owner.buildType(fullName, depth); derr == nil {
+				owner.cacheMu.Lock()
+				if existing, ok := owner.types[fullName]; ok {
+					dt = existing
+				} else {
+					owner.types[fullName] = dt
+				}
+				owner.cacheMu.Unlock()
+				return dt, nil
+			}
+		}
 		return nil, err
 	}
 	asm.cacheMu.Lock()
@@ -1027,6 +1419,29 @@ func (asm *Assembly) cachedType(fullName string) (*runtime.Type, bool) {
 	defer asm.cacheMu.Unlock()
 	t, ok := asm.types[fullName]
 	return t, ok
+}
+
+// indexOwnTypesInto records every TypeDef this assembly itself declares
+// (by full name, "+"-qualified for nested types) into index — see
+// globalTypeIndex's own doc comment. A name a later assembly ALSO
+// declares (a real, if rare, cross-package collision) keeps whichever
+// assembly claimed it first; the index is a best-effort last resort,
+// not a promise of perfect disambiguation.
+func (asm *Assembly) indexOwnTypesInto(index map[string]*Assembly) {
+	n := asm.md.RowCount(metadata.TableTypeDef)
+	for rid := uint32(1); rid <= n; rid++ {
+		row, err := asm.md.TypeDef(rid)
+		if err != nil {
+			continue
+		}
+		name, err := qualifyTypeDefName(asm.md, rid, row)
+		if err != nil {
+			continue
+		}
+		if _, exists := index[name]; !exists {
+			index[name] = asm
+		}
+	}
 }
 
 func (asm *Assembly) buildType(fullName string, depth int) (*runtime.Type, error) {

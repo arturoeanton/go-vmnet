@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "target": "netstandard2.0",
+  "packages": [
+    {
+      "id": "Newtonsoft.Json",
+      "version": "13.0.3",
+      "selectedAsset": "lib/netstandard2.0/Newtonsoft.Json.dll",
+      "dependencies": []
+    }
+  ]
+}

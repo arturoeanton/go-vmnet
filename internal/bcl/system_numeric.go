@@ -3,6 +3,7 @@ package bcl
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/arturoeanton/go-vmnet/internal/runtime"
 )
@@ -140,17 +141,31 @@ func int32Parse(args []runtime.Value) (runtime.Value, error) {
 }
 
 // int32TryParse's `out int result` arrives as a managed pointer, same
-// mechanism as any other `ref`/`out` primitive since Fase 3.5.
+// mechanism as any other `ref`/`out` primitive since Fase 3.5. Both real
+// overload shapes are covered (Fase 3.43, the second found reading a real
+// .xlsx through ClosedXML 0.105.0's own worksheet reader): the plain
+// `TryParse(string, out int)` and the culture-explicit `TryParse(string,
+// NumberStyles, IFormatProvider, out int)` — the out parameter is always
+// the LAST argument, the string always the first, and the styles/provider
+// pair contributes nothing for this loop's target packages' real inputs
+// (always NumberStyles.Integer-shaped decimal digits with
+// CultureInfo.InvariantCulture, which is exactly what base-10 ParseInt
+// already is; a styles flag requesting hex/thousands-separators would be
+// a real semantic difference, but no caller here passes one).
 func int32TryParse(args []runtime.Value) (runtime.Value, error) {
-	if len(args) < 2 || args[0].Kind != runtime.KindString || args[1].Kind != runtime.KindRef || args[1].Ref == nil {
+	if len(args) < 2 || args[0].Kind != runtime.KindString {
 		return runtime.Value{}, fmt.Errorf("bcl: System.Int32.TryParse expects (string, out int)")
 	}
-	n, err := strconv.ParseInt(args[0].Str, 10, 32)
+	out := args[len(args)-1]
+	if out.Kind != runtime.KindRef || out.Ref == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Int32.TryParse expects an out parameter")
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(args[0].Str), 10, 32)
 	if err != nil {
-		*args[1].Ref = runtime.Int32(0)
+		*out.Ref = runtime.Int32(0)
 		return runtime.Bool(false), nil
 	}
-	*args[1].Ref = runtime.Int32(int32(n))
+	*out.Ref = runtime.Int32(int32(n))
 	return runtime.Bool(true), nil
 }
 

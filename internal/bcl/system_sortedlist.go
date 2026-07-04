@@ -2,6 +2,7 @@ package bcl
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/arturoeanton/go-vmnet/internal/runtime"
 )
@@ -17,24 +18,36 @@ import (
 // insertion; real SortedList is backed by two parallel arrays the exact
 // same way internally.
 type nativeSortedList struct {
-	keys   []runtime.Value
-	values []runtime.Value
+	keys     []runtime.Value
+	values   []runtime.Value
+	typeName string
 }
 
 func init() {
-	registerCtor("System.Collections.SortedList", func([]runtime.Value) (*runtime.Object, error) {
-		return &runtime.Object{Native: &nativeSortedList{}}, nil
-	})
-	register("System.Collections.SortedList::get_Item", true, sortedListGetItem)
-	register("System.Collections.SortedList::set_Item", false, sortedListSetItem)
-	register("System.Collections.SortedList::get_Count", true, sortedListGetCount)
-	// Remove is void on SortedList (unlike Dictionary`2.Remove's bool) —
-	// a missing key is silently a no-op, matching real semantics.
-	register("System.Collections.SortedList::Remove", false, sortedListRemove)
-	register("System.Collections.SortedList::get_Values", true, sortedListGetValues)
-	register("System.Collections.SortedList::get_Keys", true, sortedListGetKeys)
-	register("System.Collections.SortedList::ContainsKey", true, sortedListContainsKey)
-	register("System.Collections.SortedList::Contains", true, sortedListContainsKey)
+	// Registered under both the legacy non-generic SortedList and the
+	// generic SortedList`2 (e.g. ClosedXML's style caches use
+	// SortedList<TKey,TValue> directly) — same Go struct backs both,
+	// matching the nativeDict/nativeStack precedent (Fase 3.39/3.40).
+	for _, typeName := range []string{"System.Collections.SortedList", "System.Collections.Generic.SortedList`2"} {
+		tn := typeName
+		registerCtor(tn, func([]runtime.Value) (*runtime.Object, error) {
+			return &runtime.Object{Native: &nativeSortedList{typeName: tn}}, nil
+		})
+		register(tn+"::get_Item", true, sortedListGetItem)
+		register(tn+"::set_Item", false, sortedListSetItem)
+		register(tn+"::Add", false, sortedListAdd)
+		register(tn+"::get_Count", true, sortedListGetCount)
+		// Remove is void on SortedList (unlike Dictionary`2.Remove's bool) —
+		// a missing key is silently a no-op, matching real semantics.
+		register(tn+"::Remove", false, sortedListRemove)
+		register(tn+"::get_Values", true, sortedListGetValues)
+		register(tn+"::get_Keys", true, sortedListGetKeys)
+		register(tn+"::ContainsKey", true, sortedListContainsKey)
+		register(tn+"::Contains", true, sortedListContainsKey)
+		register(tn+"::TryGetValue", true, sortedListTryGetValue)
+		register(tn+"::Clear", false, sortedListClear)
+		register(tn+"::IndexOfKey", true, sortedListIndexOfKey)
+	}
 	// List<T>/ArrayList.CopyTo(array, index) — needed by SortedList.
 	// Values.CopyTo, but registered for both real collections too since
 	// it's the same real ICollection member either exposes.
@@ -53,11 +66,27 @@ func asSortedList(args []runtime.Value) (*nativeSortedList, error) {
 	return sl, nil
 }
 
-// compareSortedListKeys orders two SortedList keys — string/int32/int64
-// only, the same real-world scope encodeDictKey documents for
-// Dictionary/Hashtable (Fase 3.38/3.39): every real key found in this
-// loop's target packages is one of these three.
+// compareSortedListKeys orders two SortedList keys — string/int32/int64,
+// the same real-world scope encodeDictKey documents for
+// Dictionary/Hashtable (Fase 3.38/3.39), plus a Uri-backed object key
+// (Fase 3.40, found via System.IO.Packaging.PackUriHelper's own
+// SortedList<PackUriHelper.ValidatedPartUri, ...>): compareSortedListKeys
+// has no Machine access to dispatch a real IComparable<T>.CompareTo
+// override generically (unlike Array.Sort/Comparer<T>.Default,
+// internal/interpreter/comparer.go), but ValidatedPartUri's own ordering
+// is really just its underlying Uri string compared ordinally, and that
+// underlying nativeUri is reachable directly off Obj.Native (set
+// alongside Obj.Type by uriCtorInPlace's "Type xor Native" exception,
+// system_uri.go) without needing to invoke anything.
 func compareSortedListKeys(a, b runtime.Value) (int, error) {
+	if a.Kind == runtime.KindObject && b.Kind == runtime.KindObject {
+		au, aerr := asUriValue(a)
+		bu, berr := asUriValue(b)
+		if aerr == nil && berr == nil {
+			return strings.Compare(au.u.String(), bu.u.String()), nil
+		}
+		return 0, fmt.Errorf("bcl: SortedList key kind %v is not supported", a.Kind)
+	}
 	switch a.Kind {
 	case runtime.KindI4:
 		if b.Kind != runtime.KindI4 {
@@ -171,6 +200,37 @@ func sortedListSetItem(args []runtime.Value) (runtime.Value, error) {
 	return runtime.Value{}, nil
 }
 
+// sortedListAdd backs Add(key, value) — unlike the indexer setter,
+// real SortedList/SortedList<K,V>.Add throws ArgumentException on a
+// duplicate key instead of silently overwriting it.
+func sortedListAdd(args []runtime.Value) (runtime.Value, error) {
+	sl, err := asSortedList(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	key, err := dictKeyValue(args, 1)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	if len(args) < 3 {
+		return runtime.Value{}, fmt.Errorf("bcl: SortedList.Add expects a value")
+	}
+	idx, found, err := sl.find(key)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	if found {
+		return runtime.Value{}, &runtime.ManagedException{TypeName: "System.ArgumentException", Message: "An item with the same key has already been added."}
+	}
+	sl.keys = append(sl.keys, runtime.Value{})
+	copy(sl.keys[idx+1:], sl.keys[idx:])
+	sl.keys[idx] = key
+	sl.values = append(sl.values, runtime.Value{})
+	copy(sl.values[idx+1:], sl.values[idx:])
+	sl.values[idx] = args[2]
+	return runtime.Value{}, nil
+}
+
 func sortedListGetCount(args []runtime.Value) (runtime.Value, error) {
 	sl, err := asSortedList(args)
 	if err != nil {
@@ -231,6 +291,64 @@ func sortedListContainsKey(args []runtime.Value) (runtime.Value, error) {
 	_, found, err := sl.find(key)
 	if err != nil {
 		return runtime.Value{}, err
+	}
+	return runtime.Bool(found), nil
+}
+
+// sortedListIndexOfKey returns key's position in sorted order, or -1 if
+// absent — real SortedList<K,V>.IndexOfKey, found via a real, load-
+// bearing case: DocumentFormat.OpenXml.Packaging's own PartUriHelper
+// caches ValidatedPartUri lookups in a SortedList and uses IndexOfKey to
+// check membership without a second key comparison.
+func sortedListIndexOfKey(args []runtime.Value) (runtime.Value, error) {
+	sl, err := asSortedList(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	key, err := dictKeyValue(args, 1)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	idx, found, err := sl.find(key)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	if !found {
+		return runtime.Int32(-1), nil
+	}
+	return runtime.Int32(int32(idx)), nil
+}
+
+func sortedListClear(args []runtime.Value) (runtime.Value, error) {
+	sl, err := asSortedList(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	sl.keys = sl.keys[:0]
+	sl.values = sl.values[:0]
+	return runtime.Value{}, nil
+}
+
+func sortedListTryGetValue(args []runtime.Value) (runtime.Value, error) {
+	sl, err := asSortedList(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	key, err := dictKeyValue(args, 1)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	if len(args) < 3 || args[2].Kind != runtime.KindRef || args[2].Ref == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: SortedList.TryGetValue expects an out parameter")
+	}
+	idx, found, err := sl.find(key)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	if found {
+		*args[2].Ref = sl.values[idx]
+	} else {
+		*args[2].Ref = runtime.Null()
 	}
 	return runtime.Bool(found), nil
 }

@@ -139,12 +139,82 @@ func NativeTypeName(native any) (string, bool) {
 	case *nativeFieldInfo:
 		return "System.Reflection.FieldInfo", true
 	case *nativeSortedList:
+		if n.typeName != "" {
+			return n.typeName, true
+		}
 		return "System.Collections.SortedList", true
+	case *nativeResourceManager:
+		return "System.Resources.ResourceManager", true
+	case *nativeWeakReference:
+		return "System.WeakReference", true
+	case *nativeZipArchive:
+		return "System.IO.Compression.ZipArchive", true
+	case *nativeZipArchiveEntry:
+		return "System.IO.Compression.ZipArchiveEntry", true
+	case *nativeXmlReader:
+		return "System.Xml.XmlReader", true
+	case *nativeUri:
+		return "System.Uri", true
+	case *nativeNameTable:
+		return "System.Xml.NameTable", true
+	case *nativeEventSource:
+		return "System.Diagnostics.Tracing.EventSource", true
+	case *nativeLinkedList:
+		return "System.Collections.Generic.LinkedList`1", true
+	case *linkedListNode:
+		return "System.Collections.Generic.LinkedListNode`1", true
 	case *nativeStack:
 		if n.typeName != "" {
 			return n.typeName, true
 		}
 		return "System.Collections.Generic.Stack`1", true
+	case *nativeParameterExpression:
+		return "System.Linq.Expressions.ParameterExpression", true
+	case *nativeMemberExpression:
+		return "System.Linq.Expressions.MemberExpression", true
+	case *nativeLambdaExpression:
+		return "System.Linq.Expressions.Expression`1", true
+	case *nativeMemberInfo:
+		return "System.Reflection.MemberInfo", true
+	case *nativeHashSet:
+		// Missing here meant receiverTypeName (internal/interpreter/
+		// typecheck.go) couldn't identify a HashSet<T> receiver at all,
+		// so calls.go's virtual-dispatch ancestor walk never got to retry
+		// System.Collections.Generic.HashSet`1::GetEnumerator (already
+		// registered just above, system_hashset.go) for a call site
+		// declared against IEnumerable<T> instead of HashSet<T> directly
+		// (Fase 3.41, found via a real, load-bearing case: ClosedXML
+		// 0.105.0 opening a real .xlsx iterates a HashSet<T> field
+		// through exactly such an IEnumerable<T>-declared foreach). Also
+		// backs SortedSet<T> (n.typeName distinguishes them exactly like
+		// nativeList's own typeName field distinguishes List`1/ArrayList,
+		// Fase 3.44) — missing that case meant `sortedSet.Select(...)`
+		// failed outright with "IEnumerable`1::GetEnumerator... not found".
+		if n.typeName != "" {
+			return n.typeName, true
+		}
+		return "System.Collections.Generic.HashSet`1", true
+	case *nativeStringReader:
+		return "System.IO.StringReader", true
+	case *nativeQueue:
+		// Missing entirely until probed against a hand-written
+		// `queue.Select(...)`/`foreach` fixture: without this case,
+		// receiverTypeName can't redirect a Queue<T> reached through
+		// IEnumerable`1 (LINQ's own enumerateAll fallback, or any
+		// interface-typed foreach) back to "Queue`1::GetEnumerator" — the
+		// same gap nativeStack's own case above already covers for
+		// Stack<T> (Fase 3.44).
+		return "System.Collections.Generic.Queue`1", true
+	case *NativeOrdered:
+		// A LINQ OrderBy/ThenBy chain result (system_linq_native.go,
+		// Fase 3.44) — reached through further LINQ chaining or a direct
+		// foreach via IEnumerable`1/IOrderedEnumerable`1.
+		return "VmnetInternal.Ordered", true
+	case *NativeGrouping:
+		// One GroupBy result group (system_linq_native.go, Fase 3.44) —
+		// reached through `group.Key`/`foreach (var x in group)`, both
+		// interface-declared call sites needing the same redirection.
+		return "VmnetInternal.Grouping", true
 	default:
 		return "", false
 	}
@@ -161,7 +231,11 @@ func NativeTypeName(native any) (string, bool) {
 // a MemoryStream argument scored an exact tie against all of them and
 // silently ran the wrong (file-based) one, picked by declaration order.
 var nativeBaseTypeNames = map[string]string{
-	"System.IO.MemoryStream": "System.IO.Stream",
+	"System.IO.MemoryStream":                      "System.IO.Stream",
+	"System.Linq.Expressions.MemberExpression":    "System.Linq.Expressions.Expression",
+	"System.Linq.Expressions.ParameterExpression": "System.Linq.Expressions.Expression",
+	"System.Linq.Expressions.Expression`1":        "System.Linq.Expressions.LambdaExpression",
+	"System.IO.StringReader":                      "System.IO.TextReader",
 }
 
 // NativeBaseTypeName returns typeName's immediate base type per
@@ -197,6 +271,17 @@ func derefReceiver(v runtime.Value) runtime.Value {
 		return *v.Ref
 	}
 	return v
+}
+
+// ValuesEqual exports valuesEqual (Fase 3.50) for
+// internal/interpreter/collection_objectmodel.go's collectionRemove,
+// which needs the exact same "find this item's index" equality List<T>.
+// Remove/ArrayList.Remove already use (listRemove, below) — real
+// Collection<T>.Remove(T item) is spec'd as `int index = IndexOf(item);
+// if index<0 return false; RemoveItem(index); return true;`, the same
+// notion of equality as every other Remove overload in this package.
+func ValuesEqual(a, b runtime.Value) bool {
+	return valuesEqual(a, b)
 }
 
 // valuesEqual implements Object.Equals' default value-equality semantics:

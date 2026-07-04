@@ -187,6 +187,11 @@ Runnable, documented examples in [`examples/`](examples/):
 | [`examples/jint-demo`](examples/jint-demo) | Real JavaScript execution via the real Jint NuGet package + its full dependency chain, driven through a small compiled C# wrapper |
 | [`examples/jint-nowrapper`](examples/jint-nowrapper) | The same Jint demo with zero C# wrapper — `Assembly.New`/`Instance.Call` driving `Jint.Engine` directly from Go |
 | [`examples/npoi-demo`](examples/npoi-demo) | Reading a real legacy `.xls` binary file (strings, numbers, a formula cell) through the real NPOI NuGet package, zero C# wrapper |
+| [`examples/system-text-json-demo`](examples/system-text-json-demo) | Parsing real JSON through the real System.Text.Json package, zero C# wrapper |
+| [`examples/newtonsoft-json-demo`](examples/newtonsoft-json-demo) | Parsing real JSON through the real Newtonsoft.Json "LINQ to JSON" DOM, zero C# wrapper |
+| [`examples/openxml-demo`](examples/openxml-demo) | Generating a real `.docx` from scratch through the real DocumentFormat.OpenXml package, round-tripped through the real .NET SDK |
+| [`examples/closedxml-demo`](examples/closedxml-demo) | Reading a real `.xlsx` file through the real ClosedXML package, via a tiny compiled C# wrapper for one font-metrics limitation |
+| [`examples/calculator`](examples/calculator) | An arithmetic/loop workload run through vmnet, native Go, and (optionally) real CoreCLR side by side, for a correctness-and-speed comparison |
 
 ## CLI
 

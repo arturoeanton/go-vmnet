@@ -57,10 +57,28 @@ func (m *Machine) staticType(typeFullName string, depth int, instrCount *int64) 
 // caller of those delegates crashing on a null Invoke instead of
 // surfacing the real, fixable problem.
 func (m *Machine) runCctor(typeFullName string, depth int, instrCount *int64) error {
+	// A handful of real static initializers construct a CLASS-level
+	// generic parameter (`new TSimpleType()` inside a non-generic method
+	// of Builder<TSimpleType>, IL `!0`, not `!!0`) — see
+	// attribute_metadata.go's own doc comment (Fase 3.41) for why that's
+	// architecturally unresolvable here (unlike a generic METHOD
+	// parameter, ir.Call.MethodGenericArgs has no way to carry it: the
+	// same IR body runs for every closed instantiation of the class, and
+	// vmnet tracks no separate runtime.Type identity per instantiation).
+	// Checked before the real IL .cctor is even resolved, so it never
+	// hits activator.go's hard "T could not be resolved" error at all for
+	// these specific, narrowly-scoped types.
+	if override, ok := nativeCctorOverrides[typeFullName]; ok {
+		t, err := m.ResolveType(typeFullName)
+		if err != nil {
+			return err
+		}
+		return override(m, t, depth, instrCount)
+	}
 	if m.Resolve == nil {
 		return nil
 	}
-	cctor, err := m.Resolve(typeFullName+"::.cctor", nil)
+	cctor, err := m.Resolve(typeFullName+"::.cctor", nil, nil, 0)
 	if err != nil {
 		if errors.Is(err, runtime.ErrMethodNotFound) {
 			return nil // no static constructor

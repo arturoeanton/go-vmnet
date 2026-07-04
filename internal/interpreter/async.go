@@ -52,7 +52,7 @@ func runStateMachine(m *Machine, stateMachine runtime.Value, depth int, instrCou
 	if !ok {
 		return fmt.Errorf("interpreter: async state machine: cannot determine its concrete type")
 	}
-	_, _, err := m.call(concrete+"::MoveNext", []runtime.Value{stateMachine}, false, depth, instrCount)
+	_, _, err := m.call(concrete+"::MoveNext", []runtime.Value{stateMachine}, false, depth, instrCount, nil, nil)
 	return err
 }
 

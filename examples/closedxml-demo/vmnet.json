@@ -1,0 +1,8 @@
+{
+  "packages": [
+    {
+      "ID": "ClosedXML",
+      "Version": "0.105.0"
+    }
+  ]
+}

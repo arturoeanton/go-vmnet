@@ -199,6 +199,34 @@ func evalConv(kind ir.ConvKind, v runtime.Value) (runtime.Value, error) {
 		return runtime.Float64(f), nil
 	}
 
+	// A managed pointer (KindRef) hitting a pointer-sized conv — the
+	// `conv.u`/`conv.i` a real `fixed (T* p = span)` statement always
+	// emits right after pinning (ECMA-335 §III.3.24 lowering of `fixed`:
+	// no other IL shape stores a pinned reference into a T* local) —
+	// passed through unconverted rather than erroring. Found running
+	// real System.Text.Json 8.0.5's netstandard2.0 build (the TFM vmnet
+	// actually selects, nuget.go's own "favor netstandard2.0" policy):
+	// JsonReaderHelper.GetUtf8ByteCount/GetUtf8FromText do exactly this
+	// (`fixed (char* chars = text) { return s_utf8Encoding.GetByteCount(
+	// chars, text.Length); }`) to reach Encoding's pointer-taking
+	// overloads — netstandard2.0's Encoding has no ReadOnlySpan<char>-
+	// shaped overload at all, unlike net8.0's corelib. vmnet has no real
+	// address space to produce a meaningful integer for this conversion;
+	// every real caller here only ever hands the resulting "pointer"
+	// straight back into ANOTHER call vmnet natively intercepts
+	// (Encoding.GetByteCount/GetBytes's pointer-taking overloads,
+	// system_text.go's encodingGetByteCount/encodingGetBytesSpan), which
+	// already knows how to dereference a KindRef directly via
+	// GetPinnableReference's own native (system_span.go). Only the
+	// pointer-sized conversions are affected (ConvI4/ConvU4/ConvI8/
+	// ConvU8) — a real narrowing conversion (conv.i1/u1/i2/u2) is never
+	// emitted for a pointer value by any real compiler, so those keep
+	// erroring on an unexpected KindRef via the ordinary toInt64 path
+	// below.
+	if v.Kind == runtime.KindRef && (kind == ir.ConvI4 || kind == ir.ConvU4 || kind == ir.ConvI8 || kind == ir.ConvU8) {
+		return v, nil
+	}
+
 	i64, err := toInt64(v)
 	if err != nil {
 		return runtime.Value{}, err

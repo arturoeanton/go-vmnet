@@ -14,7 +14,8 @@ func (asm *Assembly) machine() *interpreter.Machine {
 		WithExplicitImplResolver(r.ResolveExplicitImpl).
 		WithEnumResolver(r.ResolveEnum).
 		WithFieldBytesResolver(r.ResolveFieldBytes).
-		WithMemberResolver(r.ResolveMember)
+		WithMemberResolver(r.ResolveMember).
+		WithManifestResourceResolver(r.ResolveManifestResource)
 }
 
 // Call resolves typeName.methodName (e.g. "Rules.Engine", "Eval") and

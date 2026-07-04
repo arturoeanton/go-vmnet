@@ -15,6 +15,15 @@ func init() {
 	register("System.Char::IsUpper", true, charPredicate(unicode.IsUpper))
 	register("System.Char::IsLower", true, charPredicate(unicode.IsLower))
 	register("System.Char::IsDigit", true, charPredicate(unicode.IsDigit))
+	// Char.IsNumber is broader than IsDigit in real .NET (Unicode category
+	// Nd/Nl/No — fractions, superscripts, Roman numerals, ... — not just
+	// decimal digits), but vmnet has no exact per-category Unicode table
+	// of its own; Go's unicode.IsNumber covers the same Unicode "Number"
+	// general category, close enough for every real caller found so far
+	// (Fase 3.47, Newtonsoft.Json 13.0.3's own JsonTextReader number-
+	// token scanning, which only ever tests real ASCII/decimal digits in
+	// practice).
+	register("System.Char::IsNumber", true, charPredicate(unicode.IsNumber))
 	register("System.Char::IsLetter", true, charPredicate(unicode.IsLetter))
 	register("System.Char::IsLetterOrDigit", true, charPredicate(func(r rune) bool {
 		return unicode.IsLetter(r) || unicode.IsDigit(r)

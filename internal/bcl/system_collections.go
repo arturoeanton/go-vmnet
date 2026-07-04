@@ -2,6 +2,7 @@ package bcl
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/arturoeanton/go-vmnet/internal/runtime"
 )
@@ -63,15 +64,39 @@ type nativeDict struct {
 	m        map[string]dictEntry
 	order    []string
 	typeName string
+	// sorted is true only for SortedDictionary<K,V> (see that type's own
+	// registration below) — makes put insert a brand new key at its
+	// sorted position (compareValuesNatural over the real, decoded key)
+	// instead of appending to order's end, so get_Keys/get_Values/
+	// GetEnumerator always yield ascending key order —
+	// SortedDictionary<K,V>'s one defining, observable difference from
+	// Dictionary<K,V>. Neither constructor's IComparer<K> overload is
+	// wired up (silently ignored, same documented gap as SortedSet<T>'s
+	// own comparer argument, system_hashset.go) — this package has no
+	// Machine access to dispatch a custom one.
+	sorted bool
 }
 
 // dictPut inserts or overwrites key (already encoded) in d, appending to
-// order only the first time a key is seen — every write path (Add,
-// indexer setter, NewDictValue) must go through this so order never
-// drifts out of sync with m.
+// order (or, for a sorted dictionary, inserting at its sorted position)
+// only the first time a key is seen — every write path (Add, indexer
+// setter, NewDictValue) must go through this so order never drifts out
+// of sync with m.
 func (d *nativeDict) put(key string, entry dictEntry) {
 	if _, exists := d.m[key]; !exists {
-		d.order = append(d.order, key)
+		if d.sorted {
+			i := 0
+			for ; i < len(d.order); i++ {
+				if compareValuesNatural(entry.key, d.m[d.order[i]].key) < 0 {
+					break
+				}
+			}
+			d.order = append(d.order, "")
+			copy(d.order[i+1:], d.order[i:])
+			d.order[i] = key
+		} else {
+			d.order = append(d.order, key)
+		}
 	}
 	d.m[key] = entry
 }
@@ -130,6 +155,16 @@ var dictEnumeratorType = runtime.NewValueType(
 	[]runtime.Value{runtime.Null(), runtime.Null(), runtime.Int32(-1)},
 )
 
+// sortedDictEnumeratorType is SortedDictionary<K,V>'s own real enumerator
+// struct name (distinct from Dictionary`2+Enumerator above) — same
+// "exact concrete struct name matters for a direct, non-virtual foreach"
+// reasoning as queueEnumeratorType (system_queue.go's own doc comment).
+var sortedDictEnumeratorType = runtime.NewValueType(
+	"System.Collections.Generic", "SortedDictionary`2+Enumerator",
+	[]string{"dict", "keys", "index"},
+	[]runtime.Value{runtime.Null(), runtime.Null(), runtime.Int32(-1)},
+)
+
 func init() {
 	registerCtor("System.Collections.Generic.List`1", func([]runtime.Value) (*runtime.Object, error) {
 		return &runtime.Object{Native: &nativeList{typeName: "System.Collections.Generic.List`1"}}, nil
@@ -152,6 +187,20 @@ func init() {
 	registerCtor("System.Collections.Generic.Dictionary`2", func([]runtime.Value) (*runtime.Object, error) {
 		return &runtime.Object{Native: &nativeDict{m: map[string]dictEntry{}, typeName: "System.Collections.Generic.Dictionary`2"}}, nil
 	})
+	// A plugin/BCL-package class subclassing Dictionary<TKey,TValue>
+	// directly (`class Foo : Dictionary<string,string> { public Foo() :
+	// base(...) {} }`, a real, if less common, pattern than subclassing
+	// Exception) chains to its base via a plain, non-virtual `call
+	// Dictionary\`2::.ctor(this, ...)` — not `newobj` (only the exact
+	// leaf type gets newobj'd, allocating a plain runtime.Object with no
+	// Native at all; the base call runs on that already-allocated
+	// object). Without this, every native Dictionary method reached via
+	// the ancestor chain walk (Add, the indexer, ...) panics/errors on a
+	// nil Native. Same established pattern as system_exception.go's
+	// baseExceptionCtorInPlace (Fase 3.13) — found via a real, load-
+	// bearing case: DocumentFormat.OpenXml.Packaging's own internal
+	// PartExtensionProvider : Dictionary<string, string>.
+	register("System.Collections.Generic.Dictionary`2::.ctor", false, dictCtorInPlace)
 	register("System.Collections.Generic.Dictionary`2::Add", false, dictAdd)
 	register("System.Collections.Generic.Dictionary`2::get_Item", true, dictGetItem)
 	register("System.Collections.Generic.Dictionary`2::set_Item", false, dictSetItem)
@@ -178,6 +227,32 @@ func init() {
 	register("System.Collections.Generic.Dictionary`2+KeyCollection::GetEnumerator", true, listGetEnumerator)
 	register("System.Collections.Generic.Dictionary`2+KeyCollection+Enumerator::MoveNext", true, listEnumeratorMoveNext)
 	register("System.Collections.Generic.Dictionary`2+KeyCollection+Enumerator::get_Current", true, listEnumeratorGetCurrent)
+
+	// SortedDictionary<K,V> (Fase 3.44) — missing entirely before this
+	// hardening pass (grepping the whole repo for "SortedDictionary" found
+	// nothing at all). Reuses every one of Dictionary<K,V>'s own method
+	// implementations verbatim (none of them care about ordering except
+	// nativeDict.put, which branches on d.sorted) rather than duplicating
+	// them under new names; only GetEnumerator needs its own registration,
+	// to tag the returned struct under SortedDictionary`2's own real
+	// enumerator type name (dictGetEnumerator already branches on
+	// d.sorted for this).
+	registerCtor("System.Collections.Generic.SortedDictionary`2", func([]runtime.Value) (*runtime.Object, error) {
+		return &runtime.Object{Native: &nativeDict{m: map[string]dictEntry{}, typeName: "System.Collections.Generic.SortedDictionary`2", sorted: true}}, nil
+	})
+	register("System.Collections.Generic.SortedDictionary`2::Add", false, dictAdd)
+	register("System.Collections.Generic.SortedDictionary`2::get_Item", true, dictGetItem)
+	register("System.Collections.Generic.SortedDictionary`2::set_Item", false, dictSetItem)
+	register("System.Collections.Generic.SortedDictionary`2::ContainsKey", true, dictContainsKey)
+	register("System.Collections.Generic.SortedDictionary`2::TryGetValue", true, dictTryGetValue)
+	register("System.Collections.Generic.SortedDictionary`2::get_Count", true, dictCount)
+	register("System.Collections.Generic.SortedDictionary`2::Clear", false, dictClear)
+	register("System.Collections.Generic.SortedDictionary`2::Remove", true, dictRemove)
+	register("System.Collections.Generic.SortedDictionary`2::GetEnumerator", true, dictGetEnumerator)
+	register("System.Collections.Generic.SortedDictionary`2+Enumerator::MoveNext", true, dictEnumeratorMoveNext)
+	register("System.Collections.Generic.SortedDictionary`2+Enumerator::get_Current", true, dictEnumeratorGetCurrent)
+	register("System.Collections.Generic.SortedDictionary`2::get_Values", true, dictGetValues)
+	register("System.Collections.Generic.SortedDictionary`2::get_Keys", true, dictGetKeys)
 
 	// System.Collections.ArrayList (Fase 3.36) is the legacy,
 	// non-generic predecessor of List<T> — vmnet's runtime.Value is
@@ -258,13 +333,52 @@ func NewListValue(items []runtime.Value) runtime.Value {
 // NativeListItems returns a native-backed List<T>'s items, if native is
 // one — used by LINQ's enumerateAll (internal/interpreter/linq.go) as a
 // direct fast path (skip driving a real GetEnumerator/MoveNext/
-// get_Current loop when the elements are already a Go slice).
+// get_Current loop when the elements are already a Go slice), and by
+// every other plain bcl.Native that special-cases "an IEnumerable
+// argument might really already be a Go slice" the same way (String.Join,
+// List<T>.AddRange/Contains, ...). A *NativeOrdered (a pending LINQ
+// OrderBy/ThenBy chain, system_linq_native.go) answers here too, via its
+// own already-sorted Items, and a *NativeGrouping (one GroupBy result
+// group) recurses into its own already-List-shaped Items — found via a
+// real, hand-written probe: `string.Join("/", someGroup)` (iterating an
+// IGrouping<K,V> directly, a very ordinary GroupBy consumption pattern)
+// printed the group's own placeholder ToString() instead of its
+// elements before this case existed, the exact same class of bug
+// NativeOrdered's own case just below already fixed for OrderBy/ThenBy.
+// Both types' own doc comments explain why this is load-bearing, not
+// just a convenience: those plain natives have no Machine access to
+// fall back to a real GetEnumerator/MoveNext loop if this returns false.
 func NativeListItems(native any) ([]runtime.Value, bool) {
-	l, ok := native.(*nativeList)
-	if !ok {
+	switch n := native.(type) {
+	case *nativeList:
+		return n.items, true
+	case *NativeOrdered:
+		return n.Items, true
+	case *NativeGrouping:
+		if n.Items.Kind == runtime.KindObject && n.Items.Obj != nil {
+			return NativeListItems(n.Items.Obj.Native)
+		}
+		return nil, false
+	default:
 		return nil, false
 	}
-	return l.items, true
+}
+
+// SetNativeListItems overwrites a native-backed List<T>'s items in place,
+// reporting whether native really was one — used by List<T>.Sort
+// (internal/interpreter/array_sort.go's machineRegistry entry, which
+// needs Machine access to invoke a Comparison<T>/IComparer<T> argument,
+// unlike every other plain List method in this file): real List<T>.Sort
+// mutates the same list instance every other outstanding reference sees,
+// not a copy, so this must write back through the existing *nativeList
+// rather than have the caller build and return a brand new one.
+func SetNativeListItems(native any, items []runtime.Value) bool {
+	l, ok := native.(*nativeList)
+	if !ok {
+		return false
+	}
+	l.items = items
+	return true
 }
 
 // NewDictValue wraps pairs (string keys, LINQ's ToDictionary own scope)
@@ -349,7 +463,11 @@ func dictGetEnumerator(args []runtime.Value) (runtime.Value, error) {
 	for i, k := range d.order {
 		keys[i] = runtime.String(k)
 	}
-	s := runtime.NewStruct(dictEnumeratorType)
+	t := dictEnumeratorType
+	if d.sorted {
+		t = sortedDictEnumeratorType
+	}
+	s := runtime.NewStruct(t)
 	s.Fields[0] = args[0]
 	s.Fields[1] = runtime.ArrRef(&runtime.Array{Elems: keys})
 	return runtime.StructVal(s), nil
@@ -377,7 +495,14 @@ func dictEnumeratorGetCurrent(args []runtime.Value) (runtime.Value, error) {
 	keys := s.Fields[1].Arr.Elems
 	idx := int(s.Fields[2].I4)
 	if idx < 0 || idx >= len(keys) {
-		return runtime.Value{}, fmt.Errorf("bcl: Dictionary.Enumerator.Current: index %d out of range", idx)
+		// Real Dictionary<TKey,TValue>.Enumerator.Current doesn't throw
+		// when accessed before the first MoveNext() or after it's
+		// returned false — it quietly answers default(KeyValuePair
+		// <TKey,TValue>) (a zeroed struct), the same as every other
+		// built-in BCL enumerator's Current in that state (Fase 3.40,
+		// found via a real, load-bearing case: some real call site reads
+		// Current speculatively around its own MoveNext check).
+		return runtime.StructVal(runtime.NewStruct(keyValuePairType)), nil
 	}
 	entry, ok := d.m[keys[idx].Str]
 	if !ok {
@@ -518,8 +643,12 @@ func listAddRange(args []runtime.Value) (runtime.Value, error) {
 		}
 	case runtime.KindObject:
 		if other.Obj != nil {
-			if ol, ok := other.Obj.Native.(*nativeList); ok {
-				l.items = append(l.items, ol.items...)
+			// NativeListItems, not a direct *nativeList assertion — same
+			// widening as stringJoin's, and for the same reason: AddRange's
+			// source is just as often a LINQ result (a NativeOrdered
+			// OrderBy/ThenBy chain included) as a real List<T>.
+			if items, ok := NativeListItems(other.Obj.Native); ok {
+				l.items = append(l.items, items...)
 			}
 		}
 	}
@@ -653,6 +782,9 @@ func dictKeyValue(args []runtime.Value, i int) (runtime.Value, error) {
 // using the exact same cached object reference every time, so pointer
 // identity is the correct semantics here, not an approximation of it.
 func encodeDictKey(v runtime.Value) (string, error) {
+	if v.Kind == runtime.KindRef && v.Ref != nil {
+		v = *v.Ref
+	}
 	switch v.Kind {
 	case runtime.KindString:
 		return "s:" + v.Str, nil
@@ -660,8 +792,66 @@ func encodeDictKey(v runtime.Value) (string, error) {
 		return fmt.Sprintf("i:%d", v.I4), nil
 	case runtime.KindI8:
 		return fmt.Sprintf("l:%d", v.I8), nil
+	case runtime.KindR4:
+		return fmt.Sprintf("f:%v", v.R4), nil
+	case runtime.KindR8:
+		return fmt.Sprintf("d:%v", v.R8), nil
 	case runtime.KindObject:
+		// A *nativeUri-backed key (System.Uri itself, or a real subclass
+		// like System.IO.Packaging.PackUriHelper's internal
+		// ValidatedPartUri, which chains `: base(...)` into the same
+		// Native — see uriCtorInPlace/system_uri.go) needs VALUE equality,
+		// not pointer identity: real System.Uri overrides both
+		// Equals(object) and GetHashCode() to compare by normalized URI
+		// string, and ValidatedPartUri never re-overrides GetHashCode (its
+		// own IEquatable<ValidatedPartUri>.Equals is explicit-interface
+		// only), so a real Dictionary<Uri,...>/Dictionary<ValidatedPartUri,
+		// ...> looks up by that same inherited string-based hash — not by
+		// reference. Found via a real, load-bearing bug reading
+		// ClosedXML's real .xlsx through DocumentFormat.OpenXml: ZipPackage
+		// .ContentTypeHelper keys its override dictionary by
+		// ValidatedPartUri, populating it from one instance (parsing
+		// [Content_Types].xml) and looking it up from a completely
+		// different instance later (validating the part actually being
+		// opened) — pointer-identity keying (this function's prior,
+		// blanket assumption for every KindObject key) made every such
+		// lookup miss, silently falling through to the extension-based
+		// Default content type instead of the correct Override one, which
+		// surfaced as a real, wrong InvalidPartContentType exception
+		// thrown by real, unmodified OpenXmlPart.Load (Fase 3.40).
+		if u, ok := v.Obj.Native.(*nativeUri); ok {
+			return "u:" + u.u.String(), nil
+		}
 		return fmt.Sprintf("o:%p", v.Obj), nil
+	case runtime.KindNull:
+		return "n:", nil
+	case runtime.KindStruct:
+		// A real value-type key (e.g. a "record struct"-style key type
+		// used purely for value-based interning/deduplication, Fase
+		// 3.40 — found via a real, load-bearing case: ClosedXML's own
+		// style repositories key a ConcurrentDictionary by structs like
+		// XLAlignmentKey) — encoded by recursively encoding every field
+		// in declaration order. This assumes the struct's real semantics
+		// are plain field-wise value equality (the default a struct gets
+		// unless it overrides Equals/GetHashCode with something more
+		// exotic) — true for every real key type found in this loop's
+		// target packages so far, all plain data-holder structs.
+		if v.Struct == nil {
+			return "", fmt.Errorf("bcl: Dictionary key: null struct value")
+		}
+		var sb strings.Builder
+		sb.WriteString("t:")
+		for i, f := range v.Struct.Fields {
+			if i > 0 {
+				sb.WriteByte(',')
+			}
+			enc, err := encodeDictKey(f)
+			if err != nil {
+				return "", fmt.Errorf("bcl: Dictionary key: struct field %d: %w", i, err)
+			}
+			sb.WriteString(enc)
+		}
+		return sb.String(), nil
 	default:
 		return "", fmt.Errorf("bcl: Dictionary key kind %v is not supported", v.Kind)
 	}
@@ -675,6 +865,32 @@ func dictKey(args []runtime.Value, i int) (string, error) {
 		return "", err
 	}
 	return encodeDictKey(v)
+}
+
+// dictCtorInPlace backs a base-chaining call to Dictionary`2::.ctor from
+// a plugin/BCL-package subclass (see the register() call site's own doc
+// comment) — mutates the already-allocated derived receiver's Native
+// field rather than allocating a fresh Object (which registerCtor's
+// newobj-only path already does for constructing Dictionary directly).
+// Every real overload (capacity, IEqualityComparer, an IDictionary to
+// copy from) is ignored beyond the receiver itself: nativeDict has no
+// notion of a custom comparer (Fase 3.32's own string-keys-only scope),
+// and no real caller found in this loop's target packages seeds a
+// subclassed Dictionary from an existing one at construction time.
+func dictCtorInPlace(args []runtime.Value) (runtime.Value, error) {
+	if len(args) == 0 || args[0].Kind != runtime.KindObject || args[0].Obj == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: Dictionary`2 constructor called without a receiver")
+	}
+	typeName := "System.Collections.Generic.Dictionary`2"
+	if t := args[0].Obj.Type; t != nil {
+		if t.Namespace != "" {
+			typeName = t.Namespace + "." + t.Name
+		} else {
+			typeName = t.Name
+		}
+	}
+	args[0].Obj.Native = &nativeDict{m: map[string]dictEntry{}, typeName: typeName}
+	return runtime.Value{}, nil
 }
 
 func dictAdd(args []runtime.Value) (runtime.Value, error) {
@@ -780,12 +996,29 @@ func dictTryGetValue(args []runtime.Value) (runtime.Value, error) {
 		return runtime.Value{}, fmt.Errorf("bcl: Dictionary.TryGetValue expects an out parameter")
 	}
 	e, ok := d.m[key]
-	v := e.value
-	if !ok {
-		v = runtime.Null()
+	if ok {
+		*args[2].Ref = e.value
+		return runtime.Bool(true), nil
 	}
-	*args[2].Ref = v
-	return runtime.Bool(ok), nil
+	// A miss must set the out param to default(TValue), same as real
+	// TryGetValue — but this call site has no TValue to build a real
+	// typed zero from (same documented gap as FirstOrDefault's own
+	// untyped-miss case). Unconditionally overwriting with an untyped
+	// runtime.Null() used to actively destroy a perfectly good typed
+	// zero that was ALREADY sitting there: an `out int v` argument's
+	// storage is already zero-initialized to a real Int32(0) by the
+	// method's own locals-init step (method.LocalDefaults,
+	// interpreter/eval.go) before TryGetValue is ever called — probed
+	// via a real fixture (`d.TryGetValue("missing", out int v); return
+	// v.ToString();`): stomping that Int32(0) with KindNull made the
+	// very next `v.ToString()` throw "expects an int32 receiver" instead
+	// of printing "0" like real .NET does (Fase 3.44). Leaving the slot
+	// untouched on a miss preserves that pre-existing typed zero for the
+	// overwhelmingly common `out var`/freshly-declared-`out` case; the
+	// one case this still gets wrong (the out variable already held some
+	// OTHER non-default value before a miss) is a strictly smaller gap
+	// than unconditionally corrupting every miss the way this did before.
+	return runtime.Bool(false), nil
 }
 
 func dictCount(args []runtime.Value) (runtime.Value, error) {

@@ -3732,6 +3732,567 @@ cd examples/npoi-demo && go run .   # abre el .xls real, imprime datos de celda 
 
 ---
 
+### Fase 3.40 — `examples/closedxml-demo`: lectura real de `.xlsx`, la cadena de bugs más larga del proyecto
+
+**Objetivo:** el único demo que la Fase 3.39 dejó bloqueado — `new XLWorkbook(stream)` contra un
+`.xlsx` real a través del paquete ClosedXML 0.105.0 real, sin modificar. Llegar hasta acá necesitó
+docenas de bugs reales y generales de intérprete/BCL corregidos uno por uno en el mismo ciclo de
+sonda-ejecución-corrección de cada fase de demo anterior — solo que una cadena mucho más larga
+(ClosedXML arrastra transitivamente DocumentFormat.OpenXml, DocumentFormat.OpenXml.Framework,
+System.IO.Packaging y System.Memory, cada uno con sus propios internals reales que correr
+correctamente).
+
+**El problema arquitectónico central, encontrado una y otra vez**: vmnet borra todo parámetro de
+tipo genérico en tiempo de construcción del IR (el mismo cuerpo de método compilado corre para
+cada instanciación cerrada), lo cual está bien para una colección respaldada nativamente
+(`List<T>`) pero se rompe apenas IL *real, interpretado* depende de conocer su propio `T` —
+`typeof(T)`, `new T()`/`Activator.CreateInstance<T>()`, `default(T)`, o una llamada virtual con
+prefijo `constrained.` sobre el propio `T`. Un parámetro de método genérico (MVAR, `!!0`) puede
+recuperarse por sitio de llamada desde el blob `Instantiation` de su propio `MethodSpec`
+(`ir.Call.MethodGenericArgs`, ya construido en una fase anterior) — pero un parámetro de **clase**
+genérica (VAR, `!0`) no, ya que el mismo IR corre para cada instanciación de la clase sin importar
+qué método se entra. Se evaluó construir identidad real de `runtime.Type` por instanciación cerrada
+(para poder rastrear un parámetro genérico de clase de la misma forma) y se decidió deliberadamente
+**no** hacerlo — una tarea mayor desproporcionada frente a las formas reales que esto encontró en la
+práctica, todas dentro de uno de dos patrones acotados y arreglables:
+
+- [x] **Un método genérico reenvía su propio T todavía abierto a otro método genérico** (p. ej.
+      `OpenXmlPart.LoadDomTree<T>()` llamando a `Activator.CreateInstance<T>()`, o
+      `OpenXmlElement.Elements<T>()`/`GetFirstChild<T>()` reenviando a `OfType<T>()`/`First<T>()`):
+      el sitio de llamada del LLAMADOR conoce el T real y cerrado (es el único lugar de toda la
+      cadena donde T es genuinamente concreto), así que cada uno de estos se interceptó directamente
+      vía `genericMachineRegistry` — el mismo mecanismo que la primera entrada de la Fase 3.40
+      (`FeatureCollectionBase.Get<TFeature>`) ya había establecido — reimplementando solo lo
+      necesario del comportamiento real del método en forma nativa en vez de dejar correr el cuerpo
+      de IR compartido con T borrado. Nuevos `internal/interpreter/loaddomtree.go`,
+      `elementfactory.go`, `elements.go`, `attribute_createnew.go`, `enumvalue_tryparse.go`,
+      `cloneimp.go`, `linq_groupby.go`, `linq_range.go` — una intercepción acotada y documentada
+      por cada forma real encontrada, no un motor general de reificación.
+- [x] **Un campo estático de un parámetro genérico de clase se lee a través de un `ref`/puntero
+      administrado en un sitio de llamada cuyo PROPIO tipo declarado es concreto**
+      (`Lut<T>.DefaultValue`, `Slice<TElement>._defaultValue` — internals reales de
+      `System.Memory`/ClosedXML): el sitio de lectura en sí (`ldfld`/`ldflda`) siempre nombra un
+      tipo de valor real y resoluble, aunque el tipo *declarado del campo* sea un `T` borrado.
+      `fieldSlot` de `internal/interpreter/eval.go` (promovido a método de `Machine`) ahora
+      recupera un struct transitorio, correctamente puesto a cero, del **tipo del propio sitio de
+      acceso** cuando encuentra un `KindRef` desnudo apuntando a `KindNull` — de solo lectura por
+      construcción (nunca se escribe de vuelta en el slot estático compartido y borrado, lo cual
+      corrompería cualquier *otra* instanciación que lo comparta).
+
+**Otros bugs reales y generales encontrados y corregidos en el camino** (cada uno confirmado contra
+IL real decompilado antes de corregir, según la metodología estándar del proyecto):
+
+- [x] **Las implementaciones explícitas de interfaz perdían una carrera contra un miembro no
+      relacionado con el mismo nombre** (`Machine.call` de `internal/interpreter/calls.go`): el
+      recorrido de ancestros del despacho virtual probaba el método de nombre plano de cada
+      ancestro *antes* de siquiera revisar si existía una implementación explícita de interfaz
+      real (con su nombre mangled) — así que `DocumentFormat.OpenXml.Features.PackageFeatureBase`,
+      que declara tanto un `protected abstract Package Package { get; }` plano *como* una
+      implementación explícita no relacionada `IPackage DocumentFormat.OpenXml.Features.
+      IPackageFeature.get_Package()`, devolvía silenciosamente la incorrecta (el
+      `System.IO.Packaging.ZipPackage` real, no el wrapper `this` que el miembro de interfaz
+      realmente devuelve), corrompiendo toda llamada tipada `IPackage` posterior sobre él. La
+      resolución de implementación explícita ahora corre primero, incondicionalmente.
+- [x] **Ese mismo recorrido de ancestros saltaba el tipo hoja del propio receptor cuando se
+      llegaba desde un `Instance.Call` disparado por el host** (la API pública de la Fase 3.28
+      siempre nombra el tipo concreto exacto del receptor como destino de la llamada, así que
+      `concrete == class` ya en la primera iteración del bucle) — una optimización anterior
+      saltaba reintentar ese nombre en el bucle (razonamiento: el fallback final por nombre
+      completo ya lo cubre), pero un overload de un ANCESTRO que calzaba peor, encontrado primero
+      en el bucle, ganaba la carrera antes de que el overload propio del tipo hoja — mejor
+      calzado — tuviera siquiera oportunidad. Corregido probando el tipo hoja en línea en vez de
+      saltarlo — confirmado vía `DocumentFormat.OpenXml.Wordprocessing.Run.AppendChild<T>()`
+      (heredado, nunca redeclarado) y, en el demo de Newtonsoft.Json posterior (Fase 3.43), el
+      propio `get_Item(string)` de `Newtonsoft.Json.Linq.JObject` perdiendo contra el
+      `get_Item(object)` no relacionado de `JContainer`/`JToken`.
+- [x] **La resolución de overloads no tenía forma de distinguir un método plano de uno genérico
+      con el mismo nombre y aridad real** — `DocumentFormat.OpenXml.OpenXmlElement` declara tanto
+      un `Descendants()` plano como un `Descendants<T>()` genérico (T no aporta ningún parámetro
+      real en ninguno de los dos), y el iterador generado por el compilador del propio
+      `Descendants<T>()` internamente llama al plano — sin ninguna señal de aridad para desempatar,
+      el resolutor elegía de vuelta el overload genérico, reconstruyendo un iterador nuevo y
+      llamándose a sí mismo por siempre (`ErrCallDepthExceeded`, una recursión infinita real, no
+      una consulta lenta). Corregido con un filtro estricto de `sig.GenParamCount` en
+      `pickMethodOverload` de `assembly.go`, guiado por la aridad de instanciación genérica
+      conocida del propio sitio de llamada (la longitud de `ir.Call.MethodGenericArgs`) —
+      deliberadamente **no** aplicado al camino rápido de candidato único, ya que una llamada
+      disparada por el host no tiene ninguna señal de aridad de instanciación propia y un único
+      candidato real no es ambiguo de todos modos.
+- [x] **`newobj` no tenía un equivalente de `Call.ParamTypeNames`** — `new XLFill()` (dos
+      argumentos `ldnull`) se resolvía entre tres constructores de 2 parámetros y la misma aridad
+      puramente por *Kind* del argumento, y dos argumentos null calzaban igual de bien en cada
+      overload de tipo referencia; corría el incorrecto, saltándose silenciosamente la lógica real
+      de generación de clave de `XLFill` y dejando un campo null tres llamadas después. Corregido
+      enhebrando los nombres de tipo de parámetro declarados del callee a través de `ir.NewObj`
+      exactamente igual que `ir.Call` ya los lleva, alimentando el bono de coincidencia exacta ya
+      existente de `pickMethodOverload`.
+- [x] **Encadenamiento de constructor base para la familia `Dictionary`/`ConditionalWeakTable`/
+      `Collection<T>`** (`internal/bcl/system_collections.go`, `system_conditionalweaktable.go`,
+      `system_collection_objectmodel.go`) — una clase de plugin/paquete que subclasea uno de estos
+      directamente (`PartExtensionProvider : Dictionary<string,string>`, el propio
+      `ExpressionCache : ConditionalWeakTable<string,Formula>` de ClosedXML) encadena a su base
+      vía un `call` plano sobre el objeto derivado ya `newobj`'d, no una asignación nueva —
+      necesitando el mismo patrón de "mutar el propio `Native` del receptor en el lugar" que
+      `system_exception.go` ya había establecido para subclases de excepción.
+- [x] **Los propios hooks virtuales protegidos de `Collection<T>` (`InsertItem`/`RemoveItem`/
+      `SetItem`/`ClearItems`) se saltaban por completo** — el soporte inicial de `Collection<T>`
+      (necesario para el `JPropertyKeyedCollection : Collection<JToken>` de Newtonsoft.Json, Fase
+      3.43) implementaba `Add`/`Insert`/`Remove`/`Clear`/el setter del indexador como natives
+      planos que mutaban la lista directamente, así que un override real de estos hooks en una
+      subclase (que los tipos estilo `KeyedCollection` usan para mantener sincronizado un índice
+      de diccionario paralelo) nunca corría — el elemento sí llegaba a la lista (`Count`/
+      enumeración se veían correctos) pero cualquier búsqueda por clave devolvía null en silencio.
+      Corregido moviendo los mutadores públicos a natives conscientes de `Machine`
+      (`internal/interpreter/collection_objectmodel.go`) que hacen una llamada *virtual* real a los
+      4 hooks, exactamente igual que el `Collection<T>.Add` real llama a `this.InsertItem(...)`.
+- [x] Un hueco real de host de campo estático para `OpenXmlQualifiedName`/`XmlQualifiedName`
+      (`XmlQualifiedName.Empty`, un campo `static readonly` real, necesitaba su propio registro
+      `registerStaticFieldHost` separado de su constructor plano), más un bug real y general de
+      despacho de `IEnumValueFactory<T>::Create`: `EnumValue<T>.TryParse` hace
+      `default(T).Create(input)` — una llamada virtual con prefijo `constrained.` sobre un T
+      genérico de clase sin receptor concreto al que el despacho de vmnet pudiera redirigir —
+      corregido de la misma forma que los otros casos de genérico de clase, retransmitiendo T
+      desde el único sitio de llamada real (`AttributeInfo.CreateNew`) que todavía lo conoce.
+- [x] `System.Xml.XmlQualifiedName`, `System.Xml.XmlConvert.ToInt32/ToInt64/ToDouble/ToBoolean/
+      DecodeName`, `System.Runtime.CompilerServices.ConditionalWeakTable<TKey,TValue>`,
+      `System.Collections.ObjectModel.ReadOnlyCollection<T>`, `System.Enumerable.GroupBy`/`Range`,
+      los overloads `ReadOnlySpan<char>`/`NumberStyles` de `System.Double`/`Int32.TryParse` —
+      superficie de BCL real y general, encontrada y llenada exactamente donde la cadena real de
+      lectura de `.xlsx` la necesitaba, no adivinada de antemano.
+- [x] **Un hueco de resolución cruzada de ensamblados en la dirección "inversa"**: el wrapper C#
+      compilado propio de `examples/closedxml-demo` (`GraphicEngineWrapper.dll`, que provee un
+      `IXLGraphicEngine` mínimo para que el motor real de métricas de fuente de ClosedXML — que
+      independientemente choca contra la pared de `typeof(T)` de genérico de clase vía
+      `SixLabors.Fonts` — nunca tenga que correr) se carga vía `LoadBytes` *después* de ClosedXML
+      mismo, así que cuando el propio IL de ClosedXML llama de vuelta a un tipo que el wrapper
+      declara, el resolutor nunca había mirado en esa dirección. `Assembly.WithDependencies` ahora
+      une los propios TypeDefs del ensamblado llamador al `globalTypeIndex` compartido, extendiendo
+      el fallback cruzado entre paquetes de la Fase 3.40 existente para funcionar en ambas
+      direcciones.
+
+**Resultado**: `examples/closedxml-demo` abre el mismo fixture `.xlsx` real que el propio demo de
+NPOI (Fase 3.39) estableció el patrón para, e imprime su grilla de celdas real, valores string/
+numéricos, y una fórmula `SUM` — sin código de lectura en C# compilado en absoluto, solo el
+pequeño wrapper necesario para evitar la dependencia propia de ClosedXML en métricas de fuente.
+
+### Cómo verificar Fase 3.40
+
+```bash
+go build ./...
+go vet ./...
+go test ./... -race -count=5
+cd examples/closedxml-demo && go run .   # abre el .xlsx real, imprime datos de celda reales + una fórmula SUM
+```
+
+### Fase 3.41 — `examples/system-text-json-demo`: transcodificación real UTF-16→UTF-8 y marshaling a nivel de bytes
+
+**Objetivo:** `JsonDocument.Parse(string, JsonDocumentOptions)` a través del paquete
+System.Text.Json 8.0.5 real, sin modificar, luego leer un string y un bool de vuelta del
+`JsonElement` parseado — sin wrapper C# compilado, solo `Assembly.Call`/`Instance.Call`.
+
+- [x] **La resolución de overloads colapsaba un argumento genérico cerrado a su nombre abierto
+      demasiado pronto** — `JsonDocument.Parse(json.AsMemory(), options)` tiene dos overloads de
+      la misma aridad, `Parse(ReadOnlyMemory<byte>, ...)`/`Parse(ReadOnlyMemory<char>, ...)`, y
+      tanto los nombres de tipo de parámetro capturados por el propio sitio de llamada
+      (`ir.Call.ParamTypeNames`) como el scorer de coincidencia exacta en `assembly.go` resolvían
+      un `SigGenericInst` hasta solo su nombre genérico abierto (`ReadOnlyMemory\`1`, sin
+      argumento de tipo) — así que ambos overloads se veían idénticos y el empate se resolvía
+      hacia el que la tabla de metadata listara primero (`byte`), alimentando UTF-16 crudo
+      directamente al lector UTF-8 sin ninguna transcodificación. Corregido enrutando ambos a
+      través de la codificación de nombre cerrado `SigTypeFullName` ya existente (ya usada para
+      `typeof(T)`, solo que no para esto).
+- [x] **No había native para los overloads de `Encoding.GetByteCount`/`GetBytes` que toman
+      punteros** — el build netstandard2.0 de System.Text.Json (el que vmnet realmente carga)
+      transcodifica vía `fixed (char* p = span) { encoding.GetByteCount(p, len); }`, una forma
+      real de pin de puntero, no el overload más simple de solo `ReadOnlySpan<char>` que usaría
+      un build net8.0. Se agregó `Span<T>/ReadOnlySpan<T>.GetPinnableReference()` más los natives
+      de `Encoding` que toman puntero (`internal/bcl/system_span.go`, `system_text.go`).
+- [x] **`Unsafe.AddByteOffset` era un passthrough de identidad incondicional** — correcto para su
+      único caso conocido original (siempre offset 0), pero el propio bucle real de escaneo por
+      byte de `JsonReaderHelper` pasa un offset real y variable — corregido a aritmética de
+      punteros real de Go (`internal/bcl/system_unsafe.go`), reflejando el enfoque ya existente de
+      `Unsafe.Add`.
+- [x] **El marshaling real a nivel de bytes de structs (`MemoryMarshal.Read<T>`/`Write<T>`,
+      respaldado por `Unsafe.ReadUnaligned`/`WriteUnaligned`) no tenía implementación en
+      absoluto** — el propio `MetadataDb` de `JsonDocument` empaqueta cada token parseado como un
+      struct `DbRow` de 12 bytes (3 campos `int32` empaquetados) directamente en un `byte[]`
+      alquilado, y luego lee/escribe campos empaquetados individuales de vuelta en offsets de
+      byte. Nuevo `internal/interpreter/memorymarshal.go`: codifica/decodifica la forma real de un
+      Value (Kinds primitivos, o los propios campos de un struct en orden de declaración) hacia/
+      desde bytes consecutivos en un span real respaldado por un byte-array — reinterpretación
+      genuina a nivel de bytes, no un hack específico para `DbRow`, útil para cualquier código
+      real de formato binario/protocolo que choque con este mismo idioma.
+- [x] **`localloc` (`stackalloc T[n]`) no tenía ninguna instrucción de IR en absoluto** — código
+      real (el propio dimensionamiento de buffer temporal de `JsonReaderHelper`) reserva en pila
+      un buffer pequeño inmediatamente envuelto en un `Span<byte>`. Nuevo `ir.LocalAlloc`: asigna
+      un `runtime.Array` real de bytes en cero y empuja un puntero administrado hacia él
+      (observablemente idéntico a una reserva de pila real para cualquier caller real, ya que la
+      memoria solo se usa con forma de arreglo por el resto de la vida de esa llamada).
+- [x] `Span<T>` no tenía ningún constructor registrado en absoluto (`ReadOnlySpan<T>` sí) — un
+      `Span<byte>` escribible construido desde el puntero de `localloc` quedaba en un struct vacío
+      sin respaldo por defecto en silencio. `Encoding.GetMaxByteCount`, el camino de construcción
+      con forma de `IntPtr` de `Convert`, y `Span<T>.Clear()` completaron el resto de la cadena de
+      llamada real.
+
+**Resultado**: `examples/system-text-json-demo` parsea `{"name":"vmnet","ok":true}` e imprime
+`vmnet:true`.
+
+### Cómo verificar Fase 3.41
+
+```bash
+go build ./...
+go test ./... -race -count=5
+cd examples/system-text-json-demo && go run .
+```
+
+### Fase 3.42 — `examples/openxml-demo`: generación real de `.docx`, verificada con el SDK real de .NET
+
+**Objetivo:** generar un `.docx` real desde cero — `WordprocessingDocument.Create`,
+`AddMainDocumentPart`, un árbol de elementos `Document`/`Body`/`Paragraph`/`Run`/`Text`,
+`Document.Save()` — a través del paquete DocumentFormat.OpenXml 3.1.1 real, sin modificar, sin
+wrapper C# compilado (a diferencia del demo de ClosedXML, acá nada necesita un motor de métricas
+de fuente).
+
+- [x] **Un subconjunto real de `System.Linq.Expressions`, `ldtoken` sobre un método, y soporte de
+      `System.Reflection.MemberInfo`** — el propio `ConfigureMetadata` de cada elemento de OpenXml
+      registra cada atributo real vía `Expression<Func<TElement,TValue>>` (`a => a.Space`), que el
+      compilador reduce a `Expression.Parameter` + `ldtoken <getter de propiedad>` +
+      `MethodBase.GetMethodFromHandle` + `Expression.Property` + `Expression.Lambda` — un patrón
+      repetido **~1859 veces** en todo el SDK real. `ldtoken` sobre un token de Método nunca se
+      había implementado (solo Tipo/Campo); el único consumidor real (`ElementMetadata.Builder<T>.
+      AddAttribute`) solo hace pattern-match `expression.Body is MemberExpression` y lee
+      `.Member.Name`, así que ninguno de estos necesitaba representar un grafo de expresión real,
+      recorrible/compilable — solo la forma suficiente para esa única inspección. Nuevo
+      `ir.LoadMethodToken` (refleja el mismo atajo de identidad que `LoadTypeToken` ya tiene para
+      `typeof(T)`) e `internal/bcl/system_linq_expressions.go`.
+- [x] **`isinst`/`castclass` contra un objeto respaldado nativamente solo reconocía la jerarquía
+      real de excepciones** — el propio `is MemberExpression` de `AddAttribute` contra los nuevos
+      stand-ins nativos de Expression de vmnet siempre fallaba. `nativeMatches` de
+      `internal/interpreter/typecheck.go` ahora recae en la cadena existente y mantenida a mano de
+      `bcl.NativeTypeName` + `bcl.NativeBaseTypeName` (ya usada para el scoring de overloads) para
+      cualquier tipo nativo, no solo `ManagedException`.
+- [x] Otra pared de parámetro genérico de clase, encontrada de nuevo: el propio inicializador de
+      campo estático de `AttributeMetadata.Builder<TSimpleType>` hace `new TSimpleType()` dentro de
+      un método *no genérico* de una *clase genérica* — plomería puramente de metadata de
+      validación, nunca consultada por el camino real de escritura de XML, así que interceptada
+      vía un nuevo hook `nativeCctorOverrides` (`internal/interpreter/attribute_metadata.go`) en
+      vez de perseguida arquitectónicamente.
+- [x] **Los argumentos de URI de espacio de nombres de `XmlWriter` se descartaban en silencio,
+      nunca se escribían a la salida en absoluto** — un bug real y de correctness, con
+      consecuencias: cada parte OOXML que vmnet mismo generaba, incluyendo el propio espacio de
+      nombres por defecto *requerido* de `[Content_Types].xml`, salía sin ningún espacio de
+      nombres. Invisible para el propio `XmlReader` permisivo de vmnet (round-trip a través de sí
+      mismo nunca revisa espacios de nombres), pero el SDK real de .NET/Word lo rechazan
+      directamente (confirmado directamente: abrir el propio archivo generado por este demo a
+      través del SDK real de OpenXml, sin modificar, arrojaba `"Required Types tag not found"`
+      antes de esta corrección). Los overloads de `XmlWriter.WriteStartElement` que llevan espacio
+      de nombres ahora sí emiten la declaración `xmlns`/`xmlns:prefix` (rastreada por ámbito de
+      elemento abierto, reutilizada para `LookupPrefix`) salvo que un ancestro ya enlace el mismo
+      prefijo a la misma URI.
+- [x] `System.Xml.XmlWriter.WriteStartDocument`/`WriteEndDocument`/`LookupPrefix`, rastreo real de
+      ámbito de prefijo de espacio de nombres, el camino de constructor faltante de `System.IntPtr`
+      (`newobj IntPtr::.ctor` — vmnet representa IntPtr como un `Int64` desnudo, necesitando el
+      mismo tratamiento de "no tiene forma de objeto/struct, su propio camino de ctor" que ya tiene
+      el constructor de `System.String`).
+
+**Resultado**: `examples/openxml-demo` genera `report.docx` y — verificado directamente, no
+asumido — el SDK real de OpenXml de .NET, sin modificar, lo abre de vuelta y lee el texto de
+párrafo correcto.
+
+### Cómo verificar Fase 3.42
+
+```bash
+go build ./...
+go test ./... -race -count=5
+cd examples/openxml-demo && go run .   # escribe report.docx
+```
+
+### Fase 3.43 — `examples/newtonsoft-json-demo` + un barrido general de hardening de IL/BCL
+
+**Objetivo:** dos cosas a la vez, deliberadamente — cerrar el ciclo con Newtonsoft.Json 13.0.3
+(todavía uno de los paquetes .NET reales más ampliamente desplegados, manejado acá a través de su
+DOM real "LINQ to JSON", acceso por indexador de `JObject.Parse`, sin wrapper compilado) *y* un
+barrido general por superficie común de BCL de .NET Core sin ningún paquete único que lo dirija,
+sobre el principio de que una cobertura más amplia de IL/BCL compone su valor a través de cualquier
+paquete futuro, no solo el que se esté sondeando en ese momento.
+
+**Bugs específicos de Newtonsoft.Json** (cada uno una corrección real y general, no un parche
+específico de paquete):
+
+- [x] **Un argumento `KindObject` "calzaba" en silencio con un parámetro `SigSZArray`, y un
+      argumento numérico "calzaba" en silencio con uno `SigString`** (`hasHardShapeMismatch` de
+      `assembly.go`) — `JContainer.InsertItem` llama al `ValidateToken(item, null)` virtual; como
+      `JProperty` no lo sobreescribe, el recorrido de ancestros encontró el `ValidateToken(JToken,
+      JTokenType[], bool)` estático privado *no relacionado* de `JToken` (misma aridad) y lo
+      aceptó, alimentando un objeto `JValue` al parámetro arreglo de `Array.IndexOf`. La misma
+      forma luego rompió un índice de lista posicional (`int`) contra el propio indexador `this
+      [string key]` no relacionado de `JPropertyKeyedCollection`. Ambos ahora se rechazan
+      directamente como formas imposibles, igual que el rechazo directo ya existente de
+      `KindObject`-vs-`SigValueType`.
+- [x] `System.Char.IsNumber` (`unicode.IsNumber`) — el propio camino de escaneo de números de
+      `JsonTextReader`.
+- [x] `System.IO.StringReader`/`System.IO.TextReader` — `JObject.Parse(string)` siempre pasa por
+      `new JsonTextReader(new StringReader(json))`; superficie de BCL genuinamente nueva,
+      `Read`/`Peek`/`ReadLine`/`ReadToEnd` reales.
+- [x] `System.Collections.ObjectModel.Collection<T>` en sí (ver la propia entrada de la Fase 3.40
+      sobre su hueco de hooks virtuales descubierto después) — la clase base real más común para
+      "un `List<T>` con hooks de personalización," reutilizada vía el mismo respaldo `nativeList`
+      que ya comparte cada tipo con forma de lista concreto.
+- [x] Los overloads de 3/4 argumentos `(array, value, startIndex[, count])` de `Array.IndexOf`
+      (solo existía la forma de 2 argumentos) — la propia implementación base de
+      `KeyedCollection<TKey,TItem>` reubica un elemento por posición de esta forma durante un
+      cambio de clave.
+
+**Hardening general de BCL** (encontrado por relevamiento sistemático de huecos, no por la sonda de
+ningún paquete en particular):
+
+- [x] `Convert.ToBase64String`/`FromBase64String`/`TryToBase64Chars` — la codificación/
+      decodificación Base64 real estaba completamente ausente; entre la superficie de BCL real de
+      .NET más común (datos binarios como texto: hashes criptográficos, tokens, imágenes) mucho
+      más allá de cualquier paquete objetivo en particular.
+- [x] `Convert.ToByte/ToSByte/ToInt16/ToUInt16/ToUInt32/ToUInt64/ToSingle` — cada conversión
+      numérica de ensanchamiento/estrechamiento restante que `Convert.ToInt32/ToInt64/ToDouble/
+      ToBoolean` todavía no cubría.
+- [x] `String.TrimStart/TrimEnd/PadLeft/PadRight/Insert/Remove` — superficie común de `String` sin
+      cobertura previa.
+- [x] `Array.Reverse/Fill/Find/FindLast/FindIndex/FindAll/Exists/ForEach/TrueForAll/ConvertAll/
+      LastIndexOf` — los miembros estáticos de `Array` que toman `Predicate<T>`/`Action<T>`/
+      `Converter<T,TOutput>`, junto a los `Sort`/`BinarySearch` ya existentes.
+
+**Resultado**: `examples/newtonsoft-json-demo` parsea `{"name":"vmnet","stars":42,"active":true}`
+e imprime `vmnet:42`.
+
+### Cómo verificar Fase 3.43
+
+```bash
+go build ./...
+go vet ./...
+go test ./... -race -count=5
+cd examples/newtonsoft-json-demo && go run .
+cd ../npoi-demo && go run .
+cd ../system-text-json-demo && go run .
+cd ../openxml-demo && go run .
+cd ../closedxml-demo && go run .
+```
+
+### Fase 3.44 — el cuelgue no determinista de `examples/closedxml-demo`: `FindTypeDef` era un escaneo O(n) sin caché
+
+**Objetivo:** cerrar un bug real y reproducible que la propia afirmación "los cinco demos pasan"
+de la suite pasó por alto — `closedxml-demo` se colgaba de forma intermitente (no en cada
+ejecución) al lanzarlo directamente con `go run .`, contradiciendo la propia verificación de la
+Fase 3.40.
+
+- [x] **`internal/metadata.Metadata.FindTypeDef` hacía un escaneo lineal completo de la tabla
+      TypeDef en *cada llamada*, decodificando una cadena Go nueva desde el string heap por cada
+      fila revisada** — y el camino real de apertura de paquetes de ClosedXML llama a esto una y
+      otra vez para el mismo puñado de nombres de tipo, a través de cadenas recursivas profundas de
+      `resolveByFullName`/`resolveByFullNameCrossPackage`/`resolveByFullNameInDeps` anidadas dentro
+      de `FeatureCollectionBase.Get<TFeature>()`/`OpenXmlPart.LoadDomTree()` (ver las entradas de
+      `genericMachineRegistry` de la propia Fase 3.40). Con `DocumentFormat.OpenXml.dll` cargando
+      por sí solo miles de TypeDefs, ese costo se multiplicaba con la profundidad real de
+      recursión — y como esa profundidad depende de qué partes XML visita realmente cada ejecución
+      y en qué orden, el costo total (y por tanto si a un humano observándolo le parecía un
+      "cuelgue") variaba de una ejecución a otra, aunque el algoritmo en sí fuera completamente
+      determinista. Diagnosticado con un volcado de goroutines real vía `kill -QUIT` sobre un
+      proceso colgado: la goroutine principal estaba `[runnable]` (nunca bloqueada/en deadlock)
+      dentro de exactamente este escaneo, decenas de frames del intérprete de profundidad.
+      Arreglado con una caché `typeDefCache map[string]typeDefCacheEntry` protegida por mutex,
+      agregada a `Metadata` mismo (`internal/metadata/metadata.go`), memoizando tanto aciertos
+      *como fallos* (`FindTypeDef` es una función pura de los metadatos, que nunca cambian después
+      de que `Parse` retorna, y un fallo re-escanea toda la tabla tan costosamente como un
+      acierto) — el mismo patrón de caché ya probado para el cuello de botella hermano
+      `resolveExplicitImplExact` (la caché `explicitImpls` de `assembly.go`), aplicado ahora en la
+      capa de la que se beneficia cada llamador de `FindTypeDef`, no en un único call site.
+- [x] Descartado, no solo asumido: el orden de iteración de mapas de Go como causa contribuyente.
+      Se revisó cada tipo de colección agregado esta sesión que pudiera plausiblemente filtrar el
+      orden aleatorizado propio de los mapas de Go hacia semántica C# observable — `nativeDict`
+      (respalda `Dictionary`/`Hashtable`/`ConditionalWeakTable`) ya rastrea un `order []string` de
+      inserción real, con cada camino de escritura canalizado por un único helper `put()`;
+      `nativeHashSet` está respaldado por un simple slice `[]runtime.Value`, nunca un mapa de Go.
+      Ninguno de los dos pudo haber contribuido a este cuelgue específico.
+
+**Verificación**: 20 invocaciones consecutivas y cronometradas de `go run .` (antes: cuelgues
+intermitentes de varios minutos) se completaron todas en una banda plana de 2.50-2.60s sin
+fallos, más 10 invocaciones adicionales de `go run .` totalmente directas, sin timeout (igual a
+como se reportó el bug originalmente) — todas instantáneas, todas correctas.
+
+### Cómo verificar Fase 3.44
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+cd examples/closedxml-demo && for i in $(seq 1 10); do go run .; done
+```
+
+### Fase 3.45 — `examples/calculator` + un barrido amplio de endurecimiento de LINQ/colecciones, verificado contra .NET real
+
+**Objetivo:** terminar el último ejemplo de Fase 4 sin implementar (`calculator` — una carga real
+de aritmética/loop, verificada, que compara vmnet contra Go nativo y, cuando el SDK de .NET está
+disponible, contra CoreCLR real), y, en paralelo, cerrar la brecha más grande que quedaba en
+cobertura general de LINQ/colecciones: sin soporte de `OrderBy`/`GroupBy` multi-clave ni
+comparador personalizado, sin `Sort`/`Aggregate`/`Zip`/`Min`, y varios tipos de colección menos
+comunes (`SortedDictionary`, `SortedSet`, `Queue`/`Stack` bajo LINQ) faltando por completo. Cada
+fix acá se verificó de dos formas: la salida real de `dotnet run` de un proyecto sonda como
+verdad de referencia, comparada línea por línea contra la propia salida de vmnet para el mismo
+código C# exacto (no solo "compila limpio" o "un demo sigue pasando").
+
+**`examples/calculator`** — `Bench.CountPrimes` (loop anidado, módulo, branch) y
+`Bench.SumOfSquares` (un solo loop de multiplicar-acumular), corridos a través de vmnet,
+cronometrados, verificados contra una reimplementación idéntica en Go nativo (el demo hace
+`log.Fatalf` ante cualquier discrepancia — esto es tanto un chequeo de corrección como de
+rendimiento), y opcionalmente contra CoreCLR real vía un pequeño proyecto complementario
+`coreclr/` que hace `ProjectReference` al mismo `Calculator.csproj` que carga vmnet (así la
+comparación siempre corre el mismo código C# exacto, nunca una copia duplicada a mano). Los
+límites de los loops se eligieron empíricamente contra el sandbox real de 10.000.000 de
+instrucciones por `Call` de vmnet (`DefaultLimits` de `internal/interpreter/limits.go`) —
+`CountPrimes(50000)`/`SumOfSquares(700000)` ya lo exceden — en vez de adivinarlos.
+
+**Ordenamiento LINQ, general** (`internal/interpreter/linq_orderby.go`, nuevo):
+- [x] `OrderBy`/`OrderByDescending` reemplazó una implementación de una sola clave que solo
+      igualaba por Kind exacto (`linqCompare`, un error incondicional ante cualquier clave no
+      primitiva o de Kind distinto) por una versión que soporta **`ThenBy`/`ThenByDescending`**
+      (no existían en absoluto antes) y un argumento `IComparer<TKey>` real. `ThenBy` no puede
+      simplemente reordenar por la nueva clave — eso trataría la nueva clave como primaria y
+      descartaría el propio orden del `OrderBy` anterior en cada empate — así que
+      `bcl.NativeOrdered` (`system_linq_native.go`) mantiene el orden original antes de ordenar y
+      cada clave aplicada hasta el momento, y cada `ThenBy` recalcula el ordenamiento
+      compuesto completo desde cero (`materializeOrdered`).
+- [x] `compareNatural` (`comparer.go`, generalizado desde un helper exclusivo de
+      `Comparer<T>.Default` al ordenamiento compartido "sin comparador en absoluto" de
+      `List<T>.Sort`/`Array.Sort`/`OrderBy`/`Min`/`Max`) ahora desenvuelve `Nullable<T>` primero:
+      el `Comparer<T>.Default` real para `int?`/`double?`/... ordena una instancia vacía
+      (`HasValue == false`) antes que cualquier valor real — la misma regla ya aplicada a una
+      referencia null simple.
+- [x] `compareFunc`/`equalsFunc` (`comparer.go`) — un despachador compartido cada uno para cada
+      forma real de argumento comparador (delegado `Comparison<T>` / instancia `IComparer<T>` /
+      instancia `IEqualityComparer<T>` / ausente), reusado ahora por `List<T>.Sort`, `Array.Sort`,
+      `Array.BinarySearch`, `OrderBy`/`ThenBy`, y `Distinct`/`Except`/`Intersect`/`Union`/
+      `ToHashSet`/`GroupBy` — un despachador por forma en vez de que cada llamador reimplemente su
+      propio switch de argumento comparador.
+
+**`List<T>.Sort`/`Array.Sort` e igualdad/ordenamiento por defecto**:
+- [x] `List<T>.Sort()`/`Sort(IComparer<T>)`/`Sort(Comparison<T>)` — faltaba por completo (ningún
+      nativo registrado en absoluto bajo `List\`1::Sort`); `Array.Sort`/`Array.BinarySearch` ya
+      existían (Fase 3.41) y se re-conectaron sobre el mismo despachador `compareFunc` compartido
+      de arriba. (`internal/interpreter/array_sort.go`)
+- [x] **El propio wrapper de `Comparer<T>.Create(Comparison<T>)` (`funcComparer`) no tenía
+      entrada en `NativeTypeName` una vez que `compareFunc`/`arraySort`/`listSort` dejaron de
+      tratarlo como caso especial en línea** — un comparador respaldado por
+      `Comparer<T>.Create(...)` pasado a `Array.Sort`/`List<T>.Sort` habría caído silenciosamente
+      al ordenamiento natural, ignorando el `Comparison<T>` real del llamador. Arreglado agregando
+      un caso a `interpreterNativeTypeName` (`elementfactory.go`) — encontrado y arreglado durante
+      la propia revisión de integración de este pase, no por la sonda inicial.
+- [x] **La igualdad por defecto (sin `IEqualityComparer<T>` explícito) de `Distinct`/`GroupBy`/
+      `Except`/`Intersect`/`Union`/`ToHashSet` usaba identidad de puntero para cualquier elemento
+      `KindObject`** — el patrón real dominante de "agrupar/deduplicar por más de un campo",
+      `GroupBy(x => new { x.A, x.B })`/`Distinct()` sobre una lista de objetos de plugin, dividía
+      silenciosamente en varios lo que debía haber sido un solo grupo/elemento distinto.
+      `defaultObjectEqual` (`comparer.go`) ahora despacha el propio `Equals` real, posiblemente
+      sobreescrito, del receptor (virtual, así que una sobreescritura genuina gana sobre cualquier
+      fallback de base) antes de degradar a igualdad por referencia. **Encontrado dos veces**: una
+      vez en la propia plomería nueva de `equalsFunc`, y una segunda vez como una regresión viva en
+      el propio closure `keysEqual` preexistente de `GroupBy` (`linq_groupby.go`), que todavía
+      llamaba directamente al viejo `valuesDeepEqual` (solo igualdad por referencia) y NO había
+      sido re-conectado a `defaultObjectEqual` — atrapado por la propia sonda de este pase
+      (`GroupBy(e => new { e.Dept, High = e.Salary >= 60 })` producía dos grupos separados
+      `Eng:True` de 1 en vez de un solo grupo real de 2) antes de ser arreglado.
+
+**Nuevos miembros de `System.Linq.Enumerable`** (`internal/interpreter/linq.go`): `Min`
+(comparte `linqMinMax` con el `Max` ya existente, ambos ahora basados en `compareNatural` y
+conscientes de nullables — `Min(IEnumerable<int?>)` devuelve `null` en una fuente vacía/todo-null,
+igualando la sobrecarga nullable real en vez de lanzar excepción), `Sum`, `Average`, `Aggregate`
+(las tres sobrecargas reales: sin seed, con seed, con seed+resultSelector), `Zip`, `Except`,
+`Intersect`, `SkipWhile`, `TakeWhile`, `Reverse`, `AsEnumerable`, `ToHashSet` (materializa en un
+`HashSet<T>` real, no un `List<T>` disfrazado de HashSet — los llamadores que después invocan
+`Contains`/etc. necesitan el tipo receptor real). `Distinct`/`Union` ganaron su sobrecarga
+opcional de `IEqualityComparer<T>`.
+
+**Colecciones heredadas/menos comunes, faltantes por completo antes de este pase**:
+- [x] `SortedDictionary<K,V>`/`SortedSet<T>` — reusan el propio conjunto de métodos de
+      `Dictionary<K,V>`/`HashSet<T>` verbatim vía un campo `sorted bool` cada uno (insertar en
+      posición ordenada en vez de agregar al final), el mismo patrón de
+      "typeName-distingue-el-tipo-BCL-real" que ya usa `nativeList` para `List\`1`/`ArrayList`.
+      Ninguna sobrecarga `IComparer<T>`/`IComparer<K>` de sus constructores está conectada
+      (ignorada silenciosamente) — este paquete no tiene acceso a Machine para despachar una
+      personalizada, una brecha documentada, no silenciosa.
+- [x] `Queue<T>`/`Stack<T>` no tenían `GetEnumerator` en absoluto — cualquier `foreach`/llamada
+      LINQ sobre cualquiera de los dos lanzaba directamente. Arreglado con tipos struct
+      `Queue\`1+Enumerator`/`Stack\`1+Enumerator` dedicados (también se agregaron
+      `TryPeek`/`TryPop`).
+
+**Un bug real de corrección, sin relación con nada de lo anterior**:
+- [x] **El caso de FALLO de `Dictionary<K,V>.TryGetValue` sobreescribía incondicionalmente el
+      parámetro `out` con un `null` sin tipo**, destruyendo un cero tipado perfectamente bueno que
+      ya estaba ahí — el almacenamiento de un argumento `out int v` ya está inicializado a cero de
+      forma real como `Int32(0)` por el propio paso de inicialización de locales del método, antes
+      de que `TryGetValue` sea siquiera llamado. Probado con un fixture real
+      (`d.TryGetValue("missing", out int v); return v.ToString();`): pisar ese `Int32(0)` con
+      `KindNull` hacía que el siguiente `v.ToString()` lanzara "expects an int32 receiver" en vez
+      de imprimir `0` como hace .NET real. Arreglado dejando la ranura intacta ante un fallo.
+
+**Nota de arquitectura**: el tipo de resultado de `IGrouping<K,V>` (`nativeGrouping`) se movió de
+`internal/interpreter` a `internal/bcl` como un `NativeGrouping` exportado (reflejando la propia
+división ya existente de `NativeOrdered`: tipo de resultado en `bcl`, algoritmo en `interpreter`)
+— necesario para que nativos simples, sin Machine, que no pueden importar un paquete que a su vez
+importa `bcl` (`String.Join`, `List<T>.AddRange`) puedan reconocer un resultado de `GroupBy` de la
+misma forma que ya reconocen uno de `OrderBy`, sin duplicar la lógica de reconocimiento en dos
+lugares.
+
+**Verificación**: un proyecto sonda independiente (~40 escenarios reales de LINQ/colecciones —
+`OrderBy`/`ThenBy` multi-clave, `Distinct` con comparador personalizado, `Aggregate`, `Zip`,
+`OrderBy`/`Sum` de tipo nullable, `SortedDictionary`/`SortedSet`, `Queue`/`Stack` bajo LINQ,
+`List<T>.Sort`/`Array.Sort` con comparador, y más) corrido primero bajo `dotnet run` real como
+verdad de referencia, y luego el mismo DLL compilado cargado en vmnet — cada línea coincidió con
+la salida real de .NET excepto una aproximación ya documentada y preexistente, intencional (el
+orden de enumeración de `Dictionary<K,V>` después de un remove-luego-reinsertar no replica la
+reutilización real de slots de bucket de CoreCLR; anotada en `system_collections.go` bastante
+antes de este pase, no algo introducido acá).
+
+### Cómo verificar Fase 3.45
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+cd examples/calculator && dotnet build Calculator.csproj -c Release && go run .
+cd ../npoi-demo && go run .
+cd ../system-text-json-demo && go run .
+cd ../openxml-demo && go run .
+cd ../newtonsoft-json-demo && go run .
+cd ../closedxml-demo && for i in $(seq 1 10); do go run .; done
+```
+
+### Re-certificación: 10 targets (8 paquetes + Jint, NPOI y ClosedXML promovidos a targets completos)
+
+NPOI y ClosedXML se graduaron de "sondas de checker de ganancias baratas" (Fase 3.29-3.39) a
+targets completos respaldados por demo, junto a los 7 paquetes originales + Jint, en el mismo
+plano: un paquete real, sin modificar, sin glue C# compilado más allá de lo que una limitación
+arquitectónica genuina (el propio motor de métricas de fuente de ClosedXML) requiere.
+
+| Paquete | % limpio netstandard-lite | Demo real |
+|---|---|---|
+| `NPOI@2.8.0` | 97.3% | `examples/npoi-demo` — lee un `.xls` legacy real |
+| `ClosedXML@0.105.0` | (no rastreado independientemente; superado por el demo) | `examples/closedxml-demo` — lee un `.xlsx` real |
+| `System.Text.Json@8.0.5` | 66.7%+ | `examples/system-text-json-demo` — parsea JSON real |
+| `Newtonsoft.Json@13.0.3` | 60.6%+ | `examples/newtonsoft-json-demo` — parsea JSON real |
+| `DocumentFormat.OpenXml@3.1.1` | (target nuevo, no rastreado independientemente) | `examples/openxml-demo` — escribe un `.docx` real, abierto de vuelta por el SDK real de .NET |
+| `Jint@3.1.3` | 66.1%+ | `examples/jint-demo`/`jint-nowrapper` — corre JS real |
+| `Ardalis.GuardClauses@5.0.0` | 87.4%+ | — |
+| `Semver@2.3.0` | 72.6%+ | — |
+| `FluentValidation@11.9.2` | 63.5%+ | — |
+| `Humanizer.Core@2.14.1` | 46.0%+ | — |
+| `SimpleBase@4.0.0` | 45.7%+ | — |
+
+Cinco de diez targets ahora tienen un demo real y completo (leyendo y/o escribiendo formatos
+binarios/XML/JSON reales de punta a punta) en vez de solo un porcentaje de checker estático — la
+señal más fuerte hasta ahora de que vmnet corre paquetes .NET reales y genuinamente sin modificar,
+no solo pasa un linter de compatibilidad.
+
+---
+
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
 
 **Objetivo:** convertir el motor funcional en un producto adoptable, confiable, documentado y
@@ -3770,7 +4331,7 @@ con benchmarks — el paquete completo para que un equipo de ingeniería apruebe
 - [ ] README completo (qué es / qué no es, quickstart, perfiles, límites conocidos)
 - [ ] `docs/es/architecture.md`, `supported-il.md`, `supported-bcl.md`, `nuget-support.md`,
       `compatibility-profile.md`, `security.md`, `roadmap.md`
-- [ ] `/examples`: hello, rules, calculator, nuget-basic — ejecutables y documentados
+- [x] `/examples`: hello, rules, calculator, nuget-basic — ejecutables y documentados
 
 ### Demo de cierre de Fase 4 — "Listo para producción" (~15 min, foco ejecutivo)
 

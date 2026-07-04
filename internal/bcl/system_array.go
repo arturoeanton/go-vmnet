@@ -16,6 +16,7 @@ func init() {
 	register("System.Array::Copy", false, arrayCopy)
 	register("System.Array::Clone", true, arrayClone)
 	register("System.Array::get_Length", true, arrayGetLength)
+	register("System.Array::GetLength", true, arrayGetLengthDim)
 }
 
 // arrayClone backs Array.Clone() — a shallow copy: each element Value is
@@ -43,6 +44,16 @@ func arrayGetLength(args []runtime.Value) (runtime.Value, error) {
 	return runtime.Int32(int32(len(args[0].Arr.Elems))), nil
 }
 
+// arrayGetLengthDim backs GetLength(int dimension) — vmnet only ever
+// models a single-dimension SZArray (Fase 3.5), so dimension is always 0
+// for any real caller and this is just get_Length again.
+func arrayGetLengthDim(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 || args[0].Kind != runtime.KindArray || args[0].Arr == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: Array.GetLength expects an array receiver")
+	}
+	return runtime.Int32(int32(len(args[0].Arr.Elems))), nil
+}
+
 // arrayResize backs the generic Array.Resize<T>(ref T[] array, int
 // newSize) — array arrives as a managed pointer (a `ref` parameter),
 // same mechanism as any other by-ref argument since Fase 3.5.
@@ -62,15 +73,30 @@ func arrayResize(args []runtime.Value) (runtime.Value, error) {
 	return runtime.Value{}, nil
 }
 
-// arrayIndexOf backs the generic Array.IndexOf<T>(T[] array, T value)
-// static helper — a linear scan using the same value-equality vmnet's
-// other Contains/IndexOf natives already share (system_object.go).
+// arrayIndexOf backs every real Array.IndexOf<T> overload — (array,
+// value), (array, value, startIndex), and (array, value, startIndex,
+// count) (Fase 3.44, found via a real, load-bearing case: Newtonsoft.
+// Json's own KeyedCollection<TKey,TItem> base implementation uses the
+// 3-arg form when re-locating an item during a key change) — a linear
+// scan using the same value-equality vmnet's other Contains/IndexOf
+// natives already share (system_object.go).
 func arrayIndexOf(args []runtime.Value) (runtime.Value, error) {
-	if len(args) != 2 || args[0].Kind != runtime.KindArray || args[0].Arr == nil {
-		return runtime.Value{}, fmt.Errorf("bcl: Array.IndexOf expects (T[], T)")
+	if len(args) < 2 || args[0].Kind != runtime.KindArray || args[0].Arr == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: Array.IndexOf expects (T[], T[, startIndex[, count]])")
 	}
-	for i, item := range args[0].Arr.Elems {
-		if valuesEqual(item, args[1]) {
+	elems := args[0].Arr.Elems
+	start, end := 0, len(elems)
+	if len(args) >= 3 && args[2].Kind == runtime.KindI4 {
+		start = int(args[2].I4)
+	}
+	if len(args) >= 4 && args[3].Kind == runtime.KindI4 {
+		end = start + int(args[3].I4)
+	}
+	if start < 0 || end > len(elems) || end < start {
+		return runtime.Value{}, &runtime.ManagedException{TypeName: "System.ArgumentOutOfRangeException", Message: "startIndex or count"}
+	}
+	for i := start; i < end; i++ {
+		if valuesEqual(elems[i], args[1]) {
 			return runtime.Int32(int32(i)), nil
 		}
 	}

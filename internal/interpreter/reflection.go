@@ -13,6 +13,7 @@ func init() {
 	machineRegistry["System.Type::get_IsEnum"] = typeGetIsEnum
 	machineRegistry["System.Type::get_IsInterface"] = typeGetIsInterface
 	machineRegistry["System.Type::get_IsAbstract"] = typeGetIsAbstract
+	machineRegistry["System.Type::get_IsPrimitive"] = typeGetIsPrimitive
 	machineRegistry["System.Type::get_BaseType"] = typeGetBaseType
 	machineRegistry["System.Type::GetInterfaces"] = typeGetInterfaces
 	machineRegistry["System.Type::GetType"] = typeStaticGetType
@@ -38,6 +39,34 @@ func init() {
 	machineRegistry["System.Reflection.ConstructorInfo::op_Equality"] = memberInfoOpEquality
 	machineRegistry["System.Reflection.MethodInfo::op_Inequality"] = memberInfoOpInequality
 	machineRegistry["System.Reflection.MethodInfo::op_Equality"] = memberInfoOpEquality
+	// Assembly.GetManifestResourceStream (Fase 3.40) — needs Machine
+	// access to reach whichever assembly's ResolveManifestResource is
+	// currently active (Machine.invoke swaps it per Fase 3.27's pattern),
+	// unlike the plain bcl.Native stubs system_type.go registers for
+	// GetExecutingAssembly/ToString/FullName.
+	machineRegistry["System.Reflection.Assembly::GetManifestResourceStream"] = assemblyGetManifestResourceStream
+}
+
+// assemblyGetManifestResourceStream backs Assembly.GetManifestResource
+// Stream(string name) — a real .NET assembly can embed arbitrary named
+// byte blobs (icons, templates, fonts) directly in its own PE image;
+// found via a real, load-bearing case: ClosedXML's own font-metrics
+// engine loads four bundled .ttf files this way just from constructing
+// an XLWorkbook, not from anything a caller does with fonts directly.
+// Returns Null() for an unresolvable name, matching real semantics
+// (GetManifestResourceStream never throws for a missing resource).
+func assemblyGetManifestResourceStream(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 2 || args[1].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("interpreter: Assembly.GetManifestResourceStream expects a string name")
+	}
+	if m.ResolveManifestResource == nil {
+		return runtime.Null(), nil
+	}
+	data, ok := m.ResolveManifestResource(args[1].Str)
+	if !ok {
+		return runtime.Null(), nil
+	}
+	return bcl.NewMemoryStreamValue(data), nil
 }
 
 // enumTypeMembers resolves a System.Type argument's real enum members via
@@ -242,6 +271,29 @@ func typeGetIsAbstract(m *Machine, args []runtime.Value, depth int, instrCount *
 	}
 	_, _, _, isAbstract := classifyTypeByName(m, fullName)
 	return runtime.Bool(isAbstract), nil
+}
+
+// bclPrimitiveTypes answers Type.IsPrimitive — a DIFFERENT, narrower set
+// than bclPrimitiveValueTypes' "IsValueType" list: real .NET's IsPrimitive
+// specifically excludes Decimal (a value type, but not one of the CLR's
+// own hardware-primitive kinds) even though it's every bit as much a
+// value type as Int32. Found via a real, load-bearing case: System.Span's
+// own internal SpanHelpers+PerTypeValues`1..cctor checks typeof(T).
+// IsPrimitive, reached just from ClosedXML's own ReadOnlySpan<byte> use
+// of embedded font data.
+var bclPrimitiveTypes = map[string]bool{
+	"System.Boolean": true, "System.Char": true, "System.SByte": true, "System.Byte": true,
+	"System.Int16": true, "System.UInt16": true, "System.Int32": true, "System.UInt32": true,
+	"System.Int64": true, "System.UInt64": true, "System.Single": true, "System.Double": true,
+	"System.IntPtr": true, "System.UIntPtr": true,
+}
+
+func typeGetIsPrimitive(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	fullName, ok := bcl.TypeFullNameOf(argsSelf(args))
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.IsPrimitive receiver is not a Type")
+	}
+	return runtime.Bool(bclPrimitiveTypes[bcl.GenericOpenName(fullName)]), nil
 }
 
 // argsSelf reads the receiver out of a 1-arg call (every get_Xxx property
@@ -498,7 +550,7 @@ func methodInfoInvoke(m *Machine, args []runtime.Value, depth int, instrCount *i
 	if args[1].Kind != runtime.KindNull {
 		callArgs = append([]runtime.Value{args[1]}, methodArgs...)
 	}
-	v, _, err := m.call(fullName, callArgs, true, depth, instrCount)
+	v, _, err := m.call(fullName, callArgs, true, depth, instrCount, nil, nil)
 	return v, err
 }
 

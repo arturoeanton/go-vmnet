@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "target": "netstandard2.0",
+  "packages": [
+    {
+      "id": "DocumentFormat.OpenXml",
+      "version": "3.1.1",
+      "selectedAsset": "lib/netstandard2.0/DocumentFormat.OpenXml.dll",
+      "dependencies": [
+        "DocumentFormat.OpenXml.Framework"
+      ]
+    },
+    {
+      "id": "DocumentFormat.OpenXml.Framework",
+      "version": "3.1.1",
+      "selectedAsset": "lib/netstandard2.0/DocumentFormat.OpenXml.Framework.dll",
+      "dependencies": [
+        "System.IO.Packaging"
+      ]
+    },
+    {
+      "id": "System.Buffers",
+      "version": "4.5.1",
+      "selectedAsset": "lib/netstandard2.0/System.Buffers.dll",
+      "dependencies": []
+    },
+    {
+      "id": "System.IO.Packaging",
+      "version": "8.0.1",
+      "selectedAsset": "lib/netstandard2.0/System.IO.Packaging.dll",
+      "dependencies": [
+        "System.Memory"
+      ]
+    },
+    {
+      "id": "System.Memory",
+      "version": "4.5.5",
+      "selectedAsset": "lib/netstandard2.0/System.Memory.dll",
+      "dependencies": [
+        "System.Buffers",
+        "System.Numerics.Vectors",
+        "System.Runtime.CompilerServices.Unsafe"
+      ]
+    },
+    {
+      "id": "System.Numerics.Vectors",
+      "version": "4.4.0",
+      "selectedAsset": "lib/netstandard2.0/System.Numerics.Vectors.dll",
+      "dependencies": []
+    },
+    {
+      "id": "System.Runtime.CompilerServices.Unsafe",
+      "version": "4.5.3",
+      "selectedAsset": "lib/netstandard2.0/System.Runtime.CompilerServices.Unsafe.dll",
+      "dependencies": []
+    }
+  ]
+}

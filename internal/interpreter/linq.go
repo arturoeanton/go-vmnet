@@ -2,7 +2,6 @@ package interpreter
 
 import (
 	"fmt"
-	"sort"
 
 	"github.com/arturoeanton/go-vmnet/internal/bcl"
 	"github.com/arturoeanton/go-vmnet/internal/runtime"
@@ -47,19 +46,38 @@ func init() {
 	machineRegistry["System.Linq.Enumerable::Contains"] = linqContains
 	machineRegistry["System.Linq.Enumerable::Empty"] = linqEmpty
 	machineRegistry["System.Linq.Enumerable::Cast"] = linqCast
-	machineRegistry["System.Linq.Enumerable::OfType"] = linqCast
+	// OfType<T> (unlike Cast<T>) needs its own call site's real generic
+	// argument to filter correctly — see genericMachineRegistry's own
+	// entry below and linqOfType's doc comment for why this can no longer
+	// share linqCast's plain machineRegistry registration (Fase 3.42).
+	genericMachineRegistry["System.Linq.Enumerable::OfType"] = linqOfType
 	machineRegistry["System.Linq.Enumerable::First"] = linqFirst
 	machineRegistry["System.Linq.Enumerable::LastOrDefault"] = linqLastOrDefault
 	machineRegistry["System.Linq.Enumerable::Count"] = linqCount
 	machineRegistry["System.Linq.Enumerable::Distinct"] = linqDistinct
-	machineRegistry["System.Linq.Enumerable::OrderBy"] = linqOrderBy
+	// OrderBy/OrderByDescending/ThenBy/ThenByDescending are registered by
+	// linq_orderby.go's own init() (Fase 3.44's hardening pass replaced the
+	// exact-Kind-match-only linqOrderBy that used to live here with a
+	// version supporting ThenBy chaining, an explicit IComparer<T>/
+	// Comparison<T> argument, and real IComparable dispatch).
 	machineRegistry["System.Linq.Enumerable::Concat"] = linqConcat
 	machineRegistry["System.Linq.Enumerable::ToDictionary"] = linqToDictionary
 	machineRegistry["System.Linq.Enumerable::Max"] = linqMax
+	machineRegistry["System.Linq.Enumerable::Min"] = linqMin
+	machineRegistry["System.Linq.Enumerable::Sum"] = linqSum
+	machineRegistry["System.Linq.Enumerable::Average"] = linqAverage
+	machineRegistry["System.Linq.Enumerable::Aggregate"] = linqAggregate
+	machineRegistry["System.Linq.Enumerable::Zip"] = linqZip
+	machineRegistry["System.Linq.Enumerable::Except"] = linqExcept
+	machineRegistry["System.Linq.Enumerable::Intersect"] = linqIntersect
+	machineRegistry["System.Linq.Enumerable::SkipWhile"] = linqSkipWhile
+	machineRegistry["System.Linq.Enumerable::TakeWhile"] = linqTakeWhile
+	machineRegistry["System.Linq.Enumerable::Reverse"] = linqReverse
+	machineRegistry["System.Linq.Enumerable::AsEnumerable"] = linqCast
+	machineRegistry["System.Linq.Enumerable::ToHashSet"] = linqToHashSet
 	machineRegistry["System.Collections.Generic.List`1::ForEach"] = listForEach
 	machineRegistry["System.Linq.Enumerable::Single"] = linqSingle
 	machineRegistry["System.Linq.Enumerable::SingleOrDefault"] = linqSingleOrDefault
-	machineRegistry["System.Linq.Enumerable::OrderByDescending"] = linqOrderByDescending
 	machineRegistry["System.Linq.Enumerable::ElementAt"] = linqElementAt
 	machineRegistry["System.Linq.Enumerable::Skip"] = linqSkip
 	machineRegistry["System.Linq.Enumerable::Union"] = linqUnion
@@ -99,20 +117,20 @@ func (m *Machine) enumerateAll(source runtime.Value, depth int, instrCount *int6
 		}
 	}
 
-	enumVal, _, err := m.call("System.Collections.Generic.IEnumerable`1::GetEnumerator", []runtime.Value{source}, true, depth, instrCount)
+	enumVal, _, err := m.call("System.Collections.Generic.IEnumerable`1::GetEnumerator", []runtime.Value{source}, true, depth, instrCount, nil, nil)
 	if err != nil {
 		return nil, err
 	}
 	var out []runtime.Value
 	for {
-		moved, _, err := m.call("System.Collections.IEnumerator::MoveNext", []runtime.Value{enumVal}, true, depth, instrCount)
+		moved, _, err := m.call("System.Collections.IEnumerator::MoveNext", []runtime.Value{enumVal}, true, depth, instrCount, nil, nil)
 		if err != nil {
 			return nil, err
 		}
 		if !moved.Truthy() {
 			break
 		}
-		cur, _, err := m.call("System.Collections.Generic.IEnumerator`1::get_Current", []runtime.Value{enumVal}, true, depth, instrCount)
+		cur, _, err := m.call("System.Collections.Generic.IEnumerator`1::get_Current", []runtime.Value{enumVal}, true, depth, instrCount, nil, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -337,14 +355,19 @@ func linqEmpty(m *Machine, args []runtime.Value, depth int, instrCount *int64) (
 	return bcl.NewListValue(nil), nil
 }
 
-// linqCast backs both Cast<T> and OfType<T>: vmnet's runtime.Value is
-// already a uniform tagged union with no reified generic type-argument
-// info at this call site, so both simply pass the sequence through
-// unchanged rather than attempting a real type check/filter — real
-// Cast<T> would InvalidCastException on a wrong-shaped element and real
-// OfType<T> would silently drop one, neither of which vmnet can
-// distinguish without T. Documented approximation, same posture as
+// linqCast backs Cast<T>: vmnet's runtime.Value is already a uniform
+// tagged union with no reified generic type-argument info at this call
+// site (registered via plain machineRegistry, not genericMachineRegistry
+// — see init() above), so it simply passes the sequence through
+// unchanged rather than attempting a real type check — real Cast<T>
+// would InvalidCastException on a wrong-shaped element, which vmnet
+// can't distinguish without T. Documented approximation, same posture as
 // Dictionary.TryGetValue's untyped miss case (Fase 3.13).
+//
+// OfType<T> used to share this exact function (and its "no T available"
+// excuse) until Fase 3.42 found a real, load-bearing case where the
+// silent pass-through actively corrupts a document read rather than just
+// degrading gracefully — see linqOfType's own doc comment just below.
 func linqCast(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
 	if len(args) != 1 {
 		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.Cast/OfType expects a source")
@@ -354,6 +377,71 @@ func linqCast(m *Machine, args []runtime.Value, depth int, instrCount *int64) (r
 		return runtime.Value{}, err
 	}
 	return bcl.NewListValue(elems), nil
+}
+
+// linqOfType backs OfType<T> (Fase 3.42, found running a real .xlsx
+// through ClosedXML 0.105.0/DocumentFormat.OpenXml 3.1.1's own
+// `new XLWorkbook(stream)`): unlike Cast<T> (linqCast, just above),
+// OfType<T>'s real call site IS a genuine, closed generic-method
+// instantiation (`Enumerable.OfType<CustomFilePropertiesPart>()`, e.g.),
+// whose own MethodSpec token gives us T just like LoadDomTree<T>'s call
+// site does (see loaddomtree.go's own doc comment) — so, unlike Cast<T>,
+// there's no real excuse left to skip the actual filter.
+//
+// The bug this fixes was found via real decompiled source
+// (DocumentFormat.OpenXml.Packaging/OpenXmlPartContainer.cs:1266-1277,
+// GetSubPartOfType<T>) and confirmed by temporary tracing: every
+// `SomePart? Foo => ((OpenXmlPartContainer)this).GetSubPartOfType<Foo>()`
+// accessor across the whole real OpenXml SDK (WorkbookPart.SharedString
+// TablePart, SpreadsheetDocument.CustomFilePropertiesPart, dozens more)
+// is built on `GetPartsOfType<T>().GetEnumerator().MoveNext()`, and
+// GetPartsOfType<T> is just `ChildrenRelationshipParts.Parts.OfType<T>()`
+// — a real LINQ filter over ALL of a container's child parts, of every
+// type, not just T's. With the old Cast<T>-shared pass-through, asking
+// for an OPTIONAL part that genuinely doesn't exist in the real package
+// (here: docProps/custom.xml, so no CustomFilePropertiesPart at all)
+// didn't return an empty sequence like real OfType<T> would — it
+// returned the container's FIRST child part of ANY type unfiltered
+// (confirmed via tracing: SpreadsheetDocument.CustomFilePropertiesPart
+// resolved to the package's own WorkbookPart, since that's first in
+// ChildrenRelationshipParts.Parts). The caller then ran
+// CustomFilePropertiesPart::get_Properties with a WorkbookPart receiver,
+// which went on to call OpenXmlPart::LoadDomTree<DocumentFormat.OpenXml.
+// CustomProperties.Properties>() against the WORKBOOK part's own real
+// stream (xl/workbook.xml) — parsing its real root element ("workbook")
+// against the wrong expected QName ("Properties") and throwing a very
+// real, but entirely vmnet-induced, Fmt_PartRootIsInvalid.
+//
+// isAssignableTo (typecheck.go, Fase 3.8's real isinst/castclass check)
+// already implements exactly the "does this value's real runtime type
+// equal-or-derive-from T" walk OfType<T> needs — reused here rather than
+// duplicated. methodGenericArgs[0] being "" (an unresolved open type
+// parameter some other call shape couldn't close, same caveat
+// LoadDomTree<T>/AddChild<T> document) degrades to the old unfiltered
+// pass-through rather than filtering everything out — wrong-but-
+// permissive beats wrong-but-empty when T itself is unknown.
+func linqOfType(m *Machine, args []runtime.Value, methodGenericArgs []string, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.OfType expects a source")
+	}
+	elems, err := m.enumerateAll(args[0], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	if len(methodGenericArgs) < 1 || methodGenericArgs[0] == "" {
+		return bcl.NewListValue(elems), nil
+	}
+	target := methodGenericArgs[0]
+	filtered := make([]runtime.Value, 0, len(elems))
+	for _, e := range elems {
+		if e.Kind == runtime.KindNull {
+			continue
+		}
+		if m.isAssignableTo(e, target) {
+			filtered = append(filtered, e)
+		}
+	}
+	return bcl.NewListValue(filtered), nil
 }
 
 // linqFirst covers First(source) and First(source, predicate) — unlike
@@ -435,11 +523,25 @@ func linqCount(m *Machine, args []runtime.Value, depth int, instrCount *int64) (
 	return runtime.Int32(int32(n)), nil
 }
 
+// linqDistinct's optional IEqualityComparer<T> argument (and its default,
+// no-comparer equality) both go through equalsFunc (comparer.go) — a
+// KindObject element's own real, possibly-overridden Equals is what real
+// Distinct() would consult, not a blind reference comparison (Fase 3.44,
+// found via `xs.Distinct(new CaseInsensitiveComparer())` and, for the
+// default case, an anonymous-type element silently never deduplicating).
 func linqDistinct(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
-	if len(args) != 1 {
-		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.Distinct expects a source")
+	if len(args) < 1 || len(args) > 2 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.Distinct expects a source[, comparer]")
 	}
 	elems, err := m.enumerateAll(args[0], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	var comparerArg *runtime.Value
+	if len(args) == 2 {
+		comparerArg = &args[1]
+	}
+	eq, err := m.equalsFunc(comparerArg, depth, instrCount)
 	if err != nil {
 		return runtime.Value{}, err
 	}
@@ -447,7 +549,11 @@ func linqDistinct(m *Machine, args []runtime.Value, depth int, instrCount *int64
 	for _, e := range elems {
 		dup := false
 		for _, o := range out {
-			if valuesDeepEqual(e, o) {
+			same, err := eq(e, o)
+			if err != nil {
+				return runtime.Value{}, err
+			}
+			if same {
 				dup = true
 				break
 			}
@@ -477,114 +583,34 @@ func linqConcat(m *Machine, args []runtime.Value, depth int, instrCount *int64) 
 	return bcl.NewListValue(out), nil
 }
 
-// linqCompare orders two same-Kind primitive values — the numeric/string
-// ordering OrderBy/Max need. vmnet has no IComparable dispatch, so a
-// mismatched-Kind or non-primitive comparison (e.g. two plugin objects
-// with a custom IComparable) is reported rather than guessed.
-func linqCompare(a, b runtime.Value) (int, error) {
-	if a.Kind != b.Kind {
-		return 0, fmt.Errorf("interpreter: LINQ ordering: mismatched value kinds")
-	}
-	switch a.Kind {
-	case runtime.KindI4:
-		switch {
-		case a.I4 < b.I4:
-			return -1, nil
-		case a.I4 > b.I4:
-			return 1, nil
-		default:
-			return 0, nil
-		}
-	case runtime.KindI8:
-		switch {
-		case a.I8 < b.I8:
-			return -1, nil
-		case a.I8 > b.I8:
-			return 1, nil
-		default:
-			return 0, nil
-		}
-	case runtime.KindR4:
-		switch {
-		case a.R4 < b.R4:
-			return -1, nil
-		case a.R4 > b.R4:
-			return 1, nil
-		default:
-			return 0, nil
-		}
-	case runtime.KindR8:
-		switch {
-		case a.R8 < b.R8:
-			return -1, nil
-		case a.R8 > b.R8:
-			return 1, nil
-		default:
-			return 0, nil
-		}
-	case runtime.KindString:
-		switch {
-		case a.Str < b.Str:
-			return -1, nil
-		case a.Str > b.Str:
-			return 1, nil
-		default:
-			return 0, nil
-		}
-	default:
-		return 0, fmt.Errorf("interpreter: LINQ ordering: unsupported value kind")
-	}
-}
-
-func linqOrderBy(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
-	if len(args) != 2 {
-		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.OrderBy expects (source, keySelector)")
-	}
-	elems, err := m.enumerateAll(args[0], depth, instrCount)
-	if err != nil {
-		return runtime.Value{}, err
-	}
-	type keyed struct {
-		key runtime.Value
-		val runtime.Value
-	}
-	pairs := make([]keyed, len(elems))
-	for i, e := range elems {
-		k, err := m.linqInvoke(args[1], e, depth, instrCount)
-		if err != nil {
-			return runtime.Value{}, err
-		}
-		pairs[i] = keyed{key: k, val: e}
-	}
-	var sortErr error
-	sort.SliceStable(pairs, func(i, j int) bool {
-		c, err := linqCompare(pairs[i].key, pairs[j].key)
-		if err != nil {
-			sortErr = err
-			return false
-		}
-		return c < 0
-	})
-	if sortErr != nil {
-		return runtime.Value{}, sortErr
-	}
-	out := make([]runtime.Value, len(pairs))
-	for i, p := range pairs {
-		out[i] = p.val
-	}
-	return bcl.NewListValue(out), nil
-}
-
+// linqMax/linqMin share this: both walk the (optionally selector-mapped)
+// sequence keeping whichever element compareNatural (comparer.go, real
+// IComparable dispatch, not the old exact-Kind-match-only linqCompare
+// this hardening pass removed) ranks furthest in the wanted direction.
+// Real Enumerable.Min/Max also have this same "throws on an empty
+// non-nullable source" behavior — a nullable-typed source (e.g.
+// Min(IEnumerable<int?>)) instead returns null on empty/all-null, which
+// linqMinMax also matches: bcl.UnwrapNullable turns an empty Nullable<T>
+// element into a genuine KindNull, and a KindNull participant is simply
+// skipped rather than compared (compareNatural would otherwise sort every
+// null first, corrupting the real answer).
 func linqMax(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	return linqMinMax(m, args, 1, depth, instrCount)
+}
+
+func linqMin(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	return linqMinMax(m, args, -1, depth, instrCount)
+}
+
+// linqMinMax implements both: want=1 keeps the greater of each pair
+// (Max), want=-1 keeps the lesser (Min).
+func linqMinMax(m *Machine, args []runtime.Value, want int, depth int, instrCount *int64) (runtime.Value, error) {
 	if len(args) < 1 {
-		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.Max expects a source")
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.Max/Min expects a source")
 	}
 	elems, err := m.enumerateAll(args[0], depth, instrCount)
 	if err != nil {
 		return runtime.Value{}, err
-	}
-	if len(elems) == 0 {
-		return runtime.Value{}, &runtime.ManagedException{TypeName: "System.InvalidOperationException", Message: "Sequence contains no elements"}
 	}
 	vals := elems
 	if len(args) >= 2 {
@@ -597,17 +623,415 @@ func linqMax(m *Machine, args []runtime.Value, depth int, instrCount *int64) (ru
 			vals[i] = v
 		}
 	}
-	best := vals[0]
-	for _, v := range vals[1:] {
-		c, err := linqCompare(v, best)
+	var best runtime.Value
+	haveBest := false
+	sawAny := false
+	for _, raw := range vals {
+		sawAny = true
+		v := bcl.UnwrapNullable(raw)
+		if v.Kind == runtime.KindNull {
+			continue
+		}
+		if !haveBest {
+			best, haveBest = v, true
+			continue
+		}
+		c, err := m.compareNatural(v, best, depth, instrCount)
 		if err != nil {
 			return runtime.Value{}, err
 		}
-		if c > 0 {
+		if c*want > 0 {
 			best = v
 		}
 	}
+	if !haveBest {
+		if !sawAny {
+			return runtime.Value{}, &runtime.ManagedException{TypeName: "System.InvalidOperationException", Message: "Sequence contains no elements"}
+		}
+		// Every element was an empty Nullable<T> — the nullable overload's
+		// own "no value at all" result, matching real Min/Max<T?>.
+		return runtime.Null(), nil
+	}
 	return best, nil
+}
+
+// linqSum/linqAverage both skip a null participant (an empty Nullable<T>
+// element, e.g. Sum(IEnumerable<int?>)) exactly like real .NET's nullable
+// overloads do — a null contributes neither to the running total nor to
+// Average's own divisor. The accumulation Kind (int64 for I4/I8 sources,
+// float64 for R4/R8) is picked from the first non-null element seen;
+// Sum's own result is cast back to I4 when every contributing element
+// was I4 (the common `Sum(IEnumerable<int>)` case returns int, not
+// long), matching the real per-T overload set without needing vmnet to
+// actually resolve which overload was called.
+func linqSum(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.Sum expects a source")
+	}
+	vals, err := linqNumericVals(m, args, depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	var isFloat, isI8, any bool
+	var isum int64
+	var fsum float64
+	for _, v := range vals {
+		v = bcl.UnwrapNullable(v)
+		switch v.Kind {
+		case runtime.KindNull:
+			continue
+		case runtime.KindI4:
+			isum += int64(v.I4)
+			any = true
+		case runtime.KindI8:
+			isum += v.I8
+			isI8, any = true, true
+		case runtime.KindR4:
+			fsum += float64(v.R4)
+			isFloat, any = true, true
+		case runtime.KindR8:
+			fsum += v.R8
+			isFloat, any = true, true
+		default:
+			return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.Sum: unsupported value kind %v", v.Kind)
+		}
+	}
+	if !any {
+		return runtime.Int32(0), nil
+	}
+	if isFloat {
+		return runtime.Float64(fsum + float64(isum)), nil
+	}
+	if isI8 {
+		return runtime.Int64(isum), nil
+	}
+	return runtime.Int32(int32(isum)), nil
+}
+
+func linqAverage(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.Average expects a source")
+	}
+	vals, err := linqNumericVals(m, args, depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	var sum float64
+	var count int
+	allFloat32 := true
+	for _, v := range vals {
+		v = bcl.UnwrapNullable(v)
+		switch v.Kind {
+		case runtime.KindNull:
+			continue
+		case runtime.KindI4:
+			sum += float64(v.I4)
+			count++
+			allFloat32 = false
+		case runtime.KindI8:
+			sum += float64(v.I8)
+			count++
+			allFloat32 = false
+		case runtime.KindR4:
+			sum += float64(v.R4)
+			count++
+		case runtime.KindR8:
+			sum += float64(v.R8)
+			count++
+			allFloat32 = false
+		default:
+			return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.Average: unsupported value kind %v", v.Kind)
+		}
+	}
+	if count == 0 {
+		return runtime.Value{}, &runtime.ManagedException{TypeName: "System.InvalidOperationException", Message: "Sequence contains no elements"}
+	}
+	if allFloat32 {
+		return runtime.Float32(float32(sum / float64(count))), nil
+	}
+	return runtime.Float64(sum / float64(count)), nil
+}
+
+// linqNumericVals is Sum/Average's shared "optionally project through a
+// selector" step, factored out since both need exactly the same shape
+// (source alone, or source+selector).
+func linqNumericVals(m *Machine, args []runtime.Value, depth int, instrCount *int64) ([]runtime.Value, error) {
+	elems, err := m.enumerateAll(args[0], depth, instrCount)
+	if err != nil {
+		return nil, err
+	}
+	if len(args) == 1 {
+		return elems, nil
+	}
+	vals := make([]runtime.Value, len(elems))
+	for i, e := range elems {
+		v, err := m.linqInvoke(args[1], e, depth, instrCount)
+		if err != nil {
+			return nil, err
+		}
+		vals[i] = v
+	}
+	return vals, nil
+}
+
+// linqAggregate covers all three real overloads: Aggregate(source, func)
+// (no seed — the first element becomes the seed, matching real
+// Enumerable.Aggregate's own documented behavior, including its
+// InvalidOperationException on an empty source), Aggregate(source, seed,
+// func), and Aggregate(source, seed, func, resultSelector). func is
+// always a 2-argument Func<TAccumulate,TSource,TAccumulate> — the one
+// LINQ shape linqInvoke (1-argument selectors/predicates) doesn't cover,
+// so this invokes the delegate directly instead.
+func linqAggregate(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) < 2 || len(args) > 4 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.Aggregate expects (source, func) or (source, seed, func[, resultSelector])")
+	}
+	elems, err := m.enumerateAll(args[0], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	var acc runtime.Value
+	var fn runtime.Value
+	var resultSel runtime.Value
+	if len(args) == 2 {
+		if len(elems) == 0 {
+			return runtime.Value{}, &runtime.ManagedException{TypeName: "System.InvalidOperationException", Message: "Sequence contains no elements"}
+		}
+		acc, fn = elems[0], args[1]
+		elems = elems[1:]
+	} else {
+		acc, fn = args[1], args[2]
+		if len(args) == 4 {
+			resultSel = args[3]
+		}
+	}
+	if fn.Kind != runtime.KindFunc || fn.Func == nil {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.Aggregate: func is not a delegate")
+	}
+	for _, e := range elems {
+		v, _, err := m.invokeFunc(fn.Func, []runtime.Value{acc, e}, depth, instrCount)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		acc = v
+	}
+	if resultSel.Kind == runtime.KindFunc {
+		return m.linqInvoke(resultSel, acc, depth, instrCount)
+	}
+	return acc, nil
+}
+
+// linqZip covers Zip(first, second, resultSelector) — the length of the
+// shorter sequence, matching real Enumerable.Zip (it stops as soon as
+// either source is exhausted rather than throwing).
+func linqZip(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 3 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.Zip expects (first, second, resultSelector)")
+	}
+	a, err := m.enumerateAll(args[0], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	b, err := m.enumerateAll(args[1], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	fn := args[2]
+	if fn.Kind != runtime.KindFunc || fn.Func == nil {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.Zip: resultSelector is not a delegate")
+	}
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	out := make([]runtime.Value, n)
+	for i := 0; i < n; i++ {
+		v, _, err := m.invokeFunc(fn.Func, []runtime.Value{a[i], b[i]}, depth, instrCount)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		out[i] = v
+	}
+	return bcl.NewListValue(out), nil
+}
+
+// linqExcept/linqIntersect are Union's own set-algebra siblings: Except
+// keeps first's elements that never equal (by comparer, or
+// valuesDeepEqual) any of second's; Intersect keeps first's elements
+// that equal at least one of second's. Both dedupe their own result and
+// preserve first-occurrence order, same posture as Distinct/Union.
+func linqExcept(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	return linqSetOp(m, args, false, depth, instrCount)
+}
+
+func linqIntersect(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	return linqSetOp(m, args, true, depth, instrCount)
+}
+
+func linqSetOp(m *Machine, args []runtime.Value, wantIn bool, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) < 2 || len(args) > 3 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.Except/Intersect expects (first, second[, comparer])")
+	}
+	a, err := m.enumerateAll(args[0], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	b, err := m.enumerateAll(args[1], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	var comparerArg *runtime.Value
+	if len(args) == 3 {
+		comparerArg = &args[2]
+	}
+	eq, err := m.equalsFunc(comparerArg, depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	inSecond := func(v runtime.Value) (bool, error) {
+		for _, o := range b {
+			same, err := eq(v, o)
+			if err != nil {
+				return false, err
+			}
+			if same {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+	var out []runtime.Value
+	for _, e := range a {
+		found, err := inSecond(e)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		if found != wantIn {
+			continue
+		}
+		dup := false
+		for _, o := range out {
+			same, err := eq(e, o)
+			if err != nil {
+				return runtime.Value{}, err
+			}
+			if same {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			out = append(out, e)
+		}
+	}
+	return bcl.NewListValue(out), nil
+}
+
+// linqSkipWhile/linqTakeWhile cover the predicate-only overloads
+// (SkipWhile(source, Func<T,bool>)/TakeWhile(source, Func<T,bool>)) —
+// the (item, index) overload is a known, documented gap (like GroupBy's
+// resultSelector overload, linq_groupby.go): vmnet's runtime.Func carries
+// no declared arity to structurally tell the two overloads apart the way
+// GroupBy's own argument-count/Kind disambiguation works, and the
+// predicate-only shape is by far the dominant real-world pattern.
+func linqSkipWhile(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.SkipWhile expects (source, predicate)")
+	}
+	elems, err := m.enumerateAll(args[0], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	i := 0
+	for ; i < len(elems); i++ {
+		v, err := m.linqInvoke(args[1], elems[i], depth, instrCount)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		if !v.Truthy() {
+			break
+		}
+	}
+	out := make([]runtime.Value, len(elems)-i)
+	copy(out, elems[i:])
+	return bcl.NewListValue(out), nil
+}
+
+func linqTakeWhile(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.TakeWhile expects (source, predicate)")
+	}
+	elems, err := m.enumerateAll(args[0], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	var out []runtime.Value
+	for _, e := range elems {
+		v, err := m.linqInvoke(args[1], e, depth, instrCount)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		if !v.Truthy() {
+			break
+		}
+		out = append(out, e)
+	}
+	return bcl.NewListValue(out), nil
+}
+
+func linqReverse(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.Reverse expects a source")
+	}
+	elems, err := m.enumerateAll(args[0], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	out := make([]runtime.Value, len(elems))
+	for i, v := range elems {
+		out[len(elems)-1-i] = v
+	}
+	return bcl.NewListValue(out), nil
+}
+
+// linqToHashSet materializes into a real HashSet<T> (bcl.NewHashSetValue)
+// rather than a List<T> like every other LINQ terminal method here —
+// callers that go on to use Contains/UnionWith/etc. on the result need
+// the real receiver type, not a plain list wearing a HashSet-shaped hat.
+func linqToHashSet(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) < 1 || len(args) > 2 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.ToHashSet expects a source[, comparer]")
+	}
+	elems, err := m.enumerateAll(args[0], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	var comparerArg *runtime.Value
+	if len(args) == 2 {
+		comparerArg = &args[1]
+	}
+	eq, err := m.equalsFunc(comparerArg, depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	var out []runtime.Value
+	for _, e := range elems {
+		dup := false
+		for _, o := range out {
+			same, err := eq(e, o)
+			if err != nil {
+				return runtime.Value{}, err
+			}
+			if same {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			out = append(out, e)
+		}
+	}
+	return bcl.NewHashSetValue(out), nil
 }
 
 // linqToDictionary covers ToDictionary(source, keySelector) and
@@ -710,19 +1134,6 @@ func linqSingleOrDefault(m *Machine, args []runtime.Value, depth int, instrCount
 	}
 }
 
-func linqOrderByDescending(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
-	asc, err := linqOrderBy(m, args, depth, instrCount)
-	if err != nil {
-		return runtime.Value{}, err
-	}
-	items, _ := bcl.NativeListItems(asc.Obj.Native)
-	out := make([]runtime.Value, len(items))
-	for i, v := range items {
-		out[len(items)-1-i] = v
-	}
-	return bcl.NewListValue(out), nil
-}
-
 func linqElementAt(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
 	if len(args) != 2 || args[1].Kind != runtime.KindI4 {
 		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.ElementAt expects (source, index)")
@@ -759,11 +1170,12 @@ func linqSkip(m *Machine, args []runtime.Value, depth int, instrCount *int64) (r
 }
 
 // linqUnion concatenates both sources like Concat but deduplicates the
-// result (valuesDeepEqual, same posture as Distinct), preserving
-// first-occurrence order across both sequences.
+// result — by an optional IEqualityComparer<T> argument, or defaultObjectEqual
+// otherwise (comparer.go, same posture as Distinct/Except/Intersect/
+// ToHashSet) — preserving first-occurrence order across both sequences.
 func linqUnion(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
-	if len(args) != 2 {
-		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.Union expects (first, second)")
+	if len(args) < 2 || len(args) > 3 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.Union expects (first, second[, comparer])")
 	}
 	a, err := m.enumerateAll(args[0], depth, instrCount)
 	if err != nil {
@@ -773,11 +1185,23 @@ func linqUnion(m *Machine, args []runtime.Value, depth int, instrCount *int64) (
 	if err != nil {
 		return runtime.Value{}, err
 	}
+	var comparerArg *runtime.Value
+	if len(args) == 3 {
+		comparerArg = &args[2]
+	}
+	eq, err := m.equalsFunc(comparerArg, depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
 	var out []runtime.Value
 	for _, e := range append(a, b...) {
 		dup := false
 		for _, o := range out {
-			if valuesDeepEqual(e, o) {
+			same, err := eq(e, o)
+			if err != nil {
+				return runtime.Value{}, err
+			}
+			if same {
 				dup = true
 				break
 			}

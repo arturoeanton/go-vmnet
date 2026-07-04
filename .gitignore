@@ -38,6 +38,29 @@ tests/fixtures/csharp/obj/
 examples/jint-demo/bin/
 examples/jint-demo/obj/
 
+# .NET build output for the examples/closedxml-demo wrapper (same
+# rationale as jint-demo above — GraphicEngineWrapper.cs is committed
+# source, the compiled GraphicEngineWrapper.dll it produces is not)
+examples/closedxml-demo/bin/
+examples/closedxml-demo/obj/
+
+# .NET build output for the examples/calculator classlib + optional
+# CoreCLR-comparison project (same rationale — Calculator.cs and
+# coreclr/Program.cs are committed source, the DLLs/exes they produce
+# are not)
+examples/calculator/bin/
+examples/calculator/obj/
+examples/calculator/coreclr/bin/
+examples/calculator/coreclr/obj/
+
+# macOS Finder metadata
+.DS_Store
+
+# examples/openxml-demo's own generated output (main.go writes this fresh
+# on every run — a build artifact, not a fixture, unlike the *.xls/*.xlsx
+# testdata other demos commit as their real read-side input)
+examples/openxml-demo/report.docx
+
 # vmnet's own NuGet package cache (`vmnet add`/`restore`, see
 # docs/ROADMAP.md Fase 3) — downloaded .nupkg files, never committed.
 # vmnet.json/vmnet.lock.json are NOT ignored here: a real project commits

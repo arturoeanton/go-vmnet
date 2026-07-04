@@ -1,0 +1,8 @@
+{
+  "packages": [
+    {
+      "ID": "NPOI",
+      "Version": "2.8.0"
+    }
+  ]
+}

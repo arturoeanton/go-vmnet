@@ -74,10 +74,13 @@ type Method struct {
 // closures need to reference.
 type Resolvers struct {
 	// Resolve looks up another method by full name, given the actual
-	// call-site arguments (receiver included for an instance call) to
-	// disambiguate a real overload set — see assembly.go's
+	// call-site arguments (receiver included for an instance call), the
+	// call site's own compile-time-resolved parameter type names (nil if
+	// unavailable, Fase 3.40), and the call site's own generic-method
+	// instantiation arity (0 for a plain, non-generic call — Fase 3.41)
+	// to disambiguate a real overload set — see assembly.go's
 	// pickMethodOverload.
-	Resolve func(fullName string, args []Value) (*Method, error)
+	Resolve func(fullName string, args []Value, paramTypeNames []string, genericArgCount int) (*Method, error)
 	// ResolveType looks up a type's field layout by full name.
 	ResolveType func(fullName string) (*Type, error)
 	// ResolveExplicitImpl finds the real (mangled) method name a concrete
@@ -95,4 +98,9 @@ type Resolvers struct {
 	// declared parameter type names (Fase 3.39: System.Reflection —
 	// Type.GetConstructor/GetMethod), returning its full callable name.
 	ResolveMember func(typeFullName, memberName string, paramTypeFullNames []string) (fullName string, ok bool)
+	// ResolveManifestResource returns an embedded manifest resource's raw
+	// bytes by name (Fase 3.40: Assembly.GetManifestResourceStream — a
+	// real .NET assembly can embed arbitrary files, e.g. ClosedXML's own
+	// bundled .ttf font data, in its own PE image).
+	ResolveManifestResource func(name string) ([]byte, bool)
 }

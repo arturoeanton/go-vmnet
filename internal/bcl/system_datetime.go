@@ -2,6 +2,7 @@ package bcl
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/arturoeanton/go-vmnet/internal/runtime"
@@ -107,6 +108,8 @@ func init() {
 	// effectively being UTC/unspecified internally.
 	register("System.DateTime::ToUniversalTime", true, dateTimeIdentity)
 	register("System.DateTime::ToLocalTime", true, dateTimeIdentity)
+	register("System.DateTime::ParseExact", true, dateTimeParseExact)
+	register("System.DateTime::TryParseExact", true, dateTimeTryParseExact)
 }
 
 func dateTimeIdentity(args []runtime.Value) (runtime.Value, error) {
@@ -115,6 +118,93 @@ func dateTimeIdentity(args []runtime.Value) (runtime.Value, error) {
 		return runtime.Value{}, err
 	}
 	return dateTimeFromTime(t), nil
+}
+
+// netDateFormatToGoLayout translates a .NET custom date/time format
+// string (ECMA-335 has no metadata for this — it's just a runtime
+// string) to the equivalent Go reference-time layout — needed since Fase
+// 3.40: System.IO.Packaging's own PartBasedPackageProperties parses OPC
+// "W3CDTF" dates via DateTime.ParseExact(s, "yyyy-MM-ddTHH:mm:ss.fffffffZ",
+// ...). Only the handful of specifiers real callers in this loop's
+// target packages actually use are covered — longest-token-first so
+// "yyyy" isn't partially consumed as "yy"+"yy". Any character not one of
+// these tokens (T, Z, -, :, ., ' ') passes through literally, matching
+// both formats' own convention for literal separators.
+func netDateFormatToGoLayout(format string) string {
+	replacer := strings.NewReplacer(
+		"yyyy", "2006",
+		"yy", "06",
+		"MM", "01",
+		"dd", "02",
+		"HH", "15",
+		"hh", "03",
+		"mm", "04",
+		"ss", "05",
+		"fffffff", "0000000",
+		"ffffff", "000000",
+		"fffff", "00000",
+		"ffff", "0000",
+		"fff", "000",
+		"ff", "00",
+		"f", "0",
+		"tt", "PM",
+	)
+	return replacer.Replace(format)
+}
+
+func dateTimeParseFormats(args []runtime.Value) (s string, layouts []string, ok bool) {
+	if len(args) < 2 || args[0].Kind != runtime.KindString {
+		return "", nil, false
+	}
+	s = args[0].Str
+	switch args[1].Kind {
+	case runtime.KindString:
+		layouts = []string{netDateFormatToGoLayout(args[1].Str)}
+	case runtime.KindArray:
+		if args[1].Arr == nil {
+			return "", nil, false
+		}
+		for _, e := range args[1].Arr.Elems {
+			if e.Kind == runtime.KindString {
+				layouts = append(layouts, netDateFormatToGoLayout(e.Str))
+			}
+		}
+	default:
+		return "", nil, false
+	}
+	return s, layouts, true
+}
+
+func dateTimeParseExact(args []runtime.Value) (runtime.Value, error) {
+	s, layouts, ok := dateTimeParseFormats(args)
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: DateTime.ParseExact expects (string, string-or-string[], ...)")
+	}
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return dateTimeFromTime(t), nil
+		}
+	}
+	return runtime.Value{}, &runtime.ManagedException{TypeName: "System.FormatException", Message: fmt.Sprintf("String '%s' was not recognized as a valid DateTime.", s)}
+}
+
+func dateTimeTryParseExact(args []runtime.Value) (runtime.Value, error) {
+	s, layouts, ok := dateTimeParseFormats(args)
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: DateTime.TryParseExact expects (string, string-or-string[], ...)")
+	}
+	out := args[len(args)-1]
+	if out.Kind != runtime.KindRef || out.Ref == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: DateTime.TryParseExact expects an out parameter")
+	}
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			*out.Ref = dateTimeFromTime(t)
+			return runtime.Bool(true), nil
+		}
+	}
+	*out.Ref = dateTimeFromTime(time.Time{})
+	return runtime.Bool(false), nil
 }
 
 func dateTimeNotEquals(args []runtime.Value) (runtime.Value, error) {

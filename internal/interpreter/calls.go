@@ -12,23 +12,39 @@ import (
 // args are the actual call-site arguments (receiver included, for an
 // instance call) — needed since Fase 3.27 to disambiguate a real
 // overload set (same name, different signature; FullName alone can't
-// tell two overloads apart), not to invoke anything here.
-type Resolver func(fullName string, args []runtime.Value) (*runtime.Method, error)
+// tell two overloads apart), not to invoke anything here. paramTypeNames
+// is the call site's own compile-time-resolved parameter type names
+// (Fase 3.40, ir.Call.ParamTypeNames) — nil for a caller with no Call-
+// level IR context at all (Machine.New/CallInstance, the public host
+// API; a .cctor lookup). Used only as an optional, early exact-match
+// preference before falling back to args' own Kind-based scoring — see
+// pickMethodOverload. genericArgCount is the call site's own generic-
+// method instantiation arity (Fase 3.41, len(ir.Call.MethodGenericArgs))
+// — 0 for a plain, non-generic call — needed to hard-disambiguate a
+// same-named, same-real-arity plain/generic method pair (e.g.
+// DocumentFormat.OpenXml.OpenXmlElement's own Descendants()/
+// Descendants<T>()), which a real arity/shape score alone can never
+// tell apart (T contributes zero real parameters either way).
+type Resolver func(fullName string, args []runtime.Value, paramTypeNames []string, genericArgCount int) (*runtime.Method, error)
 
 // TypeResolver looks up a type's field layout by its "Namespace.Type" full
 // name, for newobj/ldfld/stfld.
 type TypeResolver func(fullName string) (*runtime.Type, error)
 
-// ExplicitImplResolver finds the real method name a concrete type uses to
-// explicitly implement an interface method (Fase 3.13) — e.g. a `yield
-// return` iterator's compiler-generated class implements
-// IEnumerable`1::GetEnumerator not as a plain "GetEnumerator" method but
-// as "System.Collections.Generic.IEnumerable<System.Int32>.GetEnumerator"
+// ExplicitImplResolver finds the real, fully-qualified method name a
+// concrete type (or one of its ancestors, Fase 3.40) uses to explicitly
+// implement an interface method (Fase 3.13) — e.g. a `yield return`
+// iterator's compiler-generated class implements IEnumerable`1::
+// GetEnumerator not as a plain "GetEnumerator" method but as
+// "System.Collections.Generic.IEnumerable<System.Int32>.GetEnumerator"
 // (the mangled name explicit interface implementation requires), which a
-// plain concreteType+"::"+method lookup can never find. Returns ok=false
-// when the type implements the interface method under its plain name (or
-// doesn't implement it at all) — the ordinary receiverTypeName fallback
-// in Machine.call already covers that case.
+// plain concreteType+"::"+method lookup can never find. implMethodName is
+// already "<declaringType>::<mangledMethod>", ready to call directly —
+// declaringType is whichever ancestor of concreteTypeFullName actually
+// declares the MethodImpl, which need not be concreteTypeFullName itself.
+// Returns ok=false when the type implements the interface method under
+// its plain name (or doesn't implement it at all) — the ordinary
+// receiverTypeName fallback in Machine.call already covers that case.
 type ExplicitImplResolver func(concreteTypeFullName, interfaceFullName, methodName string) (implMethodName string, ok bool)
 
 // EnumResolver reads a plugin-declared enum's members (name, real
@@ -55,6 +71,23 @@ type FieldBytesResolver func(typeFullName, fieldName string) ([]byte, bool)
 // Type.GetConstructor.
 type MemberResolver func(typeFullName, memberName string, paramTypeFullNames []string) (fullName string, ok bool)
 
+// ManifestResourceResolver returns an embedded manifest resource's raw
+// bytes by name (Fase 3.40, Assembly.GetManifestResourceStream) — see
+// runtime.Resolvers.ResolveManifestResource.
+type ManifestResourceResolver func(name string) ([]byte, bool)
+
+// genericMachineNative is a Machine-aware native (like machineNative,
+// linq.go) that additionally needs the call site's own resolved generic
+// method type arguments (Fase 3.40, ir.Call.MethodGenericArgs) — e.g.
+// DocumentFormat.OpenXml.Packaging.FeatureCollectionBase::Get<TFeature>,
+// whose real body does `this[typeof(TFeature)]` and has no other way to
+// learn what TFeature actually is (see ir.Call.MethodGenericArgs's own
+// doc comment for why this is a separate, narrower registry rather than
+// widening machineNative itself).
+type genericMachineNative func(m *Machine, args []runtime.Value, methodGenericArgs []string, depth int, instrCount *int64) (runtime.Value, error)
+
+var genericMachineRegistry = map[string]genericMachineNative{}
+
 // call dispatches fullName as either a BCL native or an interpreted
 // method. virtual must be true only for an actual `callvirt` site — the
 // interface/virtual-dispatch fallback below must never apply to a plain
@@ -66,7 +99,7 @@ type MemberResolver func(typeFullName, memberName string, paramTypeFullNames []s
 // recursion caught by a real example (a plugin exception subclass
 // chaining `: base(message)`) while building this fallback, not a
 // hypothetical edge case.
-func (m *Machine) call(fullName string, args []runtime.Value, virtual bool, depth int, instrCount *int64) (runtime.Value, bool, error) {
+func (m *Machine) call(fullName string, args []runtime.Value, virtual bool, depth int, instrCount *int64, paramTypeNames []string, methodGenericArgs []string) (runtime.Value, bool, error) {
 	var lastResolveErr error
 
 	// Real virtual dispatch (Fase 3.27): a `callvirt` site's fullName is
@@ -91,19 +124,81 @@ func (m *Machine) call(fullName string, args []runtime.Value, virtual bool, dept
 	// The concrete leaf type itself may not be the one that overrides —
 	// e.g. Esprima's concrete node classes (Literal, Identifier, ...)
 	// don't override GetChildNodes themselves; an INTERMEDIATE base
-	// class between them and Node does. So this walks the full chain
-	// from the concrete type up to (but not including — that's the
-	// final fallback below) the declared type, trying each ancestor's
-	// own plain-named override before giving up on this receiver
-	// hierarchy entirely.
+	// class between them and Node does. So — after the explicit-impl
+	// check below, which must run first — this walks the full chain
+	// from the concrete type all the way up (INCLUDING the declared
+	// type itself, Fase 3.48 — see the loop's own doc comment for why
+	// skipping it used to let a worse-matching ancestor win the race),
+	// trying each ancestor's own plain-named override before giving up
+	// on this receiver hierarchy entirely.
 	if virtual && len(args) > 0 {
 		if concrete, ok := receiverTypeName(args[0]); ok {
 			if class, method, ok := splitCallName(fullName); ok {
+				// Explicit interface implementations (a real MethodImpl row
+				// pairing "class::method" to a mangled body on some
+				// ancestor) must be tried BEFORE the plain-name ancestor
+				// walk below, not just as a fallback once it comes up
+				// empty (Fase 3.40, found via a real bug: DocumentFormat.
+				// OpenXml.Features.PackageFeatureBase declares BOTH a
+				// plain `protected abstract Package Package { get; }` AND
+				// an unrelated explicit `IPackage
+				// DocumentFormat.OpenXml.Features.IPackageFeature.
+				// get_Package()` — both bare-named "get_Package" on the
+				// exact same ancestor. The old order let the plain-name
+				// walk claim victory first purely because a same-named
+				// method happened to exist, silently returning the
+				// receiver's real System.IO.Packaging.Package/ZipPackage
+				// instead of the wrapper `this` the interface method
+				// actually returns — corrupting every later IPackage-typed
+				// call on it. Real C#/CLR semantics never leave this
+				// ambiguous: an explicit interface implementation always
+				// wins over an unrelated same-named member, so it must be
+				// checked first here too.
+				if m.ResolveExplicitImpl != nil {
+					// implMethod is already fully qualified as
+					// "<declaringType>::<mangledMethod>" — the declaring
+					// type can be any ancestor of concrete, not
+					// necessarily concrete itself (Fase 3.40, see
+					// resolveExplicitImpl's own doc comment).
+					if implMethod, ok := m.ResolveExplicitImpl(concrete, class, method); ok {
+						v, hasReturn, err, found, rerr := m.tryCall(implMethod, args, depth, instrCount, paramTypeNames, methodGenericArgs)
+						if found {
+							return v, hasReturn, err
+						}
+						if rerr != nil {
+							lastResolveErr = rerr
+						}
+					}
+				}
 				seen := map[string]bool{}
-				for t, ok := concrete, true; ok && t != class && !seen[t]; t, ok = m.baseTypeOf(t) {
+				for t, ok := concrete, true; ok && !seen[t]; t, ok = m.baseTypeOf(t) {
 					seen[t] = true
+					// t==class (the declared/host-call target itself) used
+					// to be skipped here on the theory that the final
+					// plain-fullName fallback below already covers it —
+					// true in isolation, but wrong in a walk that returns
+					// on the FIRST found match: for a host-driven
+					// Instance.Call (Fase 3.28), fullName always names the
+					// receiver's own exact concrete type
+					// (in.typeName+"::"+methodName), so concrete==class on
+					// the very first iteration — skipping it here meant
+					// the walk could return an ANCESTOR's worse-matching
+					// overload (found first, since class was never even
+					// tried until every ancestor was exhausted) instead of
+					// the leaf type's own better-matching one. Found via a
+					// real, load-bearing case (Fase 3.48): Newtonsoft.
+					// Json's own JObject.get_Item(string) — declared
+					// directly on JObject — losing to JContainer/JToken's
+					// unrelated get_Item(object) inherited overload, which
+					// this same ancestor walk incorrectly tried first.
+					// Trying t==class here (identical to retryName==
+					// fullName) is redundant-safe with the final fallback,
+					// not a correctness risk — pickMethodOverload's own
+					// candidate scoring at THIS exact name is unaffected
+					// by when it runs, only by whether an ancestor's
+					// unrelated match wrongly wins the race first.
 					retryName := t + "::" + method
-					v, hasReturn, err, found, rerr := m.tryCall(retryName, args, depth, instrCount)
+					v, hasReturn, err, found, rerr := m.tryCall(retryName, args, depth, instrCount, paramTypeNames, methodGenericArgs)
 					if found {
 						return v, hasReturn, err
 					}
@@ -111,24 +206,36 @@ func (m *Machine) call(fullName string, args []runtime.Value, virtual bool, dept
 						lastResolveErr = rerr
 					}
 				}
-				// No override anywhere in the chain under its plain name —
-				// it may still implement the interface/base method, just
-				// under the mangled name explicit interface implementation
-				// requires (a `yield return` iterator's GetEnumerator/
-				// Current, most commonly). See ExplicitImplResolver's doc
-				// comment. Only checked against the concrete leaf type,
-				// matching real C# — interface dispatch resolves against
-				// the receiver's most-derived type, never an intermediate
-				// base.
-				if m.ResolveExplicitImpl != nil {
-					if implMethod, ok := m.ResolveExplicitImpl(concrete, class, method); ok {
-						v, hasReturn, err, found, rerr := m.tryCall(concrete+"::"+implMethod, args, depth, instrCount)
-						if found {
-							return v, hasReturn, err
-						}
-						if rerr != nil {
-							lastResolveErr = rerr
-						}
+				// Last resort: System.Object's own Equals/GetHashCode/
+				// ToString (Fase 3.40). The ancestor chain walk above
+				// never reaches "System.Object" itself — buildType
+				// deliberately leaves BaseTypeFullName empty for a type
+				// whose immediate base IS Object (assembly.go's own
+				// "resolved != System.Object" guard) — so a real,
+				// unoverridden inherited Equals called through a generic
+				// interface constraint (`IEquatable<T>::Equals`, found
+				// via System.IO.Packaging's own ValidatedPartUri going
+				// through EqualityComparer<T>-style dispatch) fell all
+				// the way through to the literal "IEquatable`1::Equals"
+				// fallback below, which can never resolve (no real
+				// TypeDef for a BCL-only generic interface). Only tried
+				// for the 3 names that actually have a native here, AND
+				// only when the argument count actually matches Object's
+				// own arity (Equals: receiver+1, GetHashCode/ToString:
+				// receiver only) — a same-named but differently-shaped
+				// interface method (IEqualityComparer<T>.Equals(T,T),
+				// receiver+2) must NOT be redirected here: found via a
+				// real bug where a comparer's own unresolvable
+				// Equals(x,y) hit this fallback and objectEquals rejected
+				// it outright ("expects 2 arguments"), instead of falling
+				// through to the ordinary, more informative error below.
+				if (method == "Equals" && len(args) == 2) || ((method == "GetHashCode" || method == "ToString") && len(args) == 1) {
+					v, hasReturn, err, found, rerr := m.tryCall("System.Object::"+method, args, depth, instrCount, paramTypeNames, methodGenericArgs)
+					if found {
+						return v, hasReturn, err
+					}
+					if rerr != nil {
+						lastResolveErr = rerr
 					}
 				}
 			}
@@ -139,7 +246,7 @@ func (m *Machine) call(fullName string, args []runtime.Value, virtual bool, dept
 	// declared/base name directly (the overwhelmingly common case: most
 	// calls aren't virtual, and most virtual calls have no override
 	// anywhere in between the declared type and the receiver's own).
-	v, hasReturn, err, found, resolveErr := m.tryCall(fullName, args, depth, instrCount)
+	v, hasReturn, err, found, resolveErr := m.tryCall(fullName, args, depth, instrCount, paramTypeNames, methodGenericArgs)
 	if found {
 		return v, hasReturn, err
 	}
@@ -151,6 +258,54 @@ func (m *Machine) call(fullName string, args []runtime.Value, virtual bool, dept
 		return runtime.Value{}, false, fmt.Errorf("interpreter: unsupported BCL method %q: %w", fullName, lastResolveErr)
 	}
 	return runtime.Value{}, false, fmt.Errorf("interpreter: unsupported BCL method %q (no native registered)", fullName)
+}
+
+// charSensitiveNatives lists the handful of natives whose real behavior
+// genuinely differs between a `char` and a plain `int` argument that
+// vmnet's uniform KindI4 (spec §17.1: no distinct char Kind, documented
+// since the NPOI phase) can't tell apart on its own — StringBuilder's own
+// doc comment explains the general limitation. Rather than widen every
+// native's signature to take paramTypeNames (a large, invasive change
+// for a narrow problem), this converts a KindI4 argument the call site's
+// own resolved signature says is System.Char into a single-rune string
+// right before dispatch, for just these known-affected natives (Fase
+// 3.40, found via a real, load-bearing case: System.IO.Packaging's own
+// ContentType.ToString() does `stringBuilder.Append('/')`, and without
+// this the resulting content-type string reads "application47vnd..."
+// instead of "application/vnd...", corrupting every OPC content-type
+// ClosedXML/OpenXml round-trips through it).
+var charSensitiveNatives = map[string]bool{
+	"System.Text.StringBuilder::Append":     true,
+	"System.Text.StringBuilder::AppendLine": true,
+	"System.Text.StringBuilder::Insert":     true,
+}
+
+// convertCharArgsForNative converts args in place (on a copy, made lazily
+// only if a real conversion is needed) for a charSensitiveNatives entry.
+// paramTypeNames indexes the call's own declared (non-receiver)
+// parameters 1:1 (ir.Call.ParamTypeNames' own convention) — args[0] is
+// the receiver for these instance methods, so argument i+1 is
+// paramTypeNames[i]'s value.
+func convertCharArgsForNative(fullName string, args []runtime.Value, paramTypeNames []string) []runtime.Value {
+	if !charSensitiveNatives[fullName] || len(paramTypeNames) == 0 {
+		return args
+	}
+	out := args
+	copied := false
+	for i, name := range paramTypeNames {
+		argIdx := i + 1
+		if argIdx >= len(out) {
+			break
+		}
+		if name == "System.Char" && out[argIdx].Kind == runtime.KindI4 {
+			if !copied {
+				out = append([]runtime.Value(nil), args...)
+				copied = true
+			}
+			out[argIdx] = runtime.String(string(rune(out[argIdx].I4)))
+		}
+	}
+	return out
 }
 
 // tryCall attempts fullName as either a BCL native or an interpreted
@@ -165,10 +320,21 @@ func (m *Machine) call(fullName string, args []runtime.Value, virtual bool, dept
 // text once every fallback (interface dispatch, explicit impl, ...) is
 // exhausted, so the actual root cause survives instead of being masked
 // by the outermost call target's name.
-func (m *Machine) tryCall(fullName string, args []runtime.Value, depth int, instrCount *int64) (v runtime.Value, hasReturn bool, err error, found bool, resolveErr error) {
+func (m *Machine) tryCall(fullName string, args []runtime.Value, depth int, instrCount *int64, paramTypeNames []string, methodGenericArgs []string) (v runtime.Value, hasReturn bool, err error, found bool, resolveErr error) {
 	if native, hr, ok := bcl.Lookup(fullName); ok {
-		v, err = native(args)
+		v, err = native(convertCharArgsForNative(fullName, args, paramTypeNames))
 		return v, hr, err, true, nil
+	}
+	// genericMachineRegistry (Fase 3.40) is checked before the ordinary
+	// machineRegistry: a handful of real methods (DocumentFormat.OpenXml.
+	// Packaging.FeatureCollectionBase::Get<TFeature>, most notably) need
+	// the call site's own resolved generic method type arguments, which
+	// only reach this far and no further (see ir.Call.MethodGenericArgs's
+	// own doc comment for why this stops here rather than reaching
+	// ordinary interpreted method bodies too).
+	if native, ok := genericMachineRegistry[fullName]; ok {
+		v, err = native(m, args, methodGenericArgs, depth, instrCount)
+		return v, true, err, true, nil
 	}
 	// Machine-aware natives (LINQ, Fase 3.15; Type::IsAssignableFrom,
 	// Fase 3.16): need Machine access (invoking a delegate argument,
@@ -182,7 +348,7 @@ func (m *Machine) tryCall(fullName string, args []runtime.Value, depth int, inst
 	if m.Resolve == nil {
 		return runtime.Value{}, false, nil, false, nil
 	}
-	method, rerr := m.Resolve(fullName, args)
+	method, rerr := m.Resolve(fullName, args, paramTypeNames, len(methodGenericArgs))
 	if rerr != nil {
 		return runtime.Value{}, false, nil, false, rerr
 	}
@@ -219,11 +385,15 @@ func (m *Machine) invokeFuncTarget(fn *runtime.Func, args []runtime.Value, depth
 	if fn.Receiver != nil {
 		callArgs = append([]runtime.Value{*fn.Receiver}, args...)
 	}
-	// fn.FullName is already the exact bound target (resolved at ldftn
-	// time, Fase 3.9) — never a declared-interface name needing
-	// redirection, so this is never a candidate for the virtual-dispatch
-	// fallback either.
-	return m.call(fn.FullName, callArgs, false, depth, instrCount)
+	// fn.FullName is the exact bound target for a plain ldftn (Fase
+	// 3.9) — but for ldvirtftn (fn.Virtual, Fase 3.40: a method-group
+	// conversion of a virtual/abstract method, e.g. DocumentFormat.
+	// OpenXml.Builder's own `new Func<T>(builder.Create)`), FullName is
+	// only the declared method; the real override lives on the bound
+	// receiver's own concrete type, which Machine.call's ordinary
+	// virtual-dispatch chain-walk (the same one callvirt itself uses)
+	// resolves correctly once told to.
+	return m.call(fn.FullName, callArgs, fn.Virtual, depth, instrCount, nil, nil)
 }
 
 // newObj implements the ir.NewObj instruction: allocate (native value
@@ -236,8 +406,24 @@ func (m *Machine) newObj(in newObjArgs, depth int, instrCount *int64) (runtime.V
 	// structurally rather than by TypeFullName, which is unbounded (a
 	// custom `delegate` declaration, or a foreign BCL one like Action<T>
 	// with no TypeDef in the loaded assembly — Fase 3.9).
-	if len(in.Args) == 2 && in.Args[1].Kind == runtime.KindFunc {
-		return runtime.BindDelegate(in.Args[0], *in.Args[1].Func), nil
+	//
+	// Args[1].Func.Receiver == nil is required, not just Kind == KindFunc:
+	// a real 2-argument constructor whose own 2nd parameter merely happens
+	// to be delegate-typed (e.g. DocumentFormat.OpenXml.Builder's own
+	// internal `Factory(Func<TPackage> package, PackageInitializerDelegate
+	// <TPackage> pipeline)`) also has args[1].Kind == KindFunc, and without
+	// this guard was wrongly treated as a delegate ctor call too — found
+	// the hard way (Fase 3.40): the "pipeline" argument there is an
+	// already-bound, previously-constructed delegate (Receiver != nil),
+	// whereas a genuine delegate-ctor's 2nd argument is always the raw,
+	// still-unbound Func straight off `ldftn` (Receiver == nil at that
+	// point, always — see ir.LoadFtn's own handling). Rebinding that
+	// already-bound delegate value under BindDelegate's rules silently
+	// discarded the real Factory object (2 real fields) in favor of
+	// treating args[0] (Factory's own first, unrelated argument) as if it
+	// were a delegate's receiver.
+	if len(in.Args) == 2 && in.Args[1].Kind == runtime.KindFunc && in.Args[1].Func != nil && in.Args[1].Func.Receiver == nil {
+		return runtime.BindDelegate(in.Args[0], *in.Args[1].Func, in.TypeFullName), nil
 	}
 
 	// System.String is a reference type in real .NET, but vmnet
@@ -248,6 +434,27 @@ func (m *Machine) newObj(in newObjArgs, depth int, instrCount *int64) (runtime.V
 	// path for exactly that reason.
 	if in.TypeFullName == "System.String" {
 		return bcl.NewStringFromCtor(in.Args)
+	}
+
+	// System.IntPtr is a real value type in .NET, but vmnet represents
+	// it as a bare Int64 Value with no struct wrapper at all (see
+	// system_intptr.go's own doc comment) — every other native ctor
+	// below returns either a *runtime.Struct (LookupValueTypeCtor) or a
+	// *runtime.Object (LookupCtor), neither of which fits "just a plain
+	// scalar," so `new IntPtr(value)` needs its own path for the same
+	// reason System.String does (Fase 3.41, found via a real, load-
+	// bearing case: System.Text.Json's own JsonReaderHelper stackalloc-
+	// scratch-buffer path constructs an IntPtr directly from an int).
+	if in.TypeFullName == "System.IntPtr" || in.TypeFullName == "System.UIntPtr" {
+		if len(in.Args) == 0 {
+			return runtime.Int64(0), nil
+		}
+		switch in.Args[0].Kind {
+		case runtime.KindI8:
+			return runtime.Int64(in.Args[0].I8), nil
+		default:
+			return runtime.Int64(int64(in.Args[0].I4)), nil
+		}
 	}
 
 	if vtCtor, ok := bcl.LookupValueTypeCtor(in.TypeFullName); ok {
@@ -283,7 +490,21 @@ func (m *Machine) newObj(in newObjArgs, depth int, instrCount *int64) (runtime.V
 		ctorArgs := make([]runtime.Value, 0, len(in.Args)+1)
 		ctorArgs = append(ctorArgs, runtime.RefTo(&objVal))
 		ctorArgs = append(ctorArgs, in.Args...)
-		if _, _, err := m.call(in.CtorFullName, ctorArgs, false, depth, instrCount); err != nil {
+		if _, _, err := m.call(in.CtorFullName, ctorArgs, false, depth, instrCount, in.ParamTypeNames, nil); err != nil {
+			// `new T()` with no arguments at all (Fase 3.40) — a struct
+			// with no explicitly-declared constructor has no real .ctor
+			// method in metadata whatsoever: `new T()` is pure C# syntax
+			// sugar the compiler lowers straight to `initobj`, identical
+			// to default(T) — found via a real, load-bearing case:
+			// System.Text.Json's own JsonDocumentOptions (a plain options
+			// struct, no declared ctor) needs to be passed explicitly to
+			// JsonDocument.Parse's optional-parameter-turned-required
+			// 2nd argument. Only safe to fall back silently when there
+			// are zero arguments — anything else genuinely needed a real
+			// constructor to run and this must still surface that error.
+			if len(in.Args) == 0 {
+				return objVal, nil
+			}
 			return runtime.Value{}, err
 		}
 		return objVal, nil
@@ -302,7 +523,7 @@ func (m *Machine) newObj(in newObjArgs, depth int, instrCount *int64) (runtime.V
 	ctorArgs := make([]runtime.Value, 0, len(in.Args)+1)
 	ctorArgs = append(ctorArgs, objVal)
 	ctorArgs = append(ctorArgs, in.Args...)
-	if _, _, err := m.call(in.CtorFullName, ctorArgs, false, depth, instrCount); err != nil {
+	if _, _, err := m.call(in.CtorFullName, ctorArgs, false, depth, instrCount, in.ParamTypeNames, nil); err != nil {
 		return runtime.Value{}, err
 	}
 	return objVal, nil
@@ -330,4 +551,13 @@ type newObjArgs struct {
 	TypeFullName string
 	CtorFullName string
 	Args         []runtime.Value
+
+	// ParamTypeNames is the newobj site's own declared .ctor overload
+	// signature (ir.NewObj.ParamTypeNames, Fase 3.43 — see its doc comment
+	// for the real XLFill case that made ctor overload resolution need
+	// this), passed through to Machine.call/pickMethodOverload exactly
+	// like an ordinary ir.Call's ParamTypeNames. nil for native callers
+	// (loaddomtree.go/elementfactory.go's parameterless `new T()`s) with
+	// no IR-level ctor token to read a signature from.
+	ParamTypeNames []string
 }

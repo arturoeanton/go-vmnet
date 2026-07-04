@@ -41,10 +41,11 @@ func (vm *VM) LoadBytes(name string, data []byte) (*Assembly, error) {
 		return nil, fmt.Errorf("vmnet: %s: %w", name, err)
 	}
 	return &Assembly{
-		name:    name,
-		file:    f,
-		md:      md,
-		methods: map[uint32]*runtime.Method{},
-		types:   map[string]*runtime.Type{},
+		name:          name,
+		file:          f,
+		md:            md,
+		methods:       map[uint32]*runtime.Method{},
+		types:         map[string]*runtime.Type{},
+		explicitImpls: map[string]explicitImplResult{},
 	}, nil
 }

@@ -1,0 +1,234 @@
+{
+  "version": 1,
+  "target": "netstandard2.0",
+  "packages": [
+    {
+      "id": "BouncyCastle.Cryptography",
+      "version": "2.6.2",
+      "selectedAsset": "lib/netstandard2.0/BouncyCastle.Cryptography.dll",
+      "dependencies": []
+    },
+    {
+      "id": "Enums.NET",
+      "version": "5.0.0",
+      "selectedAsset": "lib/netstandard2.0/Enums.NET.dll",
+      "dependencies": [
+        "System.ComponentModel.Annotations",
+        "System.Runtime.CompilerServices.Unsafe"
+      ]
+    },
+    {
+      "id": "ExtendedNumerics.BigDecimal",
+      "version": "2025.1001.2.129",
+      "selectedAsset": "lib/netstandard2.0/ExtendedNumerics.BigDecimal.dll",
+      "dependencies": []
+    },
+    {
+      "id": "MathNet.Numerics.Signed",
+      "version": "5.0.0",
+      "selectedAsset": "lib/netstandard2.0/MathNet.Numerics.dll",
+      "dependencies": []
+    },
+    {
+      "id": "Microsoft.Build.Tasks.Git",
+      "version": "8.0.0",
+      "selectedAsset": "",
+      "unselectable": "no lib/ or ref/ asset compatible with vmnet's target (netstandard2.0, or netstandard2.1/net5.0+ if allowed)",
+      "dependencies": []
+    },
+    {
+      "id": "Microsoft.IO.RecyclableMemoryStream",
+      "version": "3.0.1",
+      "selectedAsset": "lib/netstandard2.0/Microsoft.IO.RecyclableMemoryStream.dll",
+      "dependencies": [
+        "System.Memory"
+      ]
+    },
+    {
+      "id": "Microsoft.SourceLink.Common",
+      "version": "8.0.0",
+      "selectedAsset": "",
+      "unselectable": "no lib/ or ref/ asset compatible with vmnet's target (netstandard2.0, or netstandard2.1/net5.0+ if allowed)",
+      "dependencies": []
+    },
+    {
+      "id": "Microsoft.SourceLink.GitHub",
+      "version": "8.0.0",
+      "selectedAsset": "",
+      "unselectable": "no lib/ or ref/ asset compatible with vmnet's target (netstandard2.0, or netstandard2.1/net5.0+ if allowed)",
+      "dependencies": [
+        "Microsoft.Build.Tasks.Git",
+        "Microsoft.SourceLink.Common"
+      ]
+    },
+    {
+      "id": "NPOI",
+      "version": "2.8.0",
+      "selectedAsset": "lib/netstandard2.0/NPOI.Core.dll",
+      "dependencies": [
+        "BouncyCastle.Cryptography",
+        "Enums.NET",
+        "ExtendedNumerics.BigDecimal",
+        "MathNet.Numerics.Signed",
+        "Microsoft.IO.RecyclableMemoryStream",
+        "Microsoft.SourceLink.GitHub",
+        "SharpZipLib",
+        "SkiaSharp",
+        "SkiaSharp.NativeAssets.Linux.NoDependencies",
+        "System.Formats.Asn1",
+        "System.Security.Cryptography.Xml",
+        "System.Text.Encoding.CodePages",
+        "ZString"
+      ]
+    },
+    {
+      "id": "SharpZipLib",
+      "version": "1.4.2",
+      "selectedAsset": "lib/netstandard2.0/ICSharpCode.SharpZipLib.dll",
+      "dependencies": [
+        "System.Memory",
+        "System.Threading.Tasks.Extensions"
+      ]
+    },
+    {
+      "id": "SkiaSharp",
+      "version": "3.119.2",
+      "selectedAsset": "lib/netstandard2.0/SkiaSharp.dll",
+      "dependencies": [
+        "SkiaSharp.NativeAssets.Win32",
+        "SkiaSharp.NativeAssets.macOS",
+        "System.Memory"
+      ]
+    },
+    {
+      "id": "SkiaSharp.NativeAssets.Linux.NoDependencies",
+      "version": "3.119.2",
+      "selectedAsset": "",
+      "unselectable": "package only ships native assets (runtimes/linux-arm/native/libSkiaSharp.so) — unsupported in pure-Go mode",
+      "dependencies": []
+    },
+    {
+      "id": "SkiaSharp.NativeAssets.macOS",
+      "version": "3.119.2",
+      "selectedAsset": "",
+      "unselectable": "package only ships native assets (runtimes/osx/native/libSkiaSharp.dylib) — unsupported in pure-Go mode",
+      "dependencies": []
+    },
+    {
+      "id": "SkiaSharp.NativeAssets.Win32",
+      "version": "3.119.2",
+      "selectedAsset": "",
+      "unselectable": "package only ships native assets (runtimes/win-arm64/native/libSkiaSharp.dll) — unsupported in pure-Go mode",
+      "dependencies": []
+    },
+    {
+      "id": "System.Buffers",
+      "version": "4.5.1",
+      "selectedAsset": "lib/netstandard2.0/System.Buffers.dll",
+      "dependencies": []
+    },
+    {
+      "id": "System.ComponentModel.Annotations",
+      "version": "5.0.0",
+      "selectedAsset": "lib/netstandard2.0/System.ComponentModel.Annotations.dll",
+      "dependencies": []
+    },
+    {
+      "id": "System.Formats.Asn1",
+      "version": "8.0.1",
+      "selectedAsset": "lib/netstandard2.0/System.Formats.Asn1.dll",
+      "dependencies": [
+        "System.Buffers",
+        "System.Memory"
+      ]
+    },
+    {
+      "id": "System.Memory",
+      "version": "4.5.5",
+      "selectedAsset": "lib/netstandard2.0/System.Memory.dll",
+      "dependencies": [
+        "System.Buffers",
+        "System.Numerics.Vectors",
+        "System.Runtime.CompilerServices.Unsafe"
+      ]
+    },
+    {
+      "id": "System.Numerics.Vectors",
+      "version": "4.4.0",
+      "selectedAsset": "lib/netstandard2.0/System.Numerics.Vectors.dll",
+      "dependencies": []
+    },
+    {
+      "id": "System.Runtime.CompilerServices.Unsafe",
+      "version": "6.0.0",
+      "selectedAsset": "lib/netstandard2.0/System.Runtime.CompilerServices.Unsafe.dll",
+      "dependencies": []
+    },
+    {
+      "id": "System.Security.AccessControl",
+      "version": "6.0.0",
+      "selectedAsset": "lib/netstandard2.0/System.Security.AccessControl.dll",
+      "dependencies": [
+        "System.Security.Principal.Windows"
+      ]
+    },
+    {
+      "id": "System.Security.Cryptography.Cng",
+      "version": "5.0.0",
+      "selectedAsset": "lib/netstandard2.0/System.Security.Cryptography.Cng.dll",
+      "dependencies": []
+    },
+    {
+      "id": "System.Security.Cryptography.Pkcs",
+      "version": "8.0.1",
+      "selectedAsset": "lib/netstandard2.0/System.Security.Cryptography.Pkcs.dll",
+      "dependencies": [
+        "System.Buffers",
+        "System.Formats.Asn1",
+        "System.Memory",
+        "System.Security.Cryptography.Cng"
+      ]
+    },
+    {
+      "id": "System.Security.Cryptography.Xml",
+      "version": "8.0.2",
+      "selectedAsset": "lib/netstandard2.0/System.Security.Cryptography.Xml.dll",
+      "dependencies": [
+        "System.Memory",
+        "System.Security.AccessControl",
+        "System.Security.Cryptography.Pkcs"
+      ]
+    },
+    {
+      "id": "System.Security.Principal.Windows",
+      "version": "5.0.0",
+      "selectedAsset": "lib/netstandard2.0/System.Security.Principal.Windows.dll",
+      "dependencies": []
+    },
+    {
+      "id": "System.Text.Encoding.CodePages",
+      "version": "8.0.0",
+      "selectedAsset": "lib/netstandard2.0/System.Text.Encoding.CodePages.dll",
+      "dependencies": [
+        "System.Memory",
+        "System.Runtime.CompilerServices.Unsafe"
+      ]
+    },
+    {
+      "id": "System.Threading.Tasks.Extensions",
+      "version": "4.5.2",
+      "selectedAsset": "lib/netstandard2.0/System.Threading.Tasks.Extensions.dll",
+      "dependencies": [
+        "System.Runtime.CompilerServices.Unsafe"
+      ]
+    },
+    {
+      "id": "ZString",
+      "version": "2.6.0",
+      "selectedAsset": "lib/netstandard2.0/ZString.dll",
+      "dependencies": [
+        "System.Memory"
+      ]
+    }
+  ]
+}

@@ -8,10 +8,11 @@ import (
 )
 
 // nativeConcurrentDict backs System.Collections.Concurrent.ConcurrentDictionary
-// `2. Same string-key-only limitation as nativeDict (system_collections.go,
-// Fase 2) — plus a real mutex, since a host application can legitimately
-// share one ConcurrentDictionary across multiple goroutines even though a
-// single vmnet Machine only ever runs on one.
+// `2. Keys are encoded via nativeDict's own general encodeDictKey (Fase
+// 3.40: string/int32/int64/float/object/struct, not just string) — plus
+// a real mutex, since a host application can legitimately share one
+// ConcurrentDictionary across multiple goroutines even though a single
+// vmnet Machine only ever runs on one.
 type nativeConcurrentDict struct {
 	mu sync.Mutex
 	m  map[string]runtime.Value
@@ -46,11 +47,13 @@ func asConcurrentDict(args []runtime.Value) (*nativeConcurrentDict, error) {
 	return d, nil
 }
 
+// concurrentDictKey reuses nativeDict's own general key encoder
+// (Fase 3.40) — string/int32/int64/float/object/struct keys, not just
+// string; ConcurrentDictionary never needs the original key value back
+// (no Keys/GetEnumerator registered), so the plain encoded string is
+// enough on its own, unlike nativeDict's dictEntry pairing.
 func concurrentDictKey(v runtime.Value) (string, error) {
-	if v.Kind != runtime.KindString {
-		return "", fmt.Errorf("bcl: ConcurrentDictionary only supports string keys")
-	}
-	return v.Str, nil
+	return encodeDictKey(v)
 }
 
 // ConcurrentDictGetOrAdd looks up key, computing and storing it via compute

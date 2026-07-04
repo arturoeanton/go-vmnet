@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"sync"
 )
 
 var (
@@ -35,6 +36,34 @@ type Metadata struct {
 	guid    *guidHeap
 
 	tables map[TableID]*Table
+
+	// typeDefCacheMu/typeDefCache memoize FindTypeDef (resolver.go) —
+	// otherwise-plain-O(n) linear scans of the TypeDef table, each row
+	// decoded fresh off the string heap. FindTypeDef is a pure function
+	// of the metadata (which never changes after Parse returns), and a
+	// real resolution chain looks the SAME (namespace, name) up over and
+	// over: DocumentFormat.OpenXml.dll alone has thousands of TypeDefs,
+	// and opening even a small .xlsx/.docx re-resolves the same handful
+	// of feature/element types on every part loaded — Fase 3.49, found
+	// via a reproducible closedxml-demo hang (deep, heavily-nested
+	// resolveByFullName/resolveByFullNameCrossPackage recursion during
+	// real package opening; a goroutine dump showed the main goroutine
+	// [runnable], not deadlocked — just doing this scan over and over).
+	// A mutex (not the caller's own single-threaded assumption) because
+	// a *Metadata is shared read-only across every Assembly/Machine that
+	// loads the same file, and nothing here guarantees one goroutine.
+	typeDefCacheMu sync.RWMutex
+	typeDefCache   map[string]typeDefCacheEntry
+}
+
+// typeDefCacheEntry caches one FindTypeDef outcome, hit or miss — a miss
+// re-scans the whole table exactly as expensively as a hit (nothing about
+// scanning to the end is cheaper than stopping partway), so an uncached
+// miss is just as capable of compounding into the same hang.
+type typeDefCacheEntry struct {
+	rid   uint32
+	row   TypeDefRow
+	found bool
 }
 
 // Parse reads a CLI metadata root (ECMA-335 §II.24.2.1) — the bytes

@@ -17,6 +17,24 @@ type Nop struct{}
 type Dup struct{}
 type Pop struct{}
 
+// LocalAlloc implements localloc (spec §III.3.47) — pops a byte count and
+// pushes a pointer to that many freshly zeroed bytes. Real C# only ever
+// reaches this via `stackalloc T[n]` immediately assigned into a Span<T>
+// (constructed right after via Span<T>(void*, int) — Fase 3.41, found via
+// a real, load-bearing case: System.Text.Json's own JsonDocument.
+// TryGetNamedPropertyValue stack-allocates a 256-byte scratch buffer for
+// UTF-8-encoding a property name before comparing it against the parsed
+// document). vmnet has no real stack-memory model to allocate from
+// (spec's own pure-Go, no-tricks non-goal) — allocating a real
+// runtime.Array instead and pushing a managed pointer to it (the same
+// shape readOnlySpanFromPointerCtor already expects for the RVA-backed-
+// array idiom, internal/bcl/system_span.go) is observably identical for
+// every real caller: the memory is used exactly like an array for the
+// rest of its (function-local) lifetime, and Go's GC keeps it alive
+// exactly as long as anything still references it, longer than a real
+// stack frame would but never incorrectly short.
+type LocalAlloc struct{}
+
 type LoadArg struct{ Index int }
 type StoreArg struct{ Index int }
 type LoadLocal struct{ Index int }
@@ -123,6 +141,48 @@ type Call struct {
 	HasThis   bool
 	HasReturn bool
 	Virtual   bool
+	// ParamTypeNames holds the callee's own declared parameter type
+	// names, in order, as compile-time-resolved from this call site's
+	// original MethodDefOrRef token (Fase 3.40) — "" for a parameter
+	// whose type doesn't resolve to a plain name (an open generic
+	// parameter, most commonly). nil if this Call predates Fase 3.40 or
+	// its signature couldn't be parsed at all.
+	//
+	// This exists because runtime argument Kind alone can't always
+	// disambiguate an overload set: a bool and any enum both collapse to
+	// the same KindI4 shape, so two same-arity overloads differing only
+	// in "bool" vs "SomeEnum" are otherwise indistinguishable at the
+	// value level. Found via a real, load-bearing case: DocumentFormat.
+	// OpenXml's own OpenXmlPackageBuilderExtensions.Open(..., bool
+	// isEditing) calls Open(..., PackageOpenMode mode) — same arity,
+	// same KindI4 third argument — and without this, pickMethodOverload
+	// resolved back onto the SAME overload that was calling it, forever.
+	// Only ever used as an early, exact-match preference before falling
+	// back to the existing Kind-based scoring — never a hard requirement,
+	// since resolution must still work for callers with no Call-level IR
+	// at all (Machine.New/CallInstance, the public host API).
+	ParamTypeNames []string
+
+	// MethodGenericArgs holds the call site's own resolved generic method
+	// type arguments (Fase 3.40) — e.g. ["DocumentFormat.OpenXml.
+	// Features.IDisposableFeature"] for a `features.Get<IDisposableFeature>()`
+	// call site, parsed from the call's MethodSpec Instantiation blob.
+	// nil for a non-generic call (the overwhelming majority) or one whose
+	// instantiation couldn't be parsed.
+	//
+	// This exists for exactly one purpose: resolving `typeof(TFeature)`
+	// inside the CALLED method's own body, which — unlike a class's own
+	// generic parameter (fixed once the type is instantiated) — can't be
+	// baked into that method's IR at build time at all, since the exact
+	// same compiled method body runs for every different call site's
+	// instantiation. It's threaded only as far as Machine.tryCall's
+	// generic-native-registry lookup (internal/interpreter/calls.go), not
+	// into ordinary interpreted method bodies — reifying method generics
+	// generally is a much larger undertaking than this narrow, real need
+	// (DocumentFormat.OpenXml.Packaging.FeatureCollectionBase.Get<T>,
+	// the "typed feature bag" pattern OpenXml's whole package-opening
+	// pipeline runs through) called for.
+	MethodGenericArgs []string
 }
 
 type Return struct{ HasValue bool }
@@ -134,6 +194,23 @@ type NewObj struct {
 	TypeFullName string
 	CtorFullName string
 	ArgCount     int
+
+	// ParamTypeNames is the constructed type's own .ctor overload
+	// signature, as declared at THIS newobj site's MethodDefOrRef token —
+	// exactly Call.ParamTypeNames's rationale (see its doc comment, Fase
+	// 3.40), which newobj had been missing entirely (Fase 3.43). Found via
+	// a real, load-bearing case reading a real .xlsx through ClosedXML
+	// 0.105.0's `new XLWorkbook(stream)`: ClosedXML.Excel.XLFill has THREE
+	// same-arity 2-parameter constructors ((XLStyle, XLFillValue),
+	// (XLStyle, XLFillKey), (XLStyle?, IXLFill?) — XLFill.cs:124-138), and
+	// `new XLFill()` (both optional arguments filled with null by the
+	// compiler, XLWorkbook.cs:5593) gives Kind-based scoring two KindNull
+	// args that match all three equally — picking the (XLStyle,
+	// XLFillValue) overload, whose body assigns `_value = null` directly
+	// instead of running the real (XLStyle?, IXLFill?) -> GenerateKey ->
+	// FromKey chain, leaving a real XLFill permanently broken (NRE on its
+	// first `.Key` read, from real ClosedXML style-loading code).
+	ParamTypeNames []string
 }
 
 // LoadField/StoreField implement ldfld/stfld: pop an object reference
@@ -259,7 +336,20 @@ type CastClass struct{ TypeFullName string }
 // function over whatever LoadTypeToken already produced — the two
 // together behave exactly like the real two-step sequence without vmnet
 // needing an intermediate handle representation at all.
-type LoadTypeToken struct{ TypeFullName string }
+// LoadTypeToken implements ldtoken (spec §III.4.16) for a Type operand
+// (typeof(T)). IsMethodGenericParam (Fase 3.40) marks the one case
+// TypeFullName can't answer at IR-build time at all: `typeof(TFeature)`
+// on the ENCLOSING method's own generic parameter (an MVAR, `!!N`,
+// MethodGenericParamIndex == N) — the same method body runs for every
+// different call site's instantiation, so this has to be resolved from
+// that specific CALL's own MethodGenericArgs (ir.Call's own field)
+// instead, at the point of executing the ldtoken, not when building its
+// IR. TypeFullName is meaningless when this is true.
+type LoadTypeToken struct {
+	TypeFullName            string
+	IsMethodGenericParam    bool
+	MethodGenericParamIndex int
+}
 
 // LoadFieldToken implements ldtoken (spec §III.4.16) when its operand is
 // a Field token — the RuntimeHelpers.InitializeArray pattern behind an
@@ -272,6 +362,21 @@ type LoadTypeToken struct{ TypeFullName string }
 type LoadFieldToken struct {
 	TypeFullName string
 	FieldName    string
+}
+
+// LoadMethodToken implements ldtoken (spec §III.4.16) when its operand is
+// a Method token (RuntimeMethodHandle) — found via a real, pervasive
+// pattern (Fase 3.41): every OpenXml element's own ConfigureMetadata
+// builds an Expression<Func<TElement,TValue>> for each attribute (`a =>
+// a.Space`), which the compiler lowers to `ldtoken <property getter>` +
+// `MethodBase.GetMethodFromHandle` + `Expression.Property` rather than a
+// real closure/lambda body — same "produce the real Value directly, skip
+// the handle indirection" shortcut LoadTypeToken already takes for
+// Type.GetTypeFromHandle (see that type's own doc comment and
+// bcl.NewMethodInfoValue).
+type LoadMethodToken struct {
+	TypeFullName string
+	MethodName   string
 }
 
 // LoadFtn implements ldftn/ldvirtftn (spec §III.4.19/4.20): push an

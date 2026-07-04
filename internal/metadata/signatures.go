@@ -37,6 +37,12 @@ const (
 	elementCModOpt     = 0x20
 	elementSentinel    = 0x41
 	elementPinned      = 0x45
+
+	// genericInstSigMarker (GENERICINST, ECMA-335 §II.23.2.15) is the
+	// leading byte of a MethodSpec's Instantiation blob — distinct from
+	// elementGenericInst (0x15), which marks a generic TYPE instantiation
+	// inside an ordinary type signature instead.
+	genericInstSigMarker = 0x0A
 )
 
 // SigTypeKind is a simplified classification of a signature's element
@@ -90,6 +96,16 @@ type SigType struct {
 	// callers (newobj/call-target resolution, initobj/ldobj/stobj) still
 	// only care about the open generic type name and ignore this.
 	Args []SigType
+
+	// GenericParamIndex/GenericParamIsMethod are set only when Kind ==
+	// SigGenericParam: the raw VAR/MVAR index (§II.23.2.10) and whether
+	// it's a method's own generic parameter (MVAR, `!!N`) rather than its
+	// declaring type's (VAR, `!N`). Retained since Fase 3.40 — needed to
+	// resolve `typeof(TFeature)` inside a generic method's own body
+	// (ir/builder.go's ldtoken handling matches this back to the call
+	// site's actual MethodSpec instantiation argument N).
+	GenericParamIndex    uint32
+	GenericParamIsMethod bool
 }
 
 // MethodSig is a parsed MethodDefSig/MethodRefSig (ECMA-335 §II.23.2.1/.2).
@@ -212,11 +228,11 @@ func parseType(b []byte) (SigType, int, error) {
 		}
 		return SigType{Kind: SigByRef}, pos + sz, nil
 	case elementVar, elementMVar:
-		_, sz, err := decodeCompressed(b[pos:])
+		idx, sz, err := decodeCompressed(b[pos:])
 		if err != nil {
 			return SigType{}, 0, err
 		}
-		return SigType{Kind: SigGenericParam}, pos + sz, nil
+		return SigType{Kind: SigGenericParam, GenericParamIndex: idx, GenericParamIsMethod: et == elementMVar}, pos + sz, nil
 	case elementGenericInst:
 		if pos >= len(b) {
 			return SigType{}, 0, fmt.Errorf("metadata: truncated generic instantiation")
@@ -255,6 +271,38 @@ func parseType(b []byte) (SigType, int, error) {
 	default:
 		return SigType{}, 0, fmt.Errorf("metadata: unsupported signature element type %#x", et)
 	}
+}
+
+// ParseMethodSpec parses a MethodSpec's Instantiation blob (ECMA-335
+// §II.23.2.15: GENERICINST GenArgCount Type*) — the concrete type
+// arguments a generic method call site (`Get<IDisposableFeature>()`) was
+// instantiated with. Fase 3.40 — needed to resolve `typeof(TFeature)`
+// inside that method's own body, which a fixed-at-build-time IR can't
+// otherwise know (the same method body runs for every instantiation).
+func ParseMethodSpec(blob []byte) ([]SigType, error) {
+	if len(blob) == 0 {
+		return nil, fmt.Errorf("metadata: empty method spec signature")
+	}
+	pos := 0
+	if blob[pos] != genericInstSigMarker {
+		return nil, fmt.Errorf("metadata: method spec signature missing GENERICINST marker (got %#x)", blob[pos])
+	}
+	pos++
+	count, sz, err := decodeCompressed(blob[pos:])
+	if err != nil {
+		return nil, err
+	}
+	pos += sz
+	types := make([]SigType, 0, count)
+	for i := uint32(0); i < count; i++ {
+		t, tsz, err := parseType(blob[pos:])
+		if err != nil {
+			return nil, err
+		}
+		pos += tsz
+		types = append(types, t)
+	}
+	return types, nil
 }
 
 // ParseTypeSpec parses a TypeSpec signature blob (ECMA-335 §II.23.2.14) —

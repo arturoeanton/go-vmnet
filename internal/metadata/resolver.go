@@ -1,6 +1,7 @@
 package metadata
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -47,6 +48,22 @@ type ParamRow struct {
 	Flags    uint16
 	Sequence uint16
 	Name     string
+}
+
+// ManifestResourceRow (ECMA-335 §II.22.24) — a real .NET assembly can
+// embed arbitrary named byte blobs (e.g. an icon, a template, a font)
+// directly in its own PE image, retrieved at runtime via Assembly.
+// GetManifestResourceStream(name) (Fase 3.40). Implementation is the
+// nil Token (Table()==0, RID()==0) for the overwhelmingly common case —
+// a resource embedded in THIS file — since Offset then indexes directly
+// into this assembly's own CLI Resources data directory; a non-nil
+// Implementation (another File/AssemblyRef/ExportedType) means the
+// resource actually lives in a different file entirely, unsupported here.
+type ManifestResourceRow struct {
+	Offset         uint32
+	Flags          uint32
+	Name           string
+	Implementation Token
 }
 
 type MemberRefRow struct {
@@ -200,6 +217,38 @@ func (md *Metadata) TypeDefFieldRange(rid uint32) (start, end uint32, err error)
 // Namespace, since nested types always do) — a plain Name+Namespace
 // match alone can't tell them apart at all (Fase 3.17).
 func (md *Metadata) FindTypeDef(namespace, name string) (rid uint32, row TypeDefRow, err error) {
+	key := namespace + "\x00" + name
+	md.typeDefCacheMu.RLock()
+	if e, ok := md.typeDefCache[key]; ok {
+		md.typeDefCacheMu.RUnlock()
+		if !e.found {
+			return 0, TypeDefRow{}, fmt.Errorf("%w: type %s.%s not found", ErrOutOfRange, namespace, name)
+		}
+		return e.rid, e.row, nil
+	}
+	md.typeDefCacheMu.RUnlock()
+
+	rid, row, err = md.findTypeDefUncached(namespace, name)
+
+	md.typeDefCacheMu.Lock()
+	if md.typeDefCache == nil {
+		md.typeDefCache = make(map[string]typeDefCacheEntry)
+	}
+	// A non-ErrOutOfRange err (e.g. a malformed string-heap index) means
+	// the scan itself failed, not that the type is absent — don't cache
+	// that as a miss, since a transient/environmental read could differ
+	// on retry in a way "not found" never does.
+	if err == nil {
+		md.typeDefCache[key] = typeDefCacheEntry{rid: rid, row: row, found: true}
+	} else if errors.Is(err, ErrOutOfRange) {
+		md.typeDefCache[key] = typeDefCacheEntry{found: false}
+	}
+	md.typeDefCacheMu.Unlock()
+
+	return rid, row, err
+}
+
+func (md *Metadata) findTypeDefUncached(namespace, name string) (rid uint32, row TypeDefRow, err error) {
 	t := md.tables[TableTypeDef]
 	if t == nil {
 		return 0, TypeDefRow{}, fmt.Errorf("%w: no TypeDef table", ErrOutOfRange)
@@ -523,6 +572,45 @@ func (md *Metadata) Constant(rid uint32) (ConstantRow, error) {
 		return ConstantRow{}, err
 	}
 	return ConstantRow{Type: byte(t.col(row, 0)), Parent: parent, Value: val}, nil
+}
+
+// ManifestResource reads a ManifestResource table row by RID.
+func (md *Metadata) ManifestResource(rid uint32) (ManifestResourceRow, error) {
+	t, row, err := md.tableOrErr(TableManifestResource, rid)
+	if err != nil {
+		return ManifestResourceRow{}, err
+	}
+	name, err := md.strings.String(t.col(row, 2))
+	if err != nil {
+		return ManifestResourceRow{}, err
+	}
+	impl, err := decodeCodedIndex(codedImplementation, t.col(row, 3))
+	if err != nil {
+		return ManifestResourceRow{}, err
+	}
+	return ManifestResourceRow{
+		Offset:         t.col(row, 0),
+		Flags:          t.col(row, 1),
+		Name:           name,
+		Implementation: impl,
+	}, nil
+}
+
+// FindManifestResource looks up a ManifestResource row by exact name —
+// a linear scan over the (typically tiny) ManifestResource table, same
+// reasoning as constantForField's own scan.
+func (md *Metadata) FindManifestResource(name string) (ManifestResourceRow, bool, error) {
+	n := md.RowCount(TableManifestResource)
+	for rid := uint32(1); rid <= n; rid++ {
+		row, err := md.ManifestResource(rid)
+		if err != nil {
+			return ManifestResourceRow{}, false, err
+		}
+		if row.Name == name {
+			return row, true, nil
+		}
+	}
+	return ManifestResourceRow{}, false, nil
 }
 
 // TypeSpecSignature returns the raw signature blob for a TypeSpec row

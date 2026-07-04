@@ -122,12 +122,31 @@ func (vm *VM) LoadPackage(id string) (*Assembly, error) {
 	if err != nil {
 		return nil, fmt.Errorf("vmnet: %w (run NuGet().Restore() first)", err)
 	}
-	asm, err := vm.loadLockedPackage(n, lf, id, map[string]*Assembly{})
+	loaded := map[string]*Assembly{}
+	asm, err := vm.loadLockedPackage(n, lf, id, loaded)
 	if err != nil {
 		return nil, err
 	}
 	if asm == nil {
 		return nil, fmt.Errorf("vmnet: package %q has no usable assembly (check NuGet().Packages() for the reason)", id)
+	}
+	// Build the shared cross-package type index (Fase 3.40) — see
+	// Assembly.globalTypeIndex's own doc comment for why this exists at
+	// all (a shared dependency's own generic method resolving typeof(T)
+	// for a T declared in one of ITS OWN dependents, not the other way
+	// around). Best-effort: a TypeDef this loop can't name (a decode
+	// error on some row) is just skipped, not a hard failure — the index
+	// is a last-resort fallback, never required for a package to load.
+	index := map[string]*Assembly{}
+	for _, a := range loaded {
+		if a != nil {
+			a.indexOwnTypesInto(index)
+		}
+	}
+	for _, a := range loaded {
+		if a != nil {
+			a.globalTypeIndex = index
+		}
 	}
 	return asm, nil
 }
