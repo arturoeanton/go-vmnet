@@ -3,6 +3,8 @@ package metadata
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
+	"unicode/utf16"
 )
 
 // fieldAttrLiteral is FieldAttributes.Literal (ECMA-335 §II.23.1.5) — set
@@ -77,6 +79,74 @@ func decodeConstantInt64(tag byte, blob []byte) (int64, error) {
 		return int64(binary.LittleEndian.Uint64(blob)), nil
 	default:
 		return 0, fmt.Errorf("metadata: unsupported enum constant type tag %#x", tag)
+	}
+}
+
+// ConstantKind identifies which of ConstantForField's return values is
+// meaningful for a given literal (Fase 3.39). ConstantInt32/ConstantInt64
+// are split rather than one "ConstantInt" so a genuine `const long`
+// doesn't get silently truncated by a caller that only asked for "is
+// this an integer" and wrapped it as int32.
+type ConstantKind byte
+
+const (
+	ConstantInt32 ConstantKind = iota
+	ConstantInt64
+	ConstantFloat
+	ConstantString
+	ConstantNull
+)
+
+// ConstantForField returns fieldRID's compile-time literal value (Fase
+// 3.39) — every C# `const` field and enum member (FieldAttributes.
+// Literal) has exactly one Constant table row. Decoded by the Constant
+// row's own type tag, never the field's declared *signature* type —
+// this is what lets it handle an enum member (whose signature names the
+// enum's own, not-yet-fully-built TypeDef) with no risk of the
+// self-referential recursion buildType's own literal-field handling
+// documents avoiding: the Constant table always stores an enum member's
+// value with a plain integer type tag matching its underlying type, the
+// signature is never consulted here at all. ok=false means fieldRID has
+// no Constant row (not every field is literal).
+func (md *Metadata) ConstantForField(fieldRID uint32) (kind ConstantKind, i int64, f float64, s string, ok bool, err error) {
+	row, found, err := md.constantForField(fieldRID)
+	if err != nil || !found {
+		return 0, 0, 0, "", false, err
+	}
+	switch row.Type {
+	case elementR4:
+		if len(row.Value) < 4 {
+			return 0, 0, 0, "", false, fmt.Errorf("metadata: truncated constant (r4)")
+		}
+		return ConstantFloat, 0, float64(math.Float32frombits(binary.LittleEndian.Uint32(row.Value))), "", true, nil
+	case elementR8:
+		if len(row.Value) < 8 {
+			return 0, 0, 0, "", false, fmt.Errorf("metadata: truncated constant (r8)")
+		}
+		return ConstantFloat, 0, math.Float64frombits(binary.LittleEndian.Uint64(row.Value)), "", true, nil
+	case elementString:
+		u16 := make([]uint16, len(row.Value)/2)
+		for i := range u16 {
+			u16[i] = binary.LittleEndian.Uint16(row.Value[i*2:])
+		}
+		return ConstantString, 0, 0, string(utf16.Decode(u16)), true, nil
+	case elementClass:
+		// A null reference constant (`const string s = null;`, or any
+		// other reference-typed const) — the CLI encodes it as a
+		// zero-length blob tagged ELEMENT_TYPE_CLASS (ECMA-335 §II.23.2.16).
+		return ConstantNull, 0, 0, "", true, nil
+	case elementI8, elementU8:
+		n, err := decodeConstantInt64(row.Type, row.Value)
+		if err != nil {
+			return 0, 0, 0, "", false, err
+		}
+		return ConstantInt64, n, 0, "", true, nil
+	default:
+		n, err := decodeConstantInt64(row.Type, row.Value)
+		if err != nil {
+			return 0, 0, 0, "", false, err
+		}
+		return ConstantInt32, n, 0, "", true, nil
 	}
 }
 

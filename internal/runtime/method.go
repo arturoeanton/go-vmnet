@@ -91,4 +91,8 @@ type Resolvers struct {
 	// <field>` names the field, this fetches its actual raw bytes from
 	// the owning assembly's PE image).
 	ResolveFieldBytes func(typeFullName, fieldName string) ([]byte, bool)
+	// ResolveMember finds a real method/constructor by exact name and
+	// declared parameter type names (Fase 3.39: System.Reflection —
+	// Type.GetConstructor/GetMethod), returning its full callable name.
+	ResolveMember func(typeFullName, memberName string, paramTypeFullNames []string) (fullName string, ok bool)
 }

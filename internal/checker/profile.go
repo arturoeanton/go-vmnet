@@ -59,6 +59,7 @@ func init() {
 		"System.Collections.Generic.Dictionary`2+KeyCollection+Enumerator::",
 		"System.Collections.Generic.KeyValuePair`2::",
 		"System.Collections.Generic.EqualityComparer`1::",
+		"System.Collections.Generic.Comparer`1::",
 		"System.IDisposable::Dispose",
 		"System.Collections.Generic.IEnumerable`1::GetEnumerator",
 		"System.Collections.IEnumerable::GetEnumerator",
@@ -91,6 +92,10 @@ func init() {
 		"System.String::",
 		"System.Type::",
 		"System.Reflection.MemberInfo::get_Name",
+		"System.Reflection.ConstructorInfo::",
+		"System.Reflection.MethodInfo::",
+		"System.Reflection.MethodBase::",
+		"System.Reflection.FieldInfo::",
 		"System.Linq.Enumerable::",
 		"System.Lazy`1::",
 		"System.Text.Encoding::",
@@ -181,8 +186,12 @@ func init() {
 		"System.Xml.Linq.XName::",
 		"System.Collections.ArrayList::",
 		"System.Collections.Hashtable::",
+		"System.Collections.SortedList::",
+		"System.Collections.Stack::",
 		"System.Random::",
 		"System.IO.FileSystemInfo::",
+		"System.IO.Path::",
+		"System.Threading.Monitor::",
 	)
 	// netstandard-lite currently promises exactly the same BCL surface as
 	// rules (System.Type moved into `rules` in Fase 3.14, System.Convert

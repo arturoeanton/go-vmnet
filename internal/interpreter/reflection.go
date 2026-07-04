@@ -12,6 +12,7 @@ func init() {
 	machineRegistry["System.Type::get_IsValueType"] = typeGetIsValueType
 	machineRegistry["System.Type::get_IsEnum"] = typeGetIsEnum
 	machineRegistry["System.Type::get_IsInterface"] = typeGetIsInterface
+	machineRegistry["System.Type::get_IsAbstract"] = typeGetIsAbstract
 	machineRegistry["System.Type::get_BaseType"] = typeGetBaseType
 	machineRegistry["System.Type::GetInterfaces"] = typeGetInterfaces
 	machineRegistry["System.Type::GetType"] = typeStaticGetType
@@ -19,6 +20,24 @@ func init() {
 	machineRegistry["System.Enum::GetNames"] = enumGetNames
 	machineRegistry["System.Enum::IsDefined"] = enumIsDefined
 	machineRegistry["System.Enum::ToObject"] = enumToObject
+	// Real reflection (Fase 3.39) — Type.GetConstructor/GetMethod/GetField
+	// plus ConstructorInfo/MethodInfo/FieldInfo's own Invoke/GetValue.
+	// Found via a real, common pattern: a reflection-based type registry
+	// (NPOI's own RecordFactory, mapping ~200 discovered record types to
+	// their real constructors) — not Reflection.Emit, no new code is ever
+	// generated, every target here is a real MethodDef/Field this loop's
+	// existing machinery (Machine.New/Machine.call/Type.FieldIndex)
+	// already knows how to run.
+	machineRegistry["System.Type::GetConstructor"] = typeGetConstructor
+	machineRegistry["System.Type::GetMethod"] = typeGetMethod
+	machineRegistry["System.Type::GetField"] = typeGetField
+	machineRegistry["System.Reflection.ConstructorInfo::Invoke"] = constructorInfoInvoke
+	machineRegistry["System.Reflection.MethodInfo::Invoke"] = methodInfoInvoke
+	machineRegistry["System.Reflection.FieldInfo::GetValue"] = fieldInfoGetValue
+	machineRegistry["System.Reflection.ConstructorInfo::op_Inequality"] = memberInfoOpInequality
+	machineRegistry["System.Reflection.ConstructorInfo::op_Equality"] = memberInfoOpEquality
+	machineRegistry["System.Reflection.MethodInfo::op_Inequality"] = memberInfoOpInequality
+	machineRegistry["System.Reflection.MethodInfo::op_Equality"] = memberInfoOpEquality
 }
 
 // enumTypeMembers resolves a System.Type argument's real enum members via
@@ -168,25 +187,25 @@ var bclKnownInterfaces = map[string]bool{
 // vmnet doesn't model at all) defaults to "ordinary reference type" —
 // false/false/false — the least surprising guess for arbitrary code that
 // doesn't gate behavior on knowing this precisely.
-func classifyTypeByName(m *Machine, fullName string) (isValueType, isEnum, isInterface bool) {
+func classifyTypeByName(m *Machine, fullName string) (isValueType, isEnum, isInterface, isAbstract bool) {
 	open := bcl.GenericOpenName(fullName)
 	if bclPrimitiveValueTypes[open] {
-		return true, false, false
+		return true, false, false, false
 	}
 	if bclKnownInterfaces[open] {
-		return false, false, true
+		return false, false, true, true
 	}
 	if _, ok := bcl.LookupValueType(open); ok {
-		return true, false, false
+		return true, false, false, false
 	}
 	if m.ResolveType == nil {
-		return false, false, false
+		return false, false, false, false
 	}
 	t, err := m.ResolveType(open)
 	if err != nil {
-		return false, false, false
+		return false, false, false, false
 	}
-	return t.IsValueType, t.IsEnum, t.IsInterface
+	return t.IsValueType, t.IsEnum, t.IsInterface, t.IsAbstract
 }
 
 func typeGetIsValueType(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
@@ -194,7 +213,7 @@ func typeGetIsValueType(m *Machine, args []runtime.Value, depth int, instrCount 
 	if !ok {
 		return runtime.Value{}, fmt.Errorf("interpreter: Type.IsValueType receiver is not a Type")
 	}
-	isValueType, _, _ := classifyTypeByName(m, fullName)
+	isValueType, _, _, _ := classifyTypeByName(m, fullName)
 	return runtime.Bool(isValueType), nil
 }
 
@@ -203,7 +222,7 @@ func typeGetIsEnum(m *Machine, args []runtime.Value, depth int, instrCount *int6
 	if !ok {
 		return runtime.Value{}, fmt.Errorf("interpreter: Type.IsEnum receiver is not a Type")
 	}
-	_, isEnum, _ := classifyTypeByName(m, fullName)
+	_, isEnum, _, _ := classifyTypeByName(m, fullName)
 	return runtime.Bool(isEnum), nil
 }
 
@@ -212,8 +231,17 @@ func typeGetIsInterface(m *Machine, args []runtime.Value, depth int, instrCount 
 	if !ok {
 		return runtime.Value{}, fmt.Errorf("interpreter: Type.IsInterface receiver is not a Type")
 	}
-	_, _, isInterface := classifyTypeByName(m, fullName)
+	_, _, isInterface, _ := classifyTypeByName(m, fullName)
 	return runtime.Bool(isInterface), nil
+}
+
+func typeGetIsAbstract(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	fullName, ok := bcl.TypeFullNameOf(argsSelf(args))
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.IsAbstract receiver is not a Type")
+	}
+	_, _, _, isAbstract := classifyTypeByName(m, fullName)
+	return runtime.Bool(isAbstract), nil
 }
 
 // argsSelf reads the receiver out of a 1-arg call (every get_Xxx property
@@ -243,7 +271,7 @@ func typeGetBaseType(m *Machine, args []runtime.Value, depth int, instrCount *in
 		return runtime.Null(), nil
 	}
 	open := bcl.GenericOpenName(fullName)
-	isValueType, isEnum, isInterface := classifyTypeByName(m, fullName)
+	isValueType, isEnum, isInterface, _ := classifyTypeByName(m, fullName)
 	if isInterface {
 		return runtime.Null(), nil
 	}
@@ -345,4 +373,189 @@ func typeIsAssignableFrom(m *Machine, args []runtime.Value, depth int, instrCoun
 		return runtime.Bool(false), nil
 	}
 	return runtime.Bool(m.typeMatches(t, target)), nil
+}
+
+// typeGetConstructor backs Type.GetConstructor(Type[] parameterTypes) —
+// real reflection (Fase 3.39), not Reflection.Emit: finds a real .ctor
+// matching the declared parameter types via Machine.ResolveMember, and
+// wraps it as a ConstructorInfo if found (null otherwise, matching real
+// semantics for "no matching constructor").
+func typeGetConstructor(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetConstructor expects (this, Type[])")
+	}
+	typeFullName, ok := bcl.TypeFullNameOf(args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetConstructor receiver is not a Type")
+	}
+	paramNames, err := bcl.TypeArrayToFullNames(args[1])
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	if m.ResolveMember == nil {
+		return runtime.Null(), nil
+	}
+	if _, ok := m.ResolveMember(typeFullName, ".ctor", paramNames); !ok {
+		return runtime.Null(), nil
+	}
+	return bcl.NewConstructorInfoValue(typeFullName), nil
+}
+
+// typeGetMethod backs Type.GetMethod(string name, Type[] parameterTypes)
+// — same real-reflection posture as typeGetConstructor.
+func typeGetMethod(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 3 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetMethod expects (this, name, Type[])")
+	}
+	typeFullName, ok := bcl.TypeFullNameOf(args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetMethod receiver is not a Type")
+	}
+	if args[1].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetMethod expects a string name")
+	}
+	methodName := args[1].Str
+	paramNames, err := bcl.TypeArrayToFullNames(args[2])
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	if m.ResolveMember == nil {
+		return runtime.Null(), nil
+	}
+	if _, ok := m.ResolveMember(typeFullName, methodName, paramNames); !ok {
+		return runtime.Null(), nil
+	}
+	return bcl.NewMethodInfoValue(typeFullName, methodName), nil
+}
+
+// typeGetField backs Type.GetField(string name) — existence checked via
+// the same Type.FieldIndex/StaticFieldIndex lookup ldfld/ldsfld already
+// use, not a separate metadata scan.
+func typeGetField(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetField expects (this, name)")
+	}
+	typeFullName, ok := bcl.TypeFullNameOf(args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetField receiver is not a Type")
+	}
+	if args[1].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetField expects a string name")
+	}
+	fieldName := args[1].Str
+	if m.ResolveType == nil {
+		return runtime.Null(), nil
+	}
+	t, err := m.ResolveType(typeFullName)
+	if err != nil {
+		return runtime.Null(), nil
+	}
+	if t.FieldIndex(fieldName) < 0 && t.StaticFieldIndex(fieldName) < 0 {
+		return runtime.Null(), nil
+	}
+	return bcl.NewFieldInfoValue(typeFullName, fieldName), nil
+}
+
+// constructorInfoInvoke backs ConstructorInfo.Invoke(object[] parameters)
+// — constructs a real instance via Machine.New, the exact same path a
+// real `newobj` already goes through (including its own overload
+// resolution by the real argument Kinds now available, not just the
+// declared Type[] signature GetConstructor matched against).
+func constructorInfoInvoke(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("interpreter: ConstructorInfo.Invoke expects (this, object[])")
+	}
+	typeFullName, ok := bcl.ConstructorInfoTypeFullName(args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("interpreter: ConstructorInfo.Invoke receiver is not a ConstructorInfo")
+	}
+	ctorArgs, err := bcl.ObjectArrayToValues(args[1])
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	return m.New(typeFullName, ctorArgs)
+}
+
+// methodInfoInvoke backs MethodInfo.Invoke(object obj, object[]
+// parameters) — obj is null for a static method (real semantics: ignored
+// either way, since a static target never needs a receiver); otherwise
+// dispatches through Machine.call with virtual=true, exactly like a real
+// callvirt would (the receiver's actual concrete type is tried first).
+func methodInfoInvoke(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 3 {
+		return runtime.Value{}, fmt.Errorf("interpreter: MethodInfo.Invoke expects (this, obj, object[])")
+	}
+	typeFullName, methodName, ok := bcl.MethodInfoParts(args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("interpreter: MethodInfo.Invoke receiver is not a MethodInfo")
+	}
+	methodArgs, err := bcl.ObjectArrayToValues(args[2])
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	fullName := typeFullName + "::" + methodName
+	callArgs := methodArgs
+	if args[1].Kind != runtime.KindNull {
+		callArgs = append([]runtime.Value{args[1]}, methodArgs...)
+	}
+	v, _, err := m.call(fullName, callArgs, true, depth, instrCount)
+	return v, err
+}
+
+// fieldInfoGetValue backs FieldInfo.GetValue(object obj) — tries the
+// field as static first (Machine.staticType, the same lazy-.cctor-
+// triggering lookup ldsfld itself uses), falling back to obj's own
+// instance field slot via the receiver's real Type.FieldIndex.
+func fieldInfoGetValue(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("interpreter: FieldInfo.GetValue expects (this, obj)")
+	}
+	typeFullName, fieldName, ok := bcl.FieldInfoParts(args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("interpreter: FieldInfo.GetValue receiver is not a FieldInfo")
+	}
+	if t, err := m.staticType(typeFullName, depth, instrCount); err == nil {
+		if idx := t.StaticFieldIndex(fieldName); idx >= 0 {
+			return t.StaticField(idx), nil
+		}
+	}
+	obj := args[1]
+	if obj.Kind == runtime.KindRef && obj.Ref != nil {
+		obj = *obj.Ref
+	}
+	if obj.Kind != runtime.KindObject || obj.Obj == nil {
+		return runtime.Value{}, fmt.Errorf("interpreter: FieldInfo.GetValue: %s.%s is an instance field but obj is null", typeFullName, fieldName)
+	}
+	if obj.Obj.Type == nil {
+		return runtime.Value{}, fmt.Errorf("interpreter: FieldInfo.GetValue: receiver has no field layout")
+	}
+	idx := obj.Obj.Type.FieldIndex(fieldName)
+	if idx < 0 {
+		return runtime.Value{}, fmt.Errorf("interpreter: FieldInfo.GetValue: %s has no field %q", typeFullName, fieldName)
+	}
+	return obj.Obj.Fields[idx], nil
+}
+
+// memberInfoOpEquality/memberInfoOpInequality back ConstructorInfo/
+// MethodInfo's operator==/!= (real reflection member-info types
+// overload these) — reference equality (Go pointer identity on the
+// underlying wrapper), matching the one real pattern found needing this
+// (`ctor != null` after GetConstructor): every fresh Get* call allocates
+// its own wrapper, so two independently-obtained infos for even the
+// exact same real member are never equal by reference — real CLR
+// reflection actually caches and interns these, but no real call site in
+// this loop compares two non-null MemberInfo values against each other,
+// only against null.
+func memberInfoOpEquality(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("interpreter: MemberInfo.op_Equality expects 2 arguments")
+	}
+	return runtime.Bool(refEqual(args[0], args[1])), nil
+}
+
+func memberInfoOpInequality(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("interpreter: MemberInfo.op_Inequality expects 2 arguments")
+	}
+	return runtime.Bool(!refEqual(args[0], args[1])), nil
 }

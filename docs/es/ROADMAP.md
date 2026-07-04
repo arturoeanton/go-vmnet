@@ -3478,7 +3478,7 @@ go test ./... -race -count=5
 /tmp/vmnet-cli check package ClosedXML@0.105.0 --profile=netstandard-lite
 ```
 
-### Fase 3.39 — `examples/npoi-demo` (en progreso): 5 bugs reales de intérprete/overload encontrados construyéndolo
+### Fase 3.39 — `examples/npoi-demo`: 5 + 13 bugs reales de intérprete/overload encontrados construyéndolo
 
 Ambos paquetes ya habían cruzado el punto de retornos decrecientes persiguiendo findings del
 checker (Fase 3.29-3.37: NPOI 91.3%→97.0%, ClosedXML 87.2%→93.9%), así que esta fase pasó al
@@ -3558,19 +3558,168 @@ faltante:
       propio manejo de `KindArray` de `Value` en el lado de retorno (antes se descartaba
       silenciosamente a `nil`).
 
-**Todavía abierto**: `NPOI.Util.IOUtils.PeekFirstNBytes` — la lógica de espiar el stream para
-detección de magic-bytes que el constructor de `HSSFWorkbook` corre antes que cualquier otra cosa —
-actualmente hace que `FileMagicContainer.ValueOf` clasifique mal un archivo OLE2 real confirmado
-como bien formado (`file`/`xxd` verifican que `testdata/sample.xls` empieza con la firma correcta
-`D0CF11E0A1B11AE1`) como otra cosa, lanzando `NotOLE2FileException`. El propio
-`System.IO.MemoryStream` fue verificado correcto de forma independiente en aislamiento (un probe
-directo: construir, escribir, hacer seek, releer — los bytes exactos hacen round-trip
-correctamente). `PeekFirstNBytes` es un port directo del idioma `InputStream.mark()/reset()` de
-Java, en capas a través de varias clases propias de NPOI en C#
-(`ByteArrayInputStream`/`BoundedInputStream`/`ByteArrayOutputStream`/`IOUtils.Copy`) — todo C#
-interpretado, no código nativo de `System.IO` — así que el bug está más probablemente en algún
-lugar de la ejecución de vmnet de *esa* cadena específicamente, todavía no aislado a una única
-causa raíz. Continúa en la próxima fase en vez de seguir adivinando a ciegas.
+**Causa raíz de `NotOLE2FileException`, encontrada y arreglada**: NO estaba en `PeekFirstNBytes`
+después de todo — esa cadena entera (`ByteArrayInputStream`/`BoundedInputStream`/
+`ByteArrayOutputStream`/`IOUtils.Copy`, `LittleEndian.PutLong`/`GetLong`) fue verificada correcta
+individualmente vía probes directos. El bug real estaba río arriba de todo eso:
+`FileMagicContainer.ValueOf(byte[])` itera con `foreach` un `Dictionary<FileMagic,
+FileMagicContainer>` estático construido una vez vía un inicializador de diccionario-literal
+(`OLE2` primero, ..., `UNKNOWN` último, cuyo patrón "magic" es `Array.Empty<byte>()` — que empata
+trivialmente con *cualquier* entrada vía el cuerpo-de-loop-vacío de `FindMagic` devolviendo `true`
+al vacío). El `Dictionary<K,V>` real de .NET enumera en orden de inserción en la práctica mientras
+ninguna clave sea removida jamás (no es un contrato estricto, pero los autores de NPOI claramente
+escribieron `ValueOf` confiando exactamente en esto: chequeando `OLE2` bien antes de llegar jamás al
+comodín de `UNKNOWN`). `nativeDict` (`internal/bcl/system_collections.go`) estaba respaldado por un
+`map[string]dictEntry` de Go plano **sin memoria alguna del orden de inserción** — cada llamada a
+`GetEnumerator`/`.Values`/`.Keys` obtenía el orden `range` de Go, intencionalmente aleatorizado, así
+que `ValueOf` empataba no-determinísticamente con `UNKNOWN` *antes* de siquiera chequear `OLE2`,
+clasificando mal un archivo OLE2 confirmado-correcto en aproximadamente la mitad de las corridas.
+Arreglado agregando un campo `order []string` (claves codificadas en orden de inserción, mantenido
+por un nuevo par `put`/`delete` por el que ahora pasa cada camino de escritura) así cada camino de
+enumeración produce un orden de inserción real y estable — un arreglo de corrección real y general
+para *cualquier* `Dictionary`/`Hashtable` que un caller enumere, no un parche específico de NPOI.
+
+Ese arreglo sacó a la luz inmediatamente el siguiente hueco real, y el siguiente, en el mismo loop
+de "probar → arreglar → re-correr", hasta un demo que efectivamente imprime datos de celda reales
+leídos del `.xls` real:
+
+- [x] **`new object()` no tenía `NativeCtor`** (`internal/bcl/system_object.go`) — solo existía la
+      variante de llamada-a-base (`register("System.Object::.ctor", false, ...)`, para la cadena
+      `: base()` de una subclase), no un target directo de `newobj`. `private readonly object _lock
+      = new object();` (un campo de objeto-de-lock común) pegó con esto en más de una clase
+      wrapper de I/O propia de NPOI.
+- [x] **`System.Threading.Monitor`** (`internal/bcl/system_monitor.go`, nuevo) — `Enter`/`Exit`/
+      `TryEnter` como no-ops seguros (`lock (obj) { }`, respaldando un campo plano): vmnet nunca
+      corre dos goroutines dentro de una misma cadena de llamadas, así que nunca hay contención
+      real que modelar.
+- [x] **`System.Type.IsAbstract`** — un nuevo `IsAbstract bool` en `runtime.Type` (poblado en
+      `buildType` de `assembly.go` desde `TypeAttributes.Abstract`), `classifyTypeByName` ampliado
+      para devolverlo, y un nuevo nativo `get_IsAbstract`.
+- [x] **Un subsistema real de `System.Reflection`** (`Type.GetConstructor`/`GetMethod`/`GetField` +
+      el propio `Invoke`/`GetValue` de `ConstructorInfo`/`MethodInfo`/`FieldInfo`) — necesario para
+      el constructor estático propio de `RecordFactory`, que descubre y construye dinámicamente
+      ~205 subclases de `Record` reflejando sobre su campo `sid` y un constructor que coincide.
+      Esto es reflection estándar (`ConstructorInfo.Invoke`/`MethodInfo.Invoke`/
+      `FieldInfo.GetValue`), no `Reflection.Emit` — no se genera código, cada target es un
+      `MethodDef`/`Field` real que la maquinaria ya existente de vmnet (`Machine.New`/
+      `Machine.call`/`Type.FieldIndex`) ya sabe correr — confirmado como una capacidad real,
+      general, que endurece el proyecto (no un hack puntual de NPOI) antes de construirla. Nuevo
+      `MemberResolver` (`Type.GetConstructor`/`GetMethod` con matching de nombre-exacto-más-tipos-
+      de-parámetro-declarados, sin coerción de argumentos en runtime ya que todavía no hay
+      argumentos en ese punto) enhebrado por `Machine`/`runtime.Resolvers`/`assembly.go` exactamente
+      igual que los cuatro resolvers preexistentes (patrón de la Fase 3.27) —
+      `internal/bcl/system_reflection.go` (nuevo, tipos wrapper) e
+      `internal/interpreter/reflection.go` (nuevos nativos).
+- [x] **Los campos estáticos literales/`const` nunca obtenían su valor real de compile-time**
+      (`buildType` de `assembly.go`) — deliberadamente saltado para *todo* campo literal (Fase
+      3.25, para esquivar recursión infinita construyendo el tipo de firma auto-referencial propio
+      de un miembro de enum), dejando un campo estilo `const short sid = 133;` en `Null()` para
+      siempre. Una llamada a `FieldInfo.GetValue` encontraba el campo correctamente pero devolvía
+      el valor equivocado — que, al usarse como clave de `Dictionary`, salía a la superficie como
+      `bcl: Dictionary key kind 0 is not supported`. Arreglado con un nuevo
+      `metadata.ConstantForField` (decodifica la fila de la tabla Constant de ECMA-335 por *su
+      propio* tag de tipo, nunca el tipo de firma declarado del campo — esquivando la
+      preocupación de recursión por completo, ya que el valor en la tabla Constant de un miembro
+      de enum siempre es un entero plano sin importar su firma auto-referencial) conectado a la
+      rama de campo-literal.
+- [x] **El overload de un solo argumento `string[]` de `String.Concat` no se desempaquetaba**
+      (`internal/bcl/system_string.go`) — compila a una llamada `ArgCount:1` donde el único
+      argumento *es* el array; el código viejo convertía a string el valor del array mismo,
+      produciendo el texto literal `<array[5]>` dentro de un mensaje de excepción por lo demás
+      correcto.
+- [x] **`bcl.NativeTypeName` identificaba mal un `Hashtable` como `Dictionary\`2` (y un
+      `ArrayList` como `List\`1`)** (`internal/bcl/system_object.go`) — ambas colecciones legacy
+      comparten el struct Go nativo de su contraparte genérica, pero `NativeTypeName` reportaba un
+      nombre fijo por tipo Go sin importar qué constructor lo construyó. El recorrido de
+      dispatch-virtual de `receiverTypeName` (Fase 3.27) entonces reintentaba silenciosamente un
+      miss de `Hashtable::get_Item` contra `Dictionary\`2::get_Item` — que lanza en una clave
+      faltante en vez del propio "devolver null" de `Hashtable` — corrompiendo la primerísima
+      búsqueda en caché de `NPOI.Util.BitFieldFactory` en un caché que parece siempre vacío.
+      Arreglado con un campo `typeName` en `nativeList`/`nativeDict` (seteado por constructor
+      real: `List\`1` vs `ArrayList`, `Dictionary\`2` vs `Hashtable`), y extendido a los nuevos
+      tipos wrapper `ConstructorInfo`/`MethodInfo`/`FieldInfo`/`SortedList`/`Stack` de abajo para
+      que la misma clase de bug no pueda repetirse en ninguno de ellos tampoco.
+- [x] **`System.Collections.Hashtable::Add`** no estaba registrado en absoluto (solo el
+      indexador/`ContainsKey`/`Clear`/`Remove`) — agregado, reusando el propio `Add` de
+      `Dictionary\`2`.
+- [x] **`System.IO.Path`** (`internal/bcl/system_io_path.go`, nuevo) — `DirectorySeparatorChar`/
+      `AltDirectorySeparatorChar` como host de campo estático (siempre `'/'`: vmnet no tiene
+      concepto de "el SO destino en el que correrá este programa", y ningún caller real bifurca
+      sobre el valor, solo lo guarda en un campo).
+- [x] **`System.Collections.Generic.Comparer\`1`** (`internal/bcl/system_comparer.go`, nuevo) — la
+      clase base abstracta `IComparer<T>` que código real subclasea para un ordenamiento a medida
+      (el propio `SharedValueManager.SharedFormulaGroupComparator : Comparer<SharedFormulaGroup>`
+      de NPOI); solo su llamada-en-cadena de constructor `: base()` necesitaba un stub nativo (una
+      subclase interpretada real siempre provee el override real de `Compare`).
+- [x] **`System.Collections.SortedList`** (`internal/bcl/system_sortedlist.go`, nuevo) — a
+      diferencia del almacenamiento desordenado de `Hashtable`/`Dictionary`, un `IDictionary` real
+      que mantiene las entradas ordenadas por clave en todo momento (inserción por búsqueda binaria
+      sobre slices paralelos `keys`/`values`). El propio `RowRecordsAggregate` de NPOI clavea sus
+      filas por número de fila en uno específicamente para que `.Values` transmita las filas de
+      vuelta en orden ascendente — un mapa desordenado aquí barajaría silenciosamente las filas.
+- [x] **`System.Collections.Stack`** (`internal/bcl/system_stack.go`, extendido — antes solo
+      respaldaba al `Stack\`1` genérico) — el predecesor legacy no genérico, reusando cada uno de
+      los nativos existentes de `Stack\`1` más un nuevo `ToArray` (orden de arriba-hacia-abajo,
+      coincidiendo con el `Stack.ToArray` real — el reverso del orden interno de slice
+      push/pop-al-final).
+- [x] **`StringBuilder.Insert`** no estaba registrado en absoluto, y no se podía haber agregado
+      sobre el almacenamiento viejo de todas formas: `nativeStringBuilder` usaba un
+      `strings.Builder` de Go, que es solo-append y estructuralmente no puede insertar contenido en
+      una posición arbitraria. Se cambió el campo de respaldo a un `string` de Go plano
+      (reconstruido en cada `Append`/`Insert` — los `StringBuilder`s del mundo real que pega este
+      loop se mantienen chicos, una sola fórmula o un fragmento corto de XML, nunca el caso de
+      append-en-streaming-grande para el que existe `strings.Builder`) y se agregó `Insert(index,
+      value)`.
+- [x] **`Encoding.Unicode`/`.BigEndianUnicode` eran alias de la simplificación
+      pasar-todo-como-UTF-8** (`internal/bcl/system_text.go`) — silenciosamente incorrecto para el
+      propio `NPOI.Util.StringUtil` de NPOI, que usa `Encoding.Unicode` para decodificar los
+      strings de celda "sin comprimir" de BIFF, que son genuinamente UTF-16LE en el cable (2
+      bytes/char, no 1 — decodificar un byte a la vez tanto corrompe cada codepoint fuera del rango
+      ASCII como desincroniza el offset de bytes para todo lo que viene después). Se agregó un
+      marcador `nativeEncoding` real + codificación/decodificación UTF-16LE/BE vía el
+      `unicode/utf16` de Go; cada otro getter `Encoding.*` mantiene la simplificación preexistente
+      de pasar-todo-como-UTF-8 (no hay evidencia de que algún caller real necesite todavía una
+      tabla real de codepage windows-1252/big5). También: `Encoding.GetEncoding(string name)`
+      reconoce el puñado de nombres realmente solicitados por nombre ("ISO-8859-1", "UTF-16BE",
+      ...), y `Encoding.RegisterProvider(CodePagesEncodingProvider.Instance)` es un no-op (la
+      indirección real de registro-de-provider nunca se necesita ya que `GetEncoding` ya conoce
+      cada nombre que importa sin ella).
+- [x] **La resolución de overloads no podía reconocer la implementación de *interfaz* real de un
+      argumento, solo su jerarquía de clases** (`valueIsAssignableToTypeName` de `assembly.go`) —
+      el arreglo de mayor valor de esta fase: el recorrido solo seguía `t.BaseTypeFullName`, nunca
+      consultaba `t.Interfaces` en absoluto. `NPOI.SS.Formula.PTG.AreaPtg` declara dos
+      constructores de la misma aridad, 1 argumento — `AreaPtg(ILittleEndianInput in1)` (leyendo
+      la codificación binaria de un token, el camino de construcción real al parsear una fórmula
+      desde el archivo) y `AreaPtg(AreaReference areaRef)` (construyendo uno desde una referencia
+      ya resuelta) — y un `LittleEndianByteArrayInputStream` real nunca se reconocía como asignable
+      al parámetro tipado `ILittleEndianInput`, así que empataba en score no mejor que el overload
+      completamente no relacionado tipado `AreaReference`, y el empate silenciosamente elegía
+      cualquiera que viniera primero: construyendo un `AreaPtg` genuinamente roto cuyo campo
+      "`AreaReference`" *era* el input stream, saliendo a la superficie cuatro instrucciones
+      `newobj`/`call` después como `NPOI.SS.Util.AreaReference has no field "_firstCell"` — un
+      crash de `this`-tipado-como-una-clase-completamente-no-relacionada que tomó rastrear IR real
+      de vuelta por `Machine.call`/`newObj`/`fieldSlot` para aislar. Arreglado chequeando también
+      la propia lista `Interfaces` del tipo candidato (y de cada clase base), no solo su cadena de
+      clases — esto generaliza a *cualquier* parámetro de overload tipado-por-interfaz en
+      cualquier parte del proyecto, no solo este par de constructores.
+
+**Limitación conocida restante (no arreglada esta fase)**: el renderizado de texto de fórmulas
+muestra las *letras* de columna de una referencia de celda como sus codepoints numéricos en vez de
+las letras mismas (ej. `SUM(662:664)` en vez de `SUM(B2:B4)` — `66`/`'B'`+fila `2`, `66`+fila `4`,
+concatenados). Causa raíz: vmnet no tiene un `Kind` `char` distinto — un `char` se guarda como un
+`int32` plano (limitación existente ya documentada, `String.Concat` ya tenía la misma para
+argumentos boxeados no-string), y el `conv.u2` de IL para un cast `(char)x` es *bytecode-idéntico*
+a una conversión a `ushort` — las dos son genuinamente indistinguibles una vez decodificadas, sin
+información de firma enhebrada hasta el nativo de `StringBuilder.Append`/`Insert` para
+recuperarla. `NPOI.SS.Util.CellReference.ConvertNumToColString` construye una letra de columna vía
+`StringBuilder.Insert(0, (char)...)` repetido, que esta limitación convierte en dígitos. Un arreglo
+real necesita un `KindChar` (o marshaling de llamadas consciente de la firma) — un cambio de
+arquitectura, no un parche rápido; fuera de alcance para esta fase, que trata de los bugs de
+intérprete/overload de arriba, todos independientes de este hueco preexistente.
+
+Efecto secundario, no el objetivo: el % limpio de `NPOI@2.8.0` en netstandard-lite se movió de
+97.0% a **97.3%** (`MethodsFlagged` 422 → 384) puramente de arreglar bugs reales que el demo
+necesitaba — esta fase nunca apuntó directamente a findings del checker.
 
 ### Cómo verificar Fase 3.39
 
@@ -3578,7 +3727,7 @@ causa raíz. Continúa en la próxima fase en vez de seguir adivinando a ciegas.
 go build ./...
 go vet ./...
 go test ./... -race -count=5
-cd examples/npoi-demo && go run .   # todavía falla con NotOLE2FileException — ver arriba
+cd examples/npoi-demo && go run .   # abre el .xls real, imprime datos de celda reales + una fórmula (texto con dígitos en vez de letras)
 ```
 
 ---

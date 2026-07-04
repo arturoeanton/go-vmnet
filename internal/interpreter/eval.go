@@ -17,6 +17,7 @@ type Machine struct {
 	ResolveExplicitImpl ExplicitImplResolver
 	ResolveEnum         EnumResolver
 	ResolveFieldBytes   FieldBytesResolver
+	ResolveMember       MemberResolver
 	Limits              Limits
 
 	// cctorsRunning tracks static constructors currently executing on
@@ -62,6 +63,14 @@ func (m *Machine) WithEnumResolver(r EnumResolver) *Machine {
 // which every constructor call site already sets up front.
 func (m *Machine) WithFieldBytesResolver(r FieldBytesResolver) *Machine {
 	m.ResolveFieldBytes = r
+	return m
+}
+
+// WithMemberResolver attaches a MemberResolver (Fase 3.39,
+// System.Reflection.ConstructorInfo/MethodInfo) — same rationale as
+// WithFieldBytesResolver.
+func (m *Machine) WithMemberResolver(r MemberResolver) *Machine {
+	m.ResolveMember = r
 	return m
 }
 
@@ -144,6 +153,7 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 		prevResolve, prevResolveType := m.Resolve, m.ResolveType
 		prevResolveExplicitImpl, prevResolveEnum := m.ResolveExplicitImpl, m.ResolveEnum
 		prevResolveFieldBytes := m.ResolveFieldBytes
+		prevResolveMember := m.ResolveMember
 		if method.Resolvers.Resolve != nil {
 			m.Resolve = method.Resolvers.Resolve
 		}
@@ -159,10 +169,14 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 		if method.Resolvers.ResolveFieldBytes != nil {
 			m.ResolveFieldBytes = method.Resolvers.ResolveFieldBytes
 		}
+		if method.Resolvers.ResolveMember != nil {
+			m.ResolveMember = method.Resolvers.ResolveMember
+		}
 		defer func() {
 			m.Resolve, m.ResolveType = prevResolve, prevResolveType
 			m.ResolveExplicitImpl, m.ResolveEnum = prevResolveExplicitImpl, prevResolveEnum
 			m.ResolveFieldBytes = prevResolveFieldBytes
+			m.ResolveMember = prevResolveMember
 		}()
 	}
 

@@ -51,6 +51,13 @@ type Type struct {
 	IsEnum      bool
 	IsInterface bool
 
+	// IsAbstract marks a TypeDef declared with the TypeAttributes.Abstract
+	// flag (Fase 3.39, System.Type.IsAbstract) — an interface is always
+	// abstract too in real reflection terms, but this only tracks the
+	// class-level flag itself; callers needing "is this abstract in the
+	// broader sense" should check IsInterface as well.
+	IsAbstract bool
+
 	// BaseTypeFullName ("" if none — interfaces and System.Object itself)
 	// and Interfaces (directly implemented only, not transitively expanded
 	// — spec §II.22.23) back isinst/castclass's real type-hierarchy walk

@@ -13,7 +13,8 @@ func (asm *Assembly) machine() *interpreter.Machine {
 	return interpreter.New(r.Resolve, r.ResolveType, interpreter.DefaultLimits()).
 		WithExplicitImplResolver(r.ResolveExplicitImpl).
 		WithEnumResolver(r.ResolveEnum).
-		WithFieldBytesResolver(r.ResolveFieldBytes)
+		WithFieldBytesResolver(r.ResolveFieldBytes).
+		WithMemberResolver(r.ResolveMember)
 }
 
 // Call resolves typeName.methodName (e.g. "Rules.Engine", "Eval") and

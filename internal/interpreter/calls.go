@@ -44,6 +44,17 @@ type EnumResolver func(fullName string) (names []string, values []int64, ok bool
 // blob, if it has one (Fase 3.27) — see runtime.Resolvers.ResolveFieldBytes.
 type FieldBytesResolver func(typeFullName, fieldName string) ([]byte, bool)
 
+// MemberResolver finds a real method or constructor by exact name and
+// declared parameter type names (Fase 3.39, System.Reflection —
+// Type.GetConstructor/GetMethod) and returns its full callable name
+// ("Namespace.Type::Member"), if one exists — exact declared-type-name
+// matching per real reflection semantics (no argument-Kind coercion,
+// unlike pickMethodOverload's runtime-argument-based scoring, since
+// there are no actual arguments yet at this point, only the caller's own
+// declared Type[] signature). memberName is ".ctor" for
+// Type.GetConstructor.
+type MemberResolver func(typeFullName, memberName string, paramTypeFullNames []string) (fullName string, ok bool)
+
 // call dispatches fullName as either a BCL native or an interpreted
 // method. virtual must be true only for an actual `callvirt` site — the
 // interface/virtual-dispatch fallback below must never apply to a plain

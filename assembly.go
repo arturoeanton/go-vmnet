@@ -393,6 +393,23 @@ func (asm *Assembly) valueIsAssignableToTypeName(v runtime.Value, targetName str
 		if qualifiedOrPlainName(t) == targetName {
 			return true
 		}
+		// A base class's OR the concrete type's own directly-implemented
+		// interfaces (Fase 3.39) — not just the class chain. Found via a
+		// real, load-bearing overload-resolution bug: NPOI's own
+		// AreaPtg(ILittleEndianInput) / AreaPtg(AreaReference) same-arity
+		// constructor pair (reading a Ptg's binary token data vs building
+		// one from a resolved reference) — a real LittleEndianByteArray
+		// InputStream argument was previously never recognized as
+		// assignable to ILittleEndianInput (this loop only ever walked
+		// BaseTypeFullName), so it silently scored no better than the
+		// unrelated AreaReference-typed overload and picked whichever
+		// tied first — constructing a genuinely broken AreaPtg whose
+		// "AreaReference" field was actually the input stream.
+		for _, iface := range t.Interfaces {
+			if iface == targetName {
+				return true
+			}
+		}
 		if t.BaseTypeFullName == "" {
 			return false
 		}
@@ -839,6 +856,7 @@ func (asm *Assembly) resolvers() *runtime.Resolvers {
 		ResolveExplicitImpl: asm.resolveExplicitImpl,
 		ResolveEnum:         asm.resolveEnumMembers,
 		ResolveFieldBytes:   asm.resolveFieldBytes,
+		ResolveMember:       asm.resolveMember,
 	}
 }
 
@@ -880,6 +898,53 @@ func (asm *Assembly) resolveFieldBytes(typeFullName, fieldName string) ([]byte, 
 		return data, true
 	}
 	return nil, false
+}
+
+// resolveMember backs the interpreter's MemberResolver (Fase 3.39,
+// System.Reflection.ConstructorInfo/MethodInfo — Type.GetConstructor/
+// GetMethod). Matches by real declared parameter type names, not
+// pickMethodOverload's runtime-argument-Kind scoring — there are no real
+// arguments yet at this point, only the caller's own declared Type[]
+// signature, so an exact name match is required wherever a name is
+// resolvable at all (SigClass/SigValueType/SigGenericInst); a parameter
+// whose type name can't be resolved this way (a primitive, a generic
+// method parameter, ...) is accepted leniently rather than rejected —
+// the same "best effort, not full type identity" posture
+// hasHardShapeMismatch/scoreParamMatch already document for overload
+// resolution proper.
+func (asm *Assembly) resolveMember(typeFullName, memberName string, paramTypeFullNames []string) (string, bool) {
+	namespace, typeName := splitTypeName(typeFullName)
+	typeRID, _, err := asm.md.FindTypeDef(namespace, typeName)
+	if err != nil {
+		for _, dep := range asm.deps {
+			if name, ok := dep.resolveMember(typeFullName, memberName, paramTypeFullNames); ok {
+				return name, true
+			}
+		}
+		return "", false
+	}
+	_, rows, err := asm.md.FindMethodDefCandidates(typeRID, memberName)
+	if err != nil {
+		return "", false
+	}
+	for _, row := range rows {
+		sig, err := metadata.ParseMethodSig(row.Signature)
+		if err != nil || len(sig.Params) != len(paramTypeFullNames) {
+			continue
+		}
+		match := true
+		for i, p := range sig.Params {
+			name, ok := paramTypeName(asm.md, p)
+			if ok && name != paramTypeFullNames[i] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return typeFullName + "::" + memberName, true
+		}
+	}
+	return "", false
 }
 
 // resolveTypeByFullName implements interpreter.TypeResolver: it builds a
@@ -976,6 +1041,7 @@ func (asm *Assembly) buildType(fullName string, depth int) (*runtime.Type, error
 		return nil, err
 	}
 	isInterface := typeDef.Flags&typeAttrInterface != 0
+	isAbstract := typeDef.Flags&typeAttrAbstract != 0
 
 	// Instance fields are inherited (real CLR field layout: a base type's
 	// fields come first in memory, before its own) — a struct can't have
@@ -1032,20 +1098,41 @@ func (asm *Assembly) buildType(fullName string, depth int) (*runtime.Type, error
 			}
 		}
 		// A literal field (FieldAttributes.Literal — every enum member,
-		// e.g. `Red` on `enum TrafficLight`) is a real Constant-table value
-		// baked in at compile time, never a computed runtime default — and
-		// its own field signature is a self-referential valuetype token
-		// (the enum's own TypeDef: real IL declares `static literal
-		// valuetype TrafficLight Red = int32(0)`, not `int32 Red`).
-		// Running fieldOrLocalDefault on it would recurse into building
-		// this exact same Type again to compute ITS OWN default, which
-		// hasn't finished being built yet — infinite recursion (found the
-		// hard way, Fase 3.25, adding the project's first plugin-defined
-		// enum fixture). vmnet has no Constant-table reader yet (Fase 3.24
-		// scoped Enum.GetValues/IsDefined out for the same reason), so
-		// literal fields are simply skipped rather than crashing; their
-		// real value is unavailable today regardless.
-		if f.Flags&fieldAttrLiteral == 0 && sigErr == nil {
+		// e.g. `Red` on `enum TrafficLight`, and every plain `const`
+		// field, e.g. `const short sid = ...;`) is a real Constant-table
+		// value baked in at compile time, never a computed runtime
+		// default — and, for an enum member specifically, its own field
+		// signature is a self-referential valuetype token (real IL
+		// declares `static literal valuetype TrafficLight Red =
+		// int32(0)`, not `int32 Red`), so running fieldOrLocalDefault on
+		// it would recurse into building this exact same Type again to
+		// compute ITS OWN default, which hasn't finished being built yet
+		// — infinite recursion (found the hard way, Fase 3.25). Reading
+		// the real value via the Constant table instead (Fase 3.39)
+		// sidesteps that entirely: the Constant row's own type tag is
+		// always a plain integer/float/string/null, even for an enum
+		// member (whose underlying value the CLI always records with its
+		// plain underlying-integer tag) — the field's declared signature
+		// is never consulted here at all. Falls back to Null() (this
+		// function's existing zero-value default) only if the Constant
+		// table row itself can't be decoded, not silently for every
+		// literal field as before.
+		if f.Flags&fieldAttrLiteral != 0 {
+			if kind, n, fl, s, ok, cerr := asm.md.ConstantForField(rid); cerr == nil && ok {
+				switch kind {
+				case metadata.ConstantInt32:
+					def = runtime.Int32(int32(n))
+				case metadata.ConstantInt64:
+					def = runtime.Int64(n)
+				case metadata.ConstantFloat:
+					def = runtime.Float64(fl)
+				case metadata.ConstantString:
+					def = runtime.String(s)
+				case metadata.ConstantNull:
+					def = runtime.Null()
+				}
+			}
+		} else if sigErr == nil {
 			def, err = asm.fieldOrLocalDefault(sig, depth)
 			if err != nil {
 				return nil, err
@@ -1064,6 +1151,7 @@ func (asm *Assembly) buildType(fullName string, depth int) (*runtime.Type, error
 	t.IsValueType = isValueType
 	t.IsEnum = isEnum
 	t.IsInterface = isInterface
+	t.IsAbstract = isAbstract
 	t.BaseTypeFullName = baseName
 	// fullName is already correctly "+"-qualified for a nested type (this
 	// function's own caller chain always resolves it via
@@ -1172,6 +1260,10 @@ func (asm *Assembly) classifyTypeDef(typeDef metadata.TypeDefRow) (isValueType, 
 // either an interface or System.Object itself, indistinguishable without
 // checking this flag.
 const typeAttrInterface = 0x00000020
+
+// typeAttrAbstract is TypeAttributes.Abstract (ECMA-335 §II.23.1.15) —
+// Fase 3.39, System.Type.IsAbstract.
+const typeAttrAbstract = 0x00000080
 
 // qualifyTypeRefName resolves a TypeRef's full name, walking ResolutionScope
 // when it points to another TypeRef (a nested type, e.g. List<T>'s own

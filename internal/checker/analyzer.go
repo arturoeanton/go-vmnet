@@ -241,6 +241,7 @@ var reflectionMachineTargets = map[string]bool{
 	"System.Type::get_IsValueType": true,
 	"System.Type::get_IsEnum":      true,
 	"System.Type::get_IsInterface": true,
+	"System.Type::get_IsAbstract":  true,
 	"System.Type::get_BaseType":    true,
 	"System.Type::GetInterfaces":   true,
 	"System.Type::GetType":         true,
@@ -248,6 +249,18 @@ var reflectionMachineTargets = map[string]bool{
 	"System.Enum::GetNames":        true,
 	"System.Enum::IsDefined":       true,
 	"System.Enum::ToObject":        true,
+	// Real reflection (Fase 3.39) — see internal/interpreter/reflection.go.
+	"System.Type::GetConstructor":                      true,
+	"System.Type::GetMethod":                           true,
+	"System.Type::GetField":                            true,
+	"System.Reflection.ConstructorInfo::Invoke":        true,
+	"System.Reflection.MethodInfo::Invoke":             true,
+	"System.Reflection.MethodBase::Invoke":             true,
+	"System.Reflection.FieldInfo::GetValue":            true,
+	"System.Reflection.ConstructorInfo::op_Inequality": true,
+	"System.Reflection.ConstructorInfo::op_Equality":   true,
+	"System.Reflection.MethodInfo::op_Inequality":      true,
+	"System.Reflection.MethodInfo::op_Equality":        true,
 }
 
 // asyncMachineTargets lists the async-related methods resolved through

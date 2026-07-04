@@ -8,9 +8,17 @@ import (
 
 // nativeList backs List<T> for any T: vmnet's runtime.Value is already a
 // uniform tagged union, so there's no need to specialize on the generic
-// argument (spec §17.1's minimal generics scope).
+// argument (spec §17.1's minimal generics scope). It also backs the
+// legacy System.Collections.ArrayList verbatim (same reasoning). typeName
+// records which of the two a given instance really is ("Namespace.Type",
+// NativeTypeName's shape) — needed since Fase 3.39: NativeTypeName used
+// to answer purely from the Go type (*nativeList always => "List`1"),
+// which silently misreported every ArrayList as a List`1 to
+// receiverTypeName's virtual-dispatch chain walk. See nativeDict's
+// identical typeName field for the real bug this caused.
 type nativeList struct {
-	items []runtime.Value
+	items    []runtime.Value
+	typeName string
 }
 
 // nativeDict backs Dictionary<TKey,TValue>. Keys are any of
@@ -23,8 +31,65 @@ type nativeList struct {
 // (encodeDictKey) so enumeration (get_Keys/GetEnumerator) can hand back
 // the real key — an int-keyed Dictionary's .Keys must yield ints, not
 // vmnet's internal string encoding of them.
+//
+// typeName records which real BCL type this instance is ("Namespace.Type",
+// NativeTypeName's shape) — Dictionary`2 or the legacy Hashtable, both
+// backed by this same struct. Needed for the identical reason nativeList
+// documents: NativeTypeName used to report every nativeDict as
+// "Dictionary`2" regardless, which misidentified a Hashtable receiver to
+// receiverTypeName's virtual-dispatch chain walk — found via a real,
+// load-bearing bug opening an actual .xls file through NPOI: BitField
+// Factory.GetInstance's `(BitField)instances[mask]` (instances declared
+// as Hashtable) got silently redirected to Dictionary`2::get_Item, which
+// throws on a miss instead of Hashtable's own real "return null" miss
+// behavior — corrupting the very first lookup into an always-empty cache.
+//
+// order tracks encoded keys in insertion order (Fase 3.39). Real
+// Dictionary<TKey,TValue> doesn't formally guarantee enumeration order,
+// but CoreCLR's implementation stably yields insertion order as long as
+// no key has ever been removed — and real C# code sometimes silently
+// depends on that observable behavior. Found the hard way: NPOI's own
+// FileMagicContainer.ValueOf builds a static Dictionary<FileMagic,
+// FileMagicContainer> literal (OLE2 first, ..., UNKNOWN last, whose
+// "magic" pattern is a zero-length byte array that trivially matches
+// ANY input) and relies on foreach checking OLE2 well before reaching
+// UNKNOWN's unconditional match. Backing the map with a plain Go map
+// (whose `range` order is intentionally randomized per iteration, not
+// just per process) made opening a real .xls file succeed or throw
+// NotOLE2FileException nondeterministically from one run to the next —
+// order restores the real, depended-upon behavior generally, for every
+// Dictionary in every package, not just this one call site.
 type nativeDict struct {
-	m map[string]dictEntry
+	m        map[string]dictEntry
+	order    []string
+	typeName string
+}
+
+// dictPut inserts or overwrites key (already encoded) in d, appending to
+// order only the first time a key is seen — every write path (Add,
+// indexer setter, NewDictValue) must go through this so order never
+// drifts out of sync with m.
+func (d *nativeDict) put(key string, entry dictEntry) {
+	if _, exists := d.m[key]; !exists {
+		d.order = append(d.order, key)
+	}
+	d.m[key] = entry
+}
+
+// dictDelete removes key from both m and order — used by Remove/Clear so
+// a later enumeration never yields a stale or double-counted key.
+func (d *nativeDict) delete(key string) bool {
+	if _, exists := d.m[key]; !exists {
+		return false
+	}
+	delete(d.m, key)
+	for i, k := range d.order {
+		if k == key {
+			d.order = append(d.order[:i], d.order[i+1:]...)
+			break
+		}
+	}
+	return true
 }
 
 type dictEntry struct {
@@ -67,7 +132,7 @@ var dictEnumeratorType = runtime.NewValueType(
 
 func init() {
 	registerCtor("System.Collections.Generic.List`1", func([]runtime.Value) (*runtime.Object, error) {
-		return &runtime.Object{Native: &nativeList{}}, nil
+		return &runtime.Object{Native: &nativeList{typeName: "System.Collections.Generic.List`1"}}, nil
 	})
 	register("System.Collections.Generic.List`1::Add", false, listAdd)
 	register("System.Collections.Generic.List`1::get_Count", true, listCount)
@@ -85,7 +150,7 @@ func init() {
 	register("System.Collections.Generic.List`1+Enumerator::get_Current", true, listEnumeratorGetCurrent)
 
 	registerCtor("System.Collections.Generic.Dictionary`2", func([]runtime.Value) (*runtime.Object, error) {
-		return &runtime.Object{Native: &nativeDict{m: map[string]dictEntry{}}}, nil
+		return &runtime.Object{Native: &nativeDict{m: map[string]dictEntry{}, typeName: "System.Collections.Generic.Dictionary`2"}}, nil
 	})
 	register("System.Collections.Generic.Dictionary`2::Add", false, dictAdd)
 	register("System.Collections.Generic.Dictionary`2::get_Item", true, dictGetItem)
@@ -125,7 +190,7 @@ func init() {
 	// actual concrete struct type first, so MoveNext/get_Current resolve
 	// correctly without a separate "ArrayList+Enumerator" registration.
 	registerCtor("System.Collections.ArrayList", func([]runtime.Value) (*runtime.Object, error) {
-		return &runtime.Object{Native: &nativeList{}}, nil
+		return &runtime.Object{Native: &nativeList{typeName: "System.Collections.ArrayList"}}, nil
 	})
 	register("System.Collections.ArrayList::Add", false, listAdd)
 	register("System.Collections.ArrayList::get_Count", true, listCount)
@@ -148,8 +213,9 @@ func init() {
 	// wired up: no real IL in this loop's target packages was found
 	// enumerating a Hashtable, only indexer-style access.
 	registerCtor("System.Collections.Hashtable", func([]runtime.Value) (*runtime.Object, error) {
-		return &runtime.Object{Native: &nativeDict{m: map[string]dictEntry{}}}, nil
+		return &runtime.Object{Native: &nativeDict{m: map[string]dictEntry{}, typeName: "System.Collections.Hashtable"}}, nil
 	})
+	register("System.Collections.Hashtable::Add", false, dictAdd)
 	register("System.Collections.Hashtable::get_Item", true, hashtableGetItem)
 	register("System.Collections.Hashtable::set_Item", false, dictSetItem)
 	register("System.Collections.Hashtable::ContainsKey", true, dictContainsKey)
@@ -186,7 +252,7 @@ func disposeNoop(args []runtime.Value) (runtime.Value, error) {
 // (Select/Where/ToList/...) as something the rest of the program can keep
 // treating as a normal collection.
 func NewListValue(items []runtime.Value) runtime.Value {
-	return runtime.ObjRef(&runtime.Object{Native: &nativeList{items: items}})
+	return runtime.ObjRef(&runtime.Object{Native: &nativeList{items: items, typeName: "System.Collections.Generic.List`1"}})
 }
 
 // NativeListItems returns a native-backed List<T>'s items, if native is
@@ -207,12 +273,12 @@ func NativeListItems(native any) ([]runtime.Value, bool) {
 // build a real Dictionary instance without importing bcl's own
 // unexported nativeDict/dictEntry types.
 func NewDictValue(pairs map[string]runtime.Value) runtime.Value {
-	m := make(map[string]dictEntry, len(pairs))
+	d := &nativeDict{m: make(map[string]dictEntry, len(pairs)), typeName: "System.Collections.Generic.Dictionary`2"}
 	for k, v := range pairs {
 		encoded, _ := encodeDictKey(runtime.String(k)) // a string key always encodes
-		m[encoded] = dictEntry{key: runtime.String(k), value: v}
+		d.put(encoded, dictEntry{key: runtime.String(k), value: v})
 	}
-	return runtime.ObjRef(&runtime.Object{Native: &nativeDict{m: m}})
+	return runtime.ObjRef(&runtime.Object{Native: d})
 }
 
 // derefStructReceiver unwraps a struct instance method's receiver: it
@@ -279,9 +345,9 @@ func dictGetEnumerator(args []runtime.Value) (runtime.Value, error) {
 	if err != nil {
 		return runtime.Value{}, err
 	}
-	keys := make([]runtime.Value, 0, len(d.m))
-	for k := range d.m {
-		keys = append(keys, runtime.String(k))
+	keys := make([]runtime.Value, len(d.order))
+	for i, k := range d.order {
+		keys[i] = runtime.String(k)
 	}
 	s := runtime.NewStruct(dictEnumeratorType)
 	s.Fields[0] = args[0]
@@ -627,7 +693,7 @@ func dictAdd(args []runtime.Value) (runtime.Value, error) {
 	if _, exists := d.m[key]; exists {
 		return runtime.Value{}, fmt.Errorf("bcl: Dictionary already contains key %q", key)
 	}
-	d.m[key] = dictEntry{key: kv, value: args[2]}
+	d.put(key, dictEntry{key: kv, value: args[2]})
 	return runtime.Value{}, nil
 }
 
@@ -679,7 +745,7 @@ func dictSetItem(args []runtime.Value) (runtime.Value, error) {
 	if err != nil {
 		return runtime.Value{}, err
 	}
-	d.m[key] = dictEntry{key: kv, value: args[2]}
+	d.put(key, dictEntry{key: kv, value: args[2]})
 	return runtime.Value{}, nil
 }
 
@@ -739,8 +805,7 @@ func dictRemove(args []runtime.Value) (runtime.Value, error) {
 	if err != nil {
 		return runtime.Value{}, err
 	}
-	_, existed := d.m[key]
-	delete(d.m, key)
+	existed := d.delete(key)
 	return runtime.Bool(existed), nil
 }
 
@@ -749,9 +814,9 @@ func dictGetValues(args []runtime.Value) (runtime.Value, error) {
 	if err != nil {
 		return runtime.Value{}, err
 	}
-	values := make([]runtime.Value, 0, len(d.m))
-	for _, e := range d.m {
-		values = append(values, e.value)
+	values := make([]runtime.Value, len(d.order))
+	for i, k := range d.order {
+		values[i] = d.m[k].value
 	}
 	return NewListValue(values), nil
 }
@@ -761,9 +826,9 @@ func dictGetKeys(args []runtime.Value) (runtime.Value, error) {
 	if err != nil {
 		return runtime.Value{}, err
 	}
-	keys := make([]runtime.Value, 0, len(d.m))
-	for _, e := range d.m {
-		keys = append(keys, e.key)
+	keys := make([]runtime.Value, len(d.order))
+	for i, k := range d.order {
+		keys[i] = d.m[k].key
 	}
 	return NewListValue(keys), nil
 }
@@ -776,5 +841,6 @@ func dictClear(args []runtime.Value) (runtime.Value, error) {
 	for k := range d.m {
 		delete(d.m, k)
 	}
+	d.order = nil
 	return runtime.Value{}, nil
 }

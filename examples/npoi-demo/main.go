@@ -84,7 +84,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("get_LastCellNum: %v", err)
 		}
-		cellCount := int(lastCell.Native().(int16))
+		cellCount := int(lastCell.Native().(int32))
 
 		for c := 0; c < cellCount; c++ {
 			cell, err := rowInst.Call("GetCell", vmnet.Int32(int32(c)))

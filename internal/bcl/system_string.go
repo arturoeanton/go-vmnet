@@ -169,9 +169,22 @@ func stringJoin(args []runtime.Value) (runtime.Value, error) {
 // object-typed ones the compiler picks for `"literal" + nonStringExpr`
 // (values arrive boxed — a no-op in vmnet, see internal/ir/builder.go —
 // so non-string args are formatted the same way Object.ToString() would).
+// stringConcat covers every Concat overload (2/3/4-arg object/string
+// params, and the single string[]/object[] params array shape a call
+// site with more than 4 arguments — or an explicit array — compiles to).
+// The single-array shape needs its own branch: `Concat(someArray)`
+// arrives here as exactly one KindArray argument, whose own elements are
+// the real pieces to join, not one opaque value to stringify wholesale
+// (found via a real bug: without this, `string.Concat(new[] {a, b, c,
+// d, e})` produced the literal text "<array[5]>" as an exception
+// message instead of the real joined text).
 func stringConcat(args []runtime.Value) (runtime.Value, error) {
+	pieces := args
+	if len(args) == 1 && args[0].Kind == runtime.KindArray && args[0].Arr != nil {
+		pieces = args[0].Arr.Elems
+	}
 	var sb strings.Builder
-	for _, a := range args {
+	for _, a := range pieces {
 		if a.Kind == runtime.KindString {
 			sb.WriteString(a.Str)
 		} else {

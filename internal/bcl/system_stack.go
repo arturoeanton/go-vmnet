@@ -7,14 +7,20 @@ import (
 )
 
 // nativeStack backs Stack<T> — items[len-1] is the top, matching Push/
-// Pop/Peek's LIFO order directly off a Go slice append/truncate.
+// Pop/Peek's LIFO order directly off a Go slice append/truncate. Also
+// backs the legacy, non-generic System.Collections.Stack (Fase 3.39,
+// same reasoning as nativeList/nativeDict's own typeName field: found
+// via a real, load-bearing case, NPOI's own formula rendering needing a
+// real Stack once the AreaPtg overload-resolution bug — see
+// valueIsAssignableToTypeName's doc comment — stopped masking it).
 type nativeStack struct {
-	items []runtime.Value
+	items    []runtime.Value
+	typeName string
 }
 
 func init() {
 	registerCtor("System.Collections.Generic.Stack`1", func([]runtime.Value) (*runtime.Object, error) {
-		return &runtime.Object{Native: &nativeStack{}}, nil
+		return &runtime.Object{Native: &nativeStack{typeName: "System.Collections.Generic.Stack`1"}}, nil
 	})
 	register("System.Collections.Generic.Stack`1::Push", false, stackPush)
 	register("System.Collections.Generic.Stack`1::Pop", true, stackPop)
@@ -22,6 +28,33 @@ func init() {
 	register("System.Collections.Generic.Stack`1::get_Count", true, stackCount)
 	register("System.Collections.Generic.Stack`1::Clear", false, stackClear)
 	register("System.Collections.Generic.Stack`1::Contains", true, stackContains)
+
+	registerCtor("System.Collections.Stack", func([]runtime.Value) (*runtime.Object, error) {
+		return &runtime.Object{Native: &nativeStack{typeName: "System.Collections.Stack"}}, nil
+	})
+	register("System.Collections.Stack::Push", false, stackPush)
+	register("System.Collections.Stack::Pop", true, stackPop)
+	register("System.Collections.Stack::Peek", true, stackPeek)
+	register("System.Collections.Stack::get_Count", true, stackCount)
+	register("System.Collections.Stack::Clear", false, stackClear)
+	register("System.Collections.Stack::Contains", true, stackContains)
+	register("System.Collections.Stack::ToArray", true, stackToArray)
+}
+
+// stackToArray returns items top-to-bottom, matching real Stack.ToArray
+// semantics (index 0 is the top, unlike the internal items slice which
+// keeps the top at the end for O(1) push/pop).
+func stackToArray(args []runtime.Value) (runtime.Value, error) {
+	s, err := asStack(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	n := len(s.items)
+	out := make([]runtime.Value, n)
+	for i, v := range s.items {
+		out[n-1-i] = v
+	}
+	return runtime.ArrRef(&runtime.Array{Elems: out}), nil
 }
 
 func stackClear(args []runtime.Value) (runtime.Value, error) {

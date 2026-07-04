@@ -20,6 +20,18 @@ func init() {
 	// every assembly for certain language features, regardless of
 	// whether the source uses them — their .ctor chains here.
 	register("System.Attribute::.ctor", false, objectCtorNoop)
+	// `new object()` (`newobj System.Object::.ctor()`) — a real, common
+	// pattern (a private lock object: `private readonly object _lock =
+	// new object();`) distinct from the base-call case above: this is
+	// newObj's NativeCtor path (allocates a fresh object), not a plain
+	// call on an already-allocated receiver. Found via a real case:
+	// NPOI's own I/O wrapper classes declare exactly this kind of lock
+	// field.
+	registerCtor("System.Object", newObjectCtor)
+}
+
+func newObjectCtor(args []runtime.Value) (*runtime.Object, error) {
+	return &runtime.Object{}, nil
 }
 
 func objectCtorNoop(args []runtime.Value) (runtime.Value, error) {
@@ -81,7 +93,7 @@ func displayString(v runtime.Value) string {
 func nativeToString(native any) (string, bool) {
 	switch n := native.(type) {
 	case *nativeStringBuilder:
-		return n.buf.String(), true
+		return n.buf, true
 	default:
 		return "", false
 	}
@@ -99,10 +111,20 @@ func nativeToString(native any) (string, bool) {
 // — the names returned here must match the strings register() calls use
 // in system_collections.go/system_stringbuilder.go exactly.
 func NativeTypeName(native any) (string, bool) {
-	switch native.(type) {
+	switch n := native.(type) {
 	case *nativeList:
+		// typeName distinguishes List`1 from the legacy ArrayList, both
+		// backed by this same struct (Fase 3.39) — see nativeList's own
+		// doc comment for the real bug an unconditional "always List`1"
+		// answer caused.
+		if n.typeName != "" {
+			return n.typeName, true
+		}
 		return "System.Collections.Generic.List`1", true
 	case *nativeDict:
+		if n.typeName != "" {
+			return n.typeName, true
+		}
 		return "System.Collections.Generic.Dictionary`2", true
 	case *nativeStringBuilder:
 		return "System.Text.StringBuilder", true
@@ -110,6 +132,19 @@ func NativeTypeName(native any) (string, bool) {
 		return "System.Array+ArrayEnumerator", true
 	case *nativeMemoryStream:
 		return "System.IO.MemoryStream", true
+	case *nativeConstructorInfo:
+		return "System.Reflection.ConstructorInfo", true
+	case *nativeMethodInfo:
+		return "System.Reflection.MethodInfo", true
+	case *nativeFieldInfo:
+		return "System.Reflection.FieldInfo", true
+	case *nativeSortedList:
+		return "System.Collections.SortedList", true
+	case *nativeStack:
+		if n.typeName != "" {
+			return n.typeName, true
+		}
+		return "System.Collections.Generic.Stack`1", true
 	default:
 		return "", false
 	}
