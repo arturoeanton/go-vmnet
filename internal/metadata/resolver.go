@@ -618,6 +618,31 @@ func (md *Metadata) FindMethodDefCandidates(typeRID uint32, name string) (rids [
 	return rids, rows, nil
 }
 
+// MethodDefParamRange returns the [start, end) 1-based Param RID range
+// owned by MethodDef rid, mirroring TypeDefFieldRange/TypeDefMethodRange
+// (same "next row's own range-start column is this row's range end"
+// trick, valid here for the same reason: real metadata always keeps
+// Param rows in increasing owning-method order). Used by
+// System.Reflection.MethodBase.GetParameters (Fase 3.52) to read a
+// method's real declared parameter names — Param rows are optional (a
+// method can have zero even with real declared parameters, if no
+// parameter has a name/attributes/marshaling), but every parameter a
+// normal C# compiler emits always gets one, so this is reliable for real
+// source-compiled methods like Dapper's own.
+func (md *Metadata) MethodDefParamRange(rid uint32) (start, end uint32, err error) {
+	t := md.tables[TableMethodDef]
+	if t == nil || rid == 0 || rid > t.rowCount {
+		return 0, 0, fmt.Errorf("%w: MethodDef RID %d", ErrOutOfRange, rid)
+	}
+	start = t.col(rid-1, 5)
+	if rid < t.rowCount {
+		end = t.col(rid, 5)
+	} else {
+		end = md.RowCount(TableParam) + 1
+	}
+	return start, end, nil
+}
+
 func (md *Metadata) Param(rid uint32) (ParamRow, error) {
 	t, row, err := md.tableOrErr(TableParam, rid)
 	if err != nil {

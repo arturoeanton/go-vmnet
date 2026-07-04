@@ -35,6 +35,21 @@ func init() {
 		// found" the moment any part's root-element validation path ran
 		// at all, real error or not.
 		"System.IO.InvalidDataException",
+		// System.Data.DataException/System.ApplicationException/System.
+		// ObjectDisposedException (Fase 3.52) — Dapper's own
+		// DisposedReader guard throws ObjectDisposedException, and
+		// System.Data's own DataException is thrown by more than one real
+		// ADO.NET-adjacent code path; all three share the same plain
+		// (message)/(message, innerException) constructor shape as
+		// System.Exception itself (ObjectDisposedException's real 2-string
+		// overload is (objectName, message) rather than (message,
+		// paramName), but no real caller here inspects ObjectName
+		// specifically, only Message — same simplification
+		// exceptionGetParamName's own doc comment already accepts for a
+		// type outside argExceptionParamOrder).
+		"System.Data.DataException",
+		"System.ApplicationException",
+		"System.ObjectDisposedException",
 	} {
 		registerCtor(name, newExceptionCtor(name))
 		// A plugin's own exception subclass (`class MyException :

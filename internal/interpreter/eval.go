@@ -20,6 +20,7 @@ type Machine struct {
 	ResolveMember           MemberResolver
 	ResolveManifestResource ManifestResourceResolver
 	ResolveProperties       PropertyResolver
+	ResolveMemberParams     MemberParamsResolver
 	Limits                  Limits
 
 	// cctorsRunning tracks static constructors currently executing on
@@ -89,6 +90,14 @@ func (m *Machine) WithManifestResourceResolver(r ManifestResourceResolver) *Mach
 // WithMemberResolver.
 func (m *Machine) WithPropertyResolver(r PropertyResolver) *Machine {
 	m.ResolveProperties = r
+	return m
+}
+
+// WithMemberParamsResolver attaches a MemberParamsResolver (Fase 3.52,
+// Type.GetConstructors/MethodBase.GetParameters) — same rationale as
+// WithFieldBytesResolver/WithMemberResolver.
+func (m *Machine) WithMemberParamsResolver(r MemberParamsResolver) *Machine {
+	m.ResolveMemberParams = r
 	return m
 }
 
@@ -174,6 +183,7 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 		prevResolveMember := m.ResolveMember
 		prevResolveManifestResource := m.ResolveManifestResource
 		prevResolveProperties := m.ResolveProperties
+		prevResolveMemberParams := m.ResolveMemberParams
 		if method.Resolvers.Resolve != nil {
 			m.Resolve = method.Resolvers.Resolve
 		}
@@ -198,6 +208,9 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 		if method.Resolvers.ResolveProperties != nil {
 			m.ResolveProperties = method.Resolvers.ResolveProperties
 		}
+		if method.Resolvers.ResolveMemberParams != nil {
+			m.ResolveMemberParams = method.Resolvers.ResolveMemberParams
+		}
 		defer func() {
 			m.Resolve, m.ResolveType = prevResolve, prevResolveType
 			m.ResolveExplicitImpl, m.ResolveEnum = prevResolveExplicitImpl, prevResolveEnum
@@ -205,6 +218,7 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 			m.ResolveMember = prevResolveMember
 			m.ResolveManifestResource = prevResolveManifestResource
 			m.ResolveProperties = prevResolveProperties
+			m.ResolveMemberParams = prevResolveMemberParams
 		}()
 	}
 

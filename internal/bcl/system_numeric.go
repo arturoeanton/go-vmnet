@@ -50,6 +50,96 @@ func init() {
 	register("System.Int16::GetHashCode", true, int32GetHashCode)
 	register("System.Byte::ToString", true, int32ToString)
 	register("System.Byte::GetHashCode", true, int32GetHashCode)
+	// SByte/UInt16 also widen to a plain KindI4 on the stack (same
+	// reasoning as Int16/Byte above) and, unlike UInt32, their entire
+	// real value range (-128..127, 0..65535) already prints correctly as
+	// a signed int32 with no unsigned-specific formatting needed — so
+	// they reuse int32ToString directly rather than needing their own
+	// native (Fase 3.52, found auditing Dapper@2.1.79's own numeric
+	// coercion/formatting helper, SqlMapper.Format, which switches over
+	// every integral TypeCode).
+	register("System.SByte::ToString", true, int32ToString)
+	register("System.UInt16::ToString", true, int32ToString)
+	register("System.UInt32::ToString", true, uint32ToString)
+	register("System.UInt64::ToString", true, uint64ToString)
+	register("System.Single::ToString", true, singleToString)
+}
+
+// uint32ToString backs UInt32.ToString([format]) — UNLIKE SByte/UInt16
+// above, a uint32's real value range (0..4294967295) does NOT fit inside
+// int32's positive range, so int32ToString's plain
+// strconv.FormatInt(int64(v.I4)) would print a value above 2^31-1 as
+// negative (its two's-complement bit pattern reinterpreted as signed) —
+// genuinely wrong output, not just a missing feature. Reinterprets the
+// same stored KindI4 bits as unsigned before formatting instead.
+func uint32ToString(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.UInt32.ToString expects a receiver")
+	}
+	v := args[0]
+	if v.Kind == runtime.KindRef && v.Ref != nil {
+		v = *v.Ref
+	}
+	if v.Kind != runtime.KindI4 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.UInt32.ToString expects a uint32 receiver")
+	}
+	if format := numericToStringFormat(args); format != "" {
+		s, err := formatValue(v, format)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		return runtime.String(s), nil
+	}
+	return runtime.String(strconv.FormatUint(uint64(uint32(v.I4)), 10)), nil
+}
+
+// uint64ToString mirrors uint32ToString for the KindI8-stored ulong case.
+func uint64ToString(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.UInt64.ToString expects a receiver")
+	}
+	v := args[0]
+	if v.Kind == runtime.KindRef && v.Ref != nil {
+		v = *v.Ref
+	}
+	if v.Kind != runtime.KindI8 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.UInt64.ToString expects a uint64 receiver")
+	}
+	if format := numericToStringFormat(args); format != "" {
+		s, err := formatValue(v, format)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		return runtime.String(s), nil
+	}
+	return runtime.String(strconv.FormatUint(uint64(v.I8), 10)), nil
+}
+
+// singleToString is Double.ToString's own doubleToString (system_misc.go)
+// narrowed to a KindR4 receiver — vmnet keeps `float`/System.Single as
+// its own distinct Kind (runtime.KindR4), unlike Decimal (no dedicated
+// representation at all here, a genuine gap — see docs/en/ROADMAP.md),
+// so it needs its own native rather than reusing doubleToString's KindR8
+// check directly.
+func singleToString(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Single.ToString expects a receiver")
+	}
+	v := args[0]
+	if v.Kind == runtime.KindRef && v.Ref != nil {
+		v = *v.Ref
+	}
+	if v.Kind != runtime.KindR4 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Single.ToString expects a float receiver")
+	}
+	if format := numericToStringFormat(args); format != "" {
+		s, err := formatValue(runtime.Float64(float64(v.R4)), format)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		return runtime.String(s), nil
+	}
+	return runtime.String(strconv.FormatFloat(float64(v.R4), 'G', -1, 32)), nil
 }
 
 // int32GetHashCode returns the value itself, matching real

@@ -4446,6 +4446,153 @@ cd ../closedxml-demo && dotnet build GraphicEngineWrapper.csproj -c Release && f
 ```
 
 ---
+### Fase 3.52 — endurecimiento de Dapper: despacho ADO.NET de `System.Data`, reflection de genéricos cerrados, y un demo real con proveedor fake
+
+**Objetivo:** Dapper 2.1.79 medía 76.1% limpio bajo `netstandard-lite` (1047 métodos, 250
+marcados) — el más débil de los paquetes reales rastreados, casi enteramente `System.Data`/
+`System.Data.Common` (sin ningún despacho de interfaz modelado en absoluto) y un tramo de
+superficie de `System.Reflection` para la cual la Fase 3.51 construyó la maquinaria pero nunca
+terminó de conectar al checker. Termina en **93.8% limpio (65/1047 marcados)**, más un
+`examples/dapper-demo` real y funcional que ejercita el propio `SqlMapper.Query`/`Execute` de
+Dapper de punta a punta contra un proveedor ADO.NET fake mínimo en memoria — sin base de datos
+real, sin necesitar el SDK de .NET en tiempo de ejecución.
+
+**`System.Data` — diseñado desde cero**:
+- [x] `IDbConnection`/`IDbCommand`/`IDbTransaction`/`IDataReader`/`IDataRecord`/`IDataParameter`/
+      `IDbDataParameter`/`IDataParameterCollection` no necesitan NINGUNA maquinaria nueva del
+      intérprete — la propia implementación concreta de un plugin (un driver real, o el fake de un
+      demo) se resuelve por el recorrido de despacho virtual ya existente de `Machine.call`, el
+      mismo mecanismo que ya usan `IEnumerable`1`/`IEqualityComparer`1`. Solo el checker necesitaba
+      ponerse al día: los nuevos `adoNetDispatchTypes`/`isAdoNetDispatchTarget` de
+      `internal/checker/analyzer.go` tratan cualquier miembro de estos tipos como resoluble vía
+      despacho, por TIPO en vez de una entrada de `interfaceDispatchTargets` por cada miembro real
+      (~60 de ellos entre las interfaces y las clases base abstractas de abajo).
+- [x] `DbConnection`/`DbCommand`/`DbDataReader`/`DbParameter`/`DbParameterCollection`/
+      `DbTransaction` son CLASES BASE ABSTRACTAS reales de ADO.NET que un plugin extiende vía una
+      cadena `.ctor` `base()` real (usualmente implícita) — `internal/bcl/system_data.go` registra
+      un `.ctor` no-op simple para cada una, el mismo patrón `baseExceptionCtorInPlace`/
+      `dictCtorInPlace` que las Fases 3.10/3.32 ya establecieron para `System.Exception`/
+      `Dictionary`2`.
+- [x] `DbDataReader.Dispose()` (público, concreto — NO abstracto) es un método real heredado de la
+      clase base que una subclase real típicamente NO sobreescribe (usualmente solo se
+      sobreescribe el `Dispose(bool)` protegido, ej. el propio `WrappedBasicReader` interno de
+      Dapper) — `dbDataReaderDispose` de `internal/interpreter/adonet.go` intenta la propia
+      sobreescritura `Dispose(bool)` del receptor directamente vía `Machine.tryCall` (no
+      `Machine.call`, para evitar recursión hacia sí mismo una vez que no existe sobreescritura).
+
+**Reflection — cerrando brechas reales que la Fase 3.51 abrió pero no terminó**:
+- [x] `Type.GetProperties`/`GetProperty` más `PropertyInfo.GetValue`/`SetValue`/op_Equality/
+      op_Inequality eran nativos reales y FUNCIONALES desde la Fase 3.51 que la propia lista
+      `reflectionMachineTargets` del checker simplemente nunca reflejó — cada llamada real se
+      reportaba mal como no soportada pese a ya correr correctamente. La misma clase de brecha de
+      paridad se arregló para el propio `Find`/`FindAll`/`ConvertAll`/`Sort`/etc. de `System.Array`
+      (`array_ops.go`/`array_sort.go`, todos nativos reales desde las Fases 3.41/3.42, nunca
+      reflejados en el checker tampoco) vía un nuevo mapa `arrayMachineTargets`.
+- [x] `Type.GetMethod`/`GetProperty` solo aceptaban su propia forma de sobrecarga documentada más
+      angosta (2 o 3 argumentos) — cualquier sobrecarga real que tomara `BindingFlags`
+      (`GetMethod(name, BindingFlags)`, `GetMethod(name, BindingFlags, Binder, Type[],
+      ParameterModifier[])`) o fallaba directamente o mal-leía silenciosamente un argumento int
+      `BindingFlags` como un `Type[]`. Ahora escanea todos los argumentos finales buscando el
+      primer `Type[]` real, ignorando cualquier otra cosa — encontrado vía el propio constructor
+      estático `SqlMapper` de Dapper, que usa exactamente la forma de 5 argumentos a través de su
+      propio helper `GetPublicInstanceMethod`.
+- [x] **`Type.GetMethod`/`GetConstructor`/`GetField` llamados sobre un tipo GENÉRICO CERRADO (vía
+      `Type.MakeGenericType`) siempre fallaban en resolver** — `resolveMember` (assembly.go) nunca
+      recibía el nombre TypeDef real, ABIERTO/sin enlazar, para buscar, solo el string cerrado
+      `Outer+Inner\`1[[Arg]]` que codifica `sigTypeFullName` para `typeof(T)`/`MakeGenericType` (en
+      los metadatos reales solo hay un TypeDef por tipo genérico abierto — ECMA-335 no tiene un
+      TypeDef separado por cada instanciación cerrada). El nuevo `typeFullNameOfOpen`
+      (reflection.go) normaliza vía `bcl.GenericOpenName` antes de cada búsqueda de reflection.
+      Encontrado vía el propio cctor de Dapper reflejando sobre `TypeHandlerCache<DataTable>`/
+      `<XmlDocument>`/`<XDocument>`/`<XElement>` para cachear el método `SetHandler` de cada uno —
+      esto se rompía en el instante en que se tocaba `Dapper.SqlMapper` en absoluto, antes de
+      correr una sola consulta real.
+- [x] `Type.GetProperties`/`GetProperty` más `PropertyInfo.PropertyType`/`GetGetMethod`/
+      `GetSetMethod`/`GetIndexParameters` (`PropertyInfo.PropertyType` leído del accesor real que
+      exista vía el nuevo `propertyTypeFullName` de `assembly.go`). Un fallback
+      `wellKnownBclProperties` (reflection.go) pequeño y deliberadamente angosto además mapea a
+      mano exactamente dos propiedades reales del framework BCL para las que vmnet no tiene ningún
+      TypeDef — `CultureInfo.InvariantCulture` y el propio indexador `this[int]` de
+      `DbDataReader` — ambas reflejadas incondicionalmente por el cctor de Dapper; sin esto,
+      `.GetGetMethod()` llamado sobre el `PropertyInfo` no-nulo del comportamiento real de .NET
+      lanzaba NullReferenceException sobre el `Null()` de vmnet en su lugar, en el instante en que
+      carga `Dapper.SqlMapper`.
+- [x] `Type.GetConstructors()` (plural) más `MethodBase.GetParameters()`/`ParameterInfo` — nuevo
+      por completo: `resolveMemberParams` de `assembly.go` lee cada sobrecarga real de tipos de
+      parámetro declarados (vía `metadata.ParseMethodSig`) y nombres de parámetro reales (nuevo
+      `metadata.MethodDefParamRange`, reflejando `TypeDefFieldRange`). Un `ConstructorInfo` del
+      plural `GetConstructors()` lleva su propio `overloadIndex` real así que cada elemento de ese
+      array responde `GetParameters()` con SU PROPIA firma, no solo la de la primera.
+- [x] `Type.GetTypeCode`/`Enum.GetUnderlyingType`/`Type.IsArray`/`GetElementType` — agregados
+      pequeños e independientes (manipulación pura de nombre/sufijo, ninguno necesita acceso a
+      Machine).
+
+**Colecciones/Array — brechas reales encontradas auditando la paridad checker-vs-runtime**:
+- [x] `List\`1::.ctor` no tenía nativo de encadenamiento de base (`Dictionary`2` ya lo tenía) —
+      cualquier clase de plugin subclaseando `List<T>` directamente entraba en pánico sobre un
+      receptor nulo en el instante en que cualquier método nativo de `List<T>` corría a través del
+      recorrido de ancestros. Encontrado vía el propio
+      `FakeParameterCollection : List<FakeParameter>, IDataParameterCollection` de
+      `examples/dapper-demo`.
+- [x] `List<T>.RemoveAll(Predicate<T>)` — faltaba por completo; agregado junto a los propios
+      nativos de `Array.Find` que invocan delegados con acceso a Machine.
+- [x] `List<T>.Reverse()`, `Array.CreateInstance`/`GetValue`/`SetValue`, `Regex.Escape`,
+      `ConcurrentDictionary`2::Clear`/`get_Keys`/`GetEnumerator` (las últimas tres necesitaron
+      cambiar el propio almacenamiento de `nativeConcurrentDict` de valores simples a pares reales
+      clave+valor `dictEntry`, ya que el diseño original nunca necesitó devolver la clave real),
+      `IDictionary`2::Add`/`Remove`/`get_Keys` (solo checker — nativos de `Dictionary<K,V>` ya
+      funcionales que el checker nunca reflejó para la forma de llamada declarada por interfaz),
+      `SByte`/`UInt16`/`UInt32`/`UInt64`/`Single.ToString`, y tres tipos de excepción más simples
+      (`DataException`/`ApplicationException`/`ObjectDisposedException`) — todas brechas pequeñas
+      e independientes encontradas auditando uno por uno los hallazgos restantes del propio
+      checker sobre Dapper.
+- [x] `StringComparer.Ordinal`/`OrdinalIgnoreCase` no tenía caso en `NativeTypeName` — un sitio de
+      llamada declarado contra `IEqualityComparer<string>` (el propio campo
+      `connectionStringComparer` de Dapper) nunca podía redirigir a los nativos ya registrados
+      `StringComparer::GetHashCode`/`Equals`, cayendo en su lugar al nombre de interfaz literal, no
+      resoluble.
+
+**Encontrado, no arreglado** (ambos límites arquitectónicos genuinos y permanentes, no
+descuidos):
+- Los propios `Query<T>()`/`Execute<T>()` genéricos de Dapper hacen `typeof(T)` internamente
+  sobre su propio parámetro de tipo de MÉTODO genérico — el caso `IsMethodGenericParam` de
+  `ir.LoadTypeToken` no tiene forma de resolver esto (nada enhebra "con qué argumentos genéricos
+  fue invocado el propio método actualmente en ejecución" hasta un `ldtoken` en las profundidades
+  del cuerpo de ese método, a diferencia de los propios argumentos genéricos ya resueltos de un
+  sitio de llamada). Arreglarlo de forma general implica llevar el contexto de instanciación de
+  método genérico a través de todo el pipeline de invocación de métodos — un cambio real e
+  invasivo, no intentado acá. Se evitó en el demo usando en su lugar la propia sobrecarga no
+  genérica `Query(Type, ...)` de Dapper.
+- Cualquier llamada de Dapper que provea un objeto de parámetros real (de cualquier forma) siempre
+  escanea primero el texto SQL crudo vía `Dapper.SqlMapper.CompiledRegex.LiteralTokens`:
+  `(?<![\p{L}\p{N}_])\{=([\p{L}\p{N}_]+)\}` — un negative lookbehind, una feature real de regex de
+  .NET que el `regexp` de Go, basado en RE2, nunca puede soportar. No arreglable sin reemplazar
+  todo el motor de regex, muy fuera de alcance. El demo solo pasa SQL literal sin objeto de
+  parámetros, lo cual se salta este escaneo por completo.
+- `new List<T>(existingCollection)` (la sobrecarga real de constructor-copia) produce
+  silenciosamente una lista VACÍA en vez de copiar o dar error —
+  `registerCtor("System.Collections.Generic.List\`1", ...)` ignora sus argumentos de constructor
+  por completo sin importar la forma. No afectado por nada en este pase una vez que el propio
+  código del demo lo evitó, pero es una brecha real con forma de pérdida silenciosa de datos que
+  vale la pena señalar para un pase futuro.
+
+### Cómo verificar Fase 3.52
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+cd examples/npoi-demo && go run .
+cd ../system-text-json-demo && go run .
+cd ../openxml-demo && go run .
+cd ../newtonsoft-json-demo && go run .
+cd ../calculator && dotnet build Calculator.csproj -c Release && go run .
+cd ../closedxml-demo && dotnet build GraphicEngineWrapper.csproj -c Release && for i in 1 2 3 4; do go run .; done
+cd ../dapper-demo && dotnet build DapperDemoWrapper.csproj -c Release && go run .
+```
+
+---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
 

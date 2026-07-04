@@ -204,6 +204,7 @@ Ejemplos corribles y documentados en [`examples/`](examples/):
 | [`examples/openxml-demo`](examples/openxml-demo) | Generar un `.docx` real desde cero vía el paquete DocumentFormat.OpenXml real, verificado abriéndolo con el SDK de .NET real |
 | [`examples/closedxml-demo`](examples/closedxml-demo) | Leer un archivo `.xlsx` real vía el paquete ClosedXML real, con un pequeño wrapper de C# compilado para una limitación de métricas de fuentes |
 | [`examples/calculator`](examples/calculator) | Una carga de aritmética/loop corrida a través de vmnet, Go nativo y (opcionalmente) CoreCLR real, lado a lado, para una comparación de corrección y velocidad |
+| [`examples/dapper-demo`](examples/dapper-demo) | El propio `SqlMapper.Query`/`Execute` del paquete NuGet Dapper real, corrido contra un proveedor ADO.NET fake mínimo en memoria — sin base de datos real, sin necesitar el SDK de .NET en tiempo de ejecución |
 
 ## CLI
 

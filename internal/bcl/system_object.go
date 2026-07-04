@@ -147,6 +147,20 @@ func NativeTypeName(native any) (string, bool) {
 		return "System.Collections.SortedList", true
 	case *nativeResourceManager:
 		return "System.Resources.ResourceManager", true
+	case *nativeStringComparer:
+		// Missing here meant calls.go's virtual-dispatch ancestor walk
+		// couldn't identify a StringComparer.Ordinal/OrdinalIgnoreCase
+		// instance's concrete type at all (receiverTypeName's own "ok"
+		// stayed false), so it never even tried redirecting a call site
+		// declared against IEqualityComparer<string>/IComparer<string>
+		// (e.g. Dapper's own SqlMapper.connectionStringComparer field,
+		// typed IEqualityComparer<string>) back to the already-
+		// registered "System.StringComparer::GetHashCode"/Equals/Compare
+		// natives above — it fell through to the bare, unresolvable
+		// interface name instead (Fase 3.52, found via a real, load-
+		// bearing case: Dapper's SqlMapper static ctor assigns
+		// StringComparer.Ordinal to exactly such a field).
+		return "System.StringComparer", true
 	case *nativeWeakReference:
 		return "System.WeakReference", true
 	case *nativeZipArchive:

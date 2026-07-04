@@ -225,10 +225,92 @@ func resolvableMethod(md *metadata.Metadata, fullName string) bool {
 	if reflectionMachineTargets[fullName] {
 		return true
 	}
+	if arrayMachineTargets[fullName] {
+		return true
+	}
+	if isAdoNetDispatchTarget(fullName) {
+		return true
+	}
 	if fullName == "System.Runtime.CompilerServices.RuntimeHelpers::InitializeArray" {
 		return true
 	}
 	return isLocalMethod(md, fullName)
+}
+
+// arrayMachineTargets lists System.Array/List<T> members resolved
+// through the Machine-aware registry (array_ops.go/array_sort.go —
+// Find/FindLast/FindIndex/FindAll/Exists/ForEach/TrueForAll/ConvertAll
+// all take a Predicate`1/Action`1/Converter`2 delegate argument, and
+// Sort/BinarySearch take an optional IComparer`1/Comparison`1, neither
+// available to a plain bcl.Native) rather than bcl.Lookup — this map
+// simply never mirrored them until now, the same parity gap
+// reflectionMachineTargets' own Fase 3.51 entries just fixed for
+// PropertyInfo.
+var arrayMachineTargets = map[string]bool{
+	"System.Array::Reverse":                        true,
+	"System.Array::Fill":                           true,
+	"System.Array::Find":                           true,
+	"System.Array::FindLast":                       true,
+	"System.Array::FindIndex":                      true,
+	"System.Array::FindAll":                        true,
+	"System.Array::Exists":                         true,
+	"System.Array::ForEach":                        true,
+	"System.Array::TrueForAll":                     true,
+	"System.Array::ConvertAll":                     true,
+	"System.Array::LastIndexOf":                    true,
+	"System.Array::Sort":                           true,
+	"System.Array::BinarySearch":                   true,
+	"System.Collections.Generic.List`1::Sort":      true,
+	"System.Collections.Generic.List`1::RemoveAll": true,
+}
+
+// adoNetDispatchTypes lists System.Data's connection/command/reader/
+// parameter surface (Fase 3.52) — Dapper's SqlMapper (and any other
+// ADO.NET-based micro-ORM) does its real object-relational mapping
+// directly against these interfaces/abstract classes, never against a
+// concrete provider type by name: the real concrete implementation is
+// always supplied by whichever real driver (or, for vmnet's own
+// examples/dapper-demo, a minimal in-memory fake) the caller passes in,
+// and Machine.call's virtual-dispatch ancestor walk (calls.go) already
+// resolves every one of these interface/abstract-class members straight
+// through to that concrete implementation's own real method — the same
+// mechanism interfaceDispatchTargets above documents for IEnumerable`1/
+// IEqualityComparer`1/IComparer`1. Keyed by TYPE rather than enumerated
+// per-method like interfaceDispatchTargets: real ADO.NET's own member
+// count across IDbConnection/IDbCommand/IDataReader/IDataRecord/
+// IDataParameter/IDbDataParameter/DbDataReader/DbCommand/DbConnection is
+// large (~60 real members between them, most never called by any one
+// package), and every single one resolves through the identical
+// mechanism — enumerating each one individually the way
+// interfaceDispatchTargets does would just repeat the same fact ~60
+// times for no added precision.
+var adoNetDispatchTypes = map[string]bool{
+	"System.Data.IDbConnection":                true,
+	"System.Data.IDbCommand":                   true,
+	"System.Data.IDbTransaction":               true,
+	"System.Data.IDataReader":                  true,
+	"System.Data.IDataRecord":                  true,
+	"System.Data.IDataParameter":               true,
+	"System.Data.IDbDataParameter":             true,
+	"System.Data.IDataParameterCollection":     true,
+	"System.Data.Common.DbConnection":          true,
+	"System.Data.Common.DbCommand":             true,
+	"System.Data.Common.DbDataReader":          true,
+	"System.Data.Common.DbParameter":           true,
+	"System.Data.Common.DbParameterCollection": true,
+	"System.Data.Common.DbTransaction":         true,
+}
+
+// isAdoNetDispatchTarget reports whether fullName names a method on one
+// of adoNetDispatchTypes' own types (any member — this deliberately
+// doesn't enumerate which ones, see adoNetDispatchTypes' own doc
+// comment).
+func isAdoNetDispatchTarget(fullName string) bool {
+	idx := strings.LastIndex(fullName, "::")
+	if idx < 0 {
+		return false
+	}
+	return adoNetDispatchTypes[fullName[:idx]]
 }
 
 // reflectionMachineTargets lists the System.Type introspection methods
@@ -263,6 +345,25 @@ var reflectionMachineTargets = map[string]bool{
 	"System.Reflection.MethodInfo::op_Inequality":           true,
 	"System.Reflection.MethodInfo::op_Equality":             true,
 	"System.Reflection.Assembly::GetManifestResourceStream": true,
+	// Type.GetProperties/GetProperty plus PropertyInfo.GetValue/SetValue
+	// (Fase 3.51) — real natives (internal/interpreter/reflection.go)
+	// this map simply never mirrored until now, so every real call site
+	// using them was misreported as unsupported despite already working
+	// at runtime (found auditing Dapper@2.1.79's own checker findings
+	// against its real, verified-working reflection-based row mapper).
+	"System.Type::GetProperties":                    true,
+	"System.Type::GetProperty":                      true,
+	"System.Reflection.PropertyInfo::GetValue":      true,
+	"System.Reflection.PropertyInfo::SetValue":      true,
+	"System.Reflection.PropertyInfo::op_Inequality": true,
+	"System.Reflection.PropertyInfo::op_Equality":   true,
+	// Type.GetConstructors (plural) plus MethodBase.GetParameters/
+	// ParameterInfo (Fase 3.52) — see internal/interpreter/reflection.go's
+	// typeGetConstructors/methodBaseGetParameters.
+	"System.Type::GetConstructors":                     true,
+	"System.Reflection.ConstructorInfo::GetParameters": true,
+	"System.Reflection.MethodInfo::GetParameters":      true,
+	"System.Reflection.MethodBase::GetParameters":      true,
 }
 
 // asyncMachineTargets lists the async-related methods resolved through
@@ -337,23 +438,32 @@ var linqTargets = map[string]bool{
 // pattern, not a claim that every interface call resolves; same
 // approximate posture as isDelegateType's well-known prefixes.
 var interfaceDispatchTargets = map[string]bool{
-	"System.Collections.Generic.IEnumerable`1::GetEnumerator":     true,
-	"System.Collections.IEnumerable::GetEnumerator":               true,
-	"System.Collections.Generic.IEnumerator`1::get_Current":       true,
-	"System.Collections.Generic.IEnumerator`1::MoveNext":          true,
-	"System.Collections.IEnumerator::get_Current":                 true,
-	"System.Collections.IEnumerator::MoveNext":                    true,
-	"System.Collections.IEnumerator::Reset":                       true,
-	"System.Collections.Generic.ICollection`1::Add":               true,
-	"System.Collections.Generic.ICollection`1::get_Count":         true,
-	"System.Collections.ICollection::get_Count":                   true,
-	"System.Collections.IList::Add":                               true,
-	"System.Collections.IList::get_Item":                          true,
-	"System.Collections.IList::set_Item":                          true,
+	"System.Collections.Generic.IEnumerable`1::GetEnumerator": true,
+	"System.Collections.IEnumerable::GetEnumerator":           true,
+	"System.Collections.Generic.IEnumerator`1::get_Current":   true,
+	"System.Collections.Generic.IEnumerator`1::MoveNext":      true,
+	"System.Collections.IEnumerator::get_Current":             true,
+	"System.Collections.IEnumerator::MoveNext":                true,
+	"System.Collections.IEnumerator::Reset":                   true,
+	"System.Collections.Generic.ICollection`1::Add":           true,
+	"System.Collections.Generic.ICollection`1::get_Count":     true,
+	"System.Collections.ICollection::get_Count":               true,
+	"System.Collections.IList::Add":                           true,
+	"System.Collections.IList::get_Item":                      true,
+	"System.Collections.IList::set_Item":                      true,
+	// IList::Clear resolves against a concrete List`1/ArrayList receiver
+	// exactly like Add/get_Item/set_Item above (both already register a
+	// real "...List`1::Clear"/"ArrayList::Clear" native — system_
+	// collections.go); this entry was simply missing before Fase 3.52,
+	// misreporting a real, already-working call as unsupported.
+	"System.Collections.IList::Clear":                             true,
 	"System.Collections.Generic.IDictionary`2::set_Item":          true,
 	"System.Collections.Generic.IDictionary`2::get_Item":          true,
 	"System.Collections.Generic.IDictionary`2::TryGetValue":       true,
 	"System.Collections.Generic.IDictionary`2::ContainsKey":       true,
+	"System.Collections.Generic.IDictionary`2::Add":               true,
+	"System.Collections.Generic.IDictionary`2::Remove":            true,
+	"System.Collections.Generic.IDictionary`2::get_Keys":          true,
 	"System.Collections.Generic.IList`1::get_Item":                true,
 	"System.Collections.Generic.IList`1::set_Item":                true,
 	"System.Collections.Generic.IReadOnlyList`1::get_Item":        true,

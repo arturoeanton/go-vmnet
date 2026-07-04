@@ -106,13 +106,32 @@ type Resolvers struct {
 	// ResolveProperties reads a plugin type's own declared properties
 	// (Fase 3.51: System.Reflection — Type.GetProperties/GetProperty) in
 	// declaration order — parallel slices (names[i]/canRead[i]/
-	// canWrite[i] all describe the same i'th property), matching
-	// ResolveEnum's own parallel-slice convention above rather than a
-	// descriptor struct. canRead[i]/canWrite[i] come from the real
+	// canWrite[i]/propTypes[i] all describe the same i'th property),
+	// matching ResolveEnum's own parallel-slice convention above rather
+	// than a descriptor struct. canRead[i]/canWrite[i] come from the real
 	// get_Xxx/set_Xxx MethodDef linkage (a property can be get-only,
 	// set-only, or both), not just guessed from the property's name.
-	// ok=false for a type with no TypeDef at all (a BCL-only type vmnet
-	// has no metadata for), matching every other resolver's own "no
-	// data available" contract here.
-	ResolveProperties func(typeFullName string) (names []string, canRead []bool, canWrite []bool, ok bool)
+	// propTypes[i] (Fase 3.52: PropertyInfo.PropertyType, added for
+	// Dapper's own reflection-based row-to-object mapper) is read off
+	// whichever real accessor exists (the getter's return type, or the
+	// setter's own single parameter type when there's no getter at all —
+	// a set-only property is real, if rare) — "" only if somehow neither
+	// resolves, which shouldn't happen for any real property. ok=false
+	// for a type with no TypeDef at all (a BCL-only type vmnet has no
+	// metadata for), matching every other resolver's own "no data
+	// available" contract here.
+	ResolveProperties func(typeFullName string) (names []string, canRead []bool, canWrite []bool, propTypes []string, ok bool)
+	// ResolveMemberParams reads every real overload of typeFullName's
+	// member named memberName (memberName is ".ctor" for a constructor,
+	// same convention ResolveMember already uses) — parallel slices,
+	// paramTypes[i]/paramNames[i] both describing overload i's own
+	// declared parameter list in order (Fase 3.52: System.Reflection —
+	// Type.GetConstructors, MethodBase.GetParameters/ParameterInfo,
+	// needed for Dapper's own constructor-based row-to-object mapper,
+	// which enumerates a target type's constructors to find the best
+	// parameter match against a query's column set). ok=false for a type
+	// with no TypeDef at all, matching every other resolver's own "no
+	// data available" contract; ok=true with zero overloads is real too
+	// (a type with no matching member at all).
+	ResolveMemberParams func(typeFullName, memberName string) (paramTypes [][]string, paramNames [][]string, ok bool)
 }

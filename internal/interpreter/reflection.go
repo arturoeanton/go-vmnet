@@ -67,6 +67,20 @@ func init() {
 	// unlike the plain bcl.Native stubs system_type.go registers for
 	// GetExecutingAssembly/ToString/FullName.
 	machineRegistry["System.Reflection.Assembly::GetManifestResourceStream"] = assemblyGetManifestResourceStream
+	// Type.GetConstructors() (plural) plus MethodBase.GetParameters/
+	// ParameterInfo (Fase 3.52) — Dapper's own constructor-based
+	// row-to-object mapper enumerates every real .ctor overload this way
+	// to find the one whose parameters best match a query's column set.
+	// GetParameters is registered under all three of MethodBase's own
+	// concrete subclasses reachable here: whichever one
+	// receiverTypeName/bcl.NativeTypeName reports for the actual wrapper
+	// (ConstructorInfo or MethodInfo) is what Machine.call's virtual-
+	// dispatch ancestor walk tries first, regardless of which one a call
+	// site's own declared static type names.
+	machineRegistry["System.Type::GetConstructors"] = typeGetConstructors
+	machineRegistry["System.Reflection.ConstructorInfo::GetParameters"] = methodBaseGetParameters
+	machineRegistry["System.Reflection.MethodInfo::GetParameters"] = methodBaseGetParameters
+	machineRegistry["System.Reflection.MethodBase::GetParameters"] = methodBaseGetParameters
 }
 
 // assemblyGetManifestResourceStream backs Assembly.GetManifestResource
@@ -423,6 +437,33 @@ func argsSelf(args []runtime.Value) runtime.Value {
 	return args[0]
 }
 
+// typeFullNameOfOpen is bcl.TypeFullNameOf, normalized through
+// bcl.GenericOpenName — every real reflection lookup below
+// (GetConstructor(s)/GetMethod/GetField/GetProperty(ies)) ultimately
+// resolves against a TypeDef via Machine.ResolveMember/ResolveProperties/
+// ResolveMemberParams, none of which can ever find a CLOSED generic
+// instantiation's own encoded name (e.g.
+// "Outer+Inner`1[[System.Data.DataTable]]", ir/builder.go's
+// sigTypeFullName encoding for typeof(T)/MakeGenericType) — there's only
+// ever one TypeDef per open/unbound generic type in real metadata
+// (ECMA-335), never a separate one per closed instantiation. Every
+// plain (non-generic) name passes through unchanged, so this is safe to
+// use unconditionally wherever bcl.TypeFullNameOf was used directly
+// before. Found via a real, load-bearing case (Fase 3.52): Dapper's own
+// SqlMapper static constructor reflects over
+// TypeHandlerCache<DataTable>/<XmlDocument>/<XDocument>/<XElement> (a
+// closed generic obtained via Type.MakeGenericType) to cache each one's
+// own SetHandler method — GetMethod silently returning null there (this
+// bug, unfixed) crashes the cctor the instant Dapper.SqlMapper is
+// touched at all, before a single real query runs.
+func typeFullNameOfOpen(v runtime.Value) (string, bool) {
+	name, ok := bcl.TypeFullNameOf(v)
+	if !ok {
+		return "", false
+	}
+	return bcl.GenericOpenName(name), true
+}
+
 // typeGetBaseType matches real Type.BaseType semantics for the three
 // shapes vmnet can classify: an interface or System.Object itself has no
 // base (null); a struct/enum's implicit base is System.ValueType/
@@ -552,7 +593,7 @@ func typeGetConstructor(m *Machine, args []runtime.Value, depth int, instrCount 
 	if len(args) != 2 {
 		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetConstructor expects (this, Type[])")
 	}
-	typeFullName, ok := bcl.TypeFullNameOf(args[0])
+	typeFullName, ok := typeFullNameOfOpen(args[0])
 	if !ok {
 		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetConstructor receiver is not a Type")
 	}
@@ -569,22 +610,111 @@ func typeGetConstructor(m *Machine, args []runtime.Value, depth int, instrCount 
 	return bcl.NewConstructorInfoValue(typeFullName), nil
 }
 
-// typeGetMethod backs both Type.GetMethod(string name, Type[]
-// parameterTypes) and the simpler Type.GetMethod(string name) overload
-// (2 args here, no Type[] at all — found via a real, common pattern: a
-// generic method like `T Identity<T>(T)`, whose MakeGenericMethod call
-// site has no way to spell out a still-open T in a Type[] up front, so
-// real code always looks it up by bare name first, exactly as this
-// overload's own real signature suggests). paramNames stays nil for this
-// shape — a real Go nil, not just an empty slice — which resolveMember
+// typeGetConstructors backs Type.GetConstructors() (Fase 3.52, plural,
+// no signature argument) — every real .ctor overload typeFullName
+// declares, each wrapped as its own ConstructorInfo. Empty (not an
+// error) for a BCL type vmnet has no TypeDef for, or a type with only
+// the compiler-synthesized default constructor (no real MethodDef row
+// to enumerate) — matching GetInterfaces/GetProperties' own "no
+// metadata, no results" convention.
+func typeGetConstructors(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetConstructors expects a receiver")
+	}
+	typeFullName, ok := typeFullNameOfOpen(args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetConstructors receiver is not a Type")
+	}
+	if m.ResolveMemberParams == nil {
+		return runtime.ArrRef(runtime.NewArray(0)), nil
+	}
+	paramTypes, _, ok := m.ResolveMemberParams(typeFullName, ".ctor")
+	if !ok {
+		return runtime.ArrRef(runtime.NewArray(0)), nil
+	}
+	// Each ConstructorInfo remembers WHICH overload (its own index into
+	// this same ResolveMemberParams(typeFullName, ".ctor") result) it
+	// names — methodBaseGetParameters re-resolves against that exact
+	// index rather than anything captured here, so a later mutation of
+	// the underlying metadata view (there isn't one in practice, but the
+	// two call sites deliberately stay independent) can't disagree.
+	elems := make([]runtime.Value, len(paramTypes))
+	for i := range paramTypes {
+		elems[i] = bcl.NewConstructorInfoValueAt(typeFullName, i)
+	}
+	return runtime.ArrRef(&runtime.Array{Elems: elems}), nil
+}
+
+// methodBaseGetParameters backs MethodBase.GetParameters() for both
+// ConstructorInfo and MethodInfo receivers (Fase 3.52) — re-resolves the
+// receiver's own real parameter list via Machine.ResolveMemberParams
+// rather than something captured at GetConstructor(s)/GetMethod time, so
+// no extra state needs to ride along on the wrapper beyond a plain
+// overload index. A ConstructorInfo from Type.GetConstructors() carries
+// its own real overloadIndex (bcl.ConstructorInfoParts), so each element
+// of that array answers with ITS OWN parameters, not just the first
+// one's. A MethodInfo has no such index (Type.GetMethod only ever
+// resolves a single method by name, never enumerates same-named
+// overloads — Type.GetMethods() plural isn't implemented at all, see
+// docs/en/ROADMAP.md), so it always answers with the first overload
+// found — the same "first match, no signature to disambiguate against"
+// posture typeGetMethod's own 2-arg (name-only) shape already documents
+// accepting.
+func methodBaseGetParameters(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("interpreter: MethodBase.GetParameters expects a receiver")
+	}
+	var typeFullName, memberName string
+	overloadIndex := 0
+	if tfn, idx, ok := bcl.ConstructorInfoParts(args[0]); ok {
+		typeFullName, memberName, overloadIndex = tfn, ".ctor", idx
+	} else if tfn, mn, ok := bcl.MethodInfoParts(args[0]); ok {
+		typeFullName, memberName = tfn, mn
+	} else {
+		return runtime.Value{}, fmt.Errorf("interpreter: MethodBase.GetParameters receiver is not a ConstructorInfo or MethodInfo")
+	}
+	if m.ResolveMemberParams == nil {
+		return runtime.ArrRef(runtime.NewArray(0)), nil
+	}
+	paramTypes, paramNames, ok := m.ResolveMemberParams(typeFullName, memberName)
+	if !ok || overloadIndex >= len(paramTypes) {
+		return runtime.ArrRef(runtime.NewArray(0)), nil
+	}
+	types, names := paramTypes[overloadIndex], paramNames[overloadIndex]
+	elems := make([]runtime.Value, len(types))
+	for i := range types {
+		elems[i] = bcl.NewParameterInfoValue(types[i], names[i], i)
+	}
+	return runtime.ArrRef(&runtime.Array{Elems: elems}), nil
+}
+
+// typeGetMethod backs every real Type.GetMethod overload sharing the
+// (string name, ...) shape: the simple GetMethod(name) (found via a real,
+// common pattern: a generic method like `T Identity<T>(T)`, whose
+// MakeGenericMethod call site has no way to spell out a still-open T in
+// a Type[] up front, so real code always looks it up by bare name
+// first), GetMethod(name, Type[]), GetMethod(name, BindingFlags), and
+// GetMethod(name, BindingFlags, Binder, Type[], ParameterModifier[])
+// (Fase 3.52, found via Dapper's own SqlMapper static ctor, which uses
+// exactly this 5-argument overload through its own GetPublicInstanceMethod
+// helper). Real .NET overloads this on ARITY, but every one of them past
+// the bare name takes its own mix of BindingFlags/Binder/
+// ParameterModifier[] arguments that are never a Type[] — rather than
+// hardcoding which positional argument index holds the signature for
+// each shape, this scans every argument after the name for the first
+// real Type[] (bcl.TypeArrayToFullNames succeeds only for an actual
+// Type[], returning an error for anything else, which this treats as
+// "not this argument" rather than a hard failure). paramNames stays nil
+// when no Type[] argument is found at all (matching by name only) — a
+// real Go nil, not just an empty slice — which resolveMember
 // (assembly.go) treats as "match by name only, any signature" rather
 // than "match a zero-parameter method": see its own doc comment for why
 // that distinction matters here specifically.
 func typeGetMethod(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
-	if len(args) != 2 && len(args) != 3 {
-		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetMethod expects (this, name[, Type[]])")
+	if len(args) < 2 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetMethod expects (this, name, ...)")
 	}
-	typeFullName, ok := bcl.TypeFullNameOf(args[0])
+	typeFullName, ok := typeFullNameOfOpen(args[0])
 	if !ok {
 		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetMethod receiver is not a Type")
 	}
@@ -593,11 +723,13 @@ func typeGetMethod(m *Machine, args []runtime.Value, depth int, instrCount *int6
 	}
 	methodName := args[1].Str
 	var paramNames []string
-	if len(args) == 3 {
-		var err error
-		paramNames, err = bcl.TypeArrayToFullNames(args[2])
-		if err != nil {
-			return runtime.Value{}, err
+	for _, a := range args[2:] {
+		if a.Kind != runtime.KindArray {
+			continue
+		}
+		if names, err := bcl.TypeArrayToFullNames(a); err == nil {
+			paramNames = names
+			break
 		}
 	}
 	if m.ResolveMember == nil {
@@ -616,7 +748,7 @@ func typeGetField(m *Machine, args []runtime.Value, depth int, instrCount *int64
 	if len(args) != 2 {
 		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetField expects (this, name)")
 	}
-	typeFullName, ok := bcl.TypeFullNameOf(args[0])
+	typeFullName, ok := typeFullNameOfOpen(args[0])
 	if !ok {
 		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetField receiver is not a Type")
 	}
@@ -730,45 +862,111 @@ func fieldInfoGetValue(m *Machine, args []runtime.Value, depth int, instrCount *
 // Empty (not an error) for a BCL type vmnet has no TypeDef for at all,
 // matching GetInterfaces' own "no metadata, no results" convention.
 func typeGetProperties(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
-	if len(args) != 1 {
+	if len(args) < 1 {
 		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetProperties expects a receiver")
 	}
-	typeFullName, ok := bcl.TypeFullNameOf(args[0])
+	typeFullName, ok := typeFullNameOfOpen(args[0])
 	if !ok {
 		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetProperties receiver is not a Type")
 	}
-	if m.ResolveProperties == nil {
-		return runtime.ArrRef(runtime.NewArray(0)), nil
+	var names []string
+	var canRead, canWrite []bool
+	var propTypes []string
+	if m.ResolveProperties != nil {
+		names, canRead, canWrite, propTypes, _ = m.ResolveProperties(typeFullName)
 	}
-	names, canRead, canWrite, _ := m.ResolveProperties(typeFullName)
+	if len(names) == 0 {
+		return runtime.ArrRef(&runtime.Array{Elems: wellKnownBclPropertyInfos(typeFullName)}), nil
+	}
 	elems := make([]runtime.Value, len(names))
 	for i, name := range names {
-		elems[i] = bcl.NewPropertyInfoValue(typeFullName, name, canRead[i], canWrite[i])
+		elems[i] = bcl.NewPropertyInfoValue(typeFullName, name, canRead[i], canWrite[i], propTypes[i])
 	}
 	return runtime.ArrRef(&runtime.Array{Elems: elems}), nil
 }
 
-// typeGetProperty backs Type.GetProperty(string name) — null (not an
-// error) for an unresolvable type OR a real property name it doesn't
-// declare, matching real Type.GetProperty's own "no match" contract.
-func typeGetProperty(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
-	if len(args) != 2 {
-		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetProperty expects (this, name)")
+// wellKnownBclProperties is a narrow, hand-maintained fallback for the
+// handful of real BCL/framework properties found via a real, load-
+// bearing case: Dapper's own SqlMapper static constructor (which runs
+// unconditionally the instant ANY SqlMapper method is first touched —
+// C#'s own guarantee for a type's .cctor, not something a caller can
+// route around) reflects over CultureInfo.InvariantCulture and
+// DbDataReader's real `this[int]` indexer purely to cache their
+// MethodInfo for later use. vmnet has no BCL metadata database at all —
+// same limitation bclKnownInterfaces/typeCodes above already document —
+// so Type.GetProperty(ies) can never find these through the normal
+// TypeDef path the way it does for a plugin's own declared properties,
+// and unlike most such gaps (which just mean a missing feature), THIS
+// one is fatal: `.GetGetMethod()` called on the real .NET behavior's
+// non-null PropertyInfo, but vmnet's Null(), throws a
+// NullReferenceException the instant Dapper.SqlMapper is loaded at all
+// — before a single real query ever runs. Not a general BCL reflection
+// database (deliberately narrow, same posture as every other "hardcoded
+// knowledge for a specific well-known case" fallback in this codebase) —
+// just enough for this one specific, common failure mode.
+var wellKnownBclProperties = map[string][]struct {
+	name              string
+	canRead, canWrite bool
+	propertyType      string
+	indexParamType    string // "" for an ordinary (non-indexer) property
+}{
+	"System.Globalization.CultureInfo": {
+		{name: "InvariantCulture", canRead: true, propertyType: "System.Globalization.CultureInfo"},
+	},
+	"System.Data.Common.DbDataReader": {
+		{name: "Item", canRead: true, propertyType: "System.Object", indexParamType: "System.Int32"},
+	},
+}
+
+func wellKnownBclPropertyInfos(typeFullName string) []runtime.Value {
+	entries := wellKnownBclProperties[bcl.GenericOpenName(typeFullName)]
+	elems := make([]runtime.Value, len(entries))
+	for i, e := range entries {
+		if e.indexParamType != "" {
+			elems[i] = bcl.NewIndexerPropertyInfoValue(typeFullName, e.name, e.canRead, e.canWrite, e.propertyType, []string{e.indexParamType})
+		} else {
+			elems[i] = bcl.NewPropertyInfoValue(typeFullName, e.name, e.canRead, e.canWrite, e.propertyType)
+		}
 	}
-	typeFullName, ok := bcl.TypeFullNameOf(args[0])
+	return elems
+}
+
+// typeGetProperty backs Type.GetProperty(string name) plus the
+// BindingFlags-taking overloads sharing the same (name, ...) shape
+// (Fase 3.52, found via Dapper's own SqlMapper static ctor:
+// typeof(CultureInfo).GetProperty("InvariantCulture", BindingFlags.
+// Static | BindingFlags.Public)) — any trailing arguments (BindingFlags,
+// a Binder, a Type[] for an indexer signature, ...) are accepted and
+// ignored, matched by name only, the same posture typeGetMethod's own
+// no-Type[]-found fallback already takes for the equivalent GetMethod
+// overloads. Null (not an error) for an unresolvable type OR a real
+// property name it doesn't declare, matching real Type.GetProperty's own
+// "no match" contract.
+func typeGetProperty(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) < 2 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetProperty expects (this, name, ...)")
+	}
+	typeFullName, ok := typeFullNameOfOpen(args[0])
 	if !ok {
 		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetProperty receiver is not a Type")
 	}
 	if args[1].Kind != runtime.KindString {
 		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetProperty expects a string name")
 	}
-	if m.ResolveProperties == nil {
-		return runtime.Null(), nil
+	var names []string
+	var canRead, canWrite []bool
+	var propTypes []string
+	if m.ResolveProperties != nil {
+		names, canRead, canWrite, propTypes, _ = m.ResolveProperties(typeFullName)
 	}
-	names, canRead, canWrite, _ := m.ResolveProperties(typeFullName)
 	for i, name := range names {
 		if name == args[1].Str {
-			return bcl.NewPropertyInfoValue(typeFullName, name, canRead[i], canWrite[i]), nil
+			return bcl.NewPropertyInfoValue(typeFullName, name, canRead[i], canWrite[i], propTypes[i]), nil
+		}
+	}
+	for _, v := range wellKnownBclPropertyInfos(typeFullName) {
+		if tfn, pn, _, _, ok := bcl.PropertyInfoParts(v); ok && tfn == typeFullName && pn == args[1].Str {
+			return v, nil
 		}
 	}
 	return runtime.Null(), nil

@@ -19,8 +19,22 @@ import (
 // Machine access to actually resolve/invoke); this file only holds the
 // plain data each wrapper carries.
 
+// nativeConstructorInfo's overloadIndex (Fase 3.52) picks out WHICH real
+// .ctor overload this particular wrapper names, among however many
+// resolveMemberParams(typeFullName, ".ctor") finds — needed once
+// Type.GetConstructors() (plural) can hand out more than one distinct
+// ConstructorInfo for the same type: without it, every element of that
+// array would look identical and GetParameters() on any of them would
+// answer with the same (first) overload's parameters regardless of
+// which one the caller actually meant. 0 for a ConstructorInfo obtained
+// via the singular Type.GetConstructor(Type[]) overload — "the one
+// overload matching this exact signature", which existence was already
+// confirmed against via Machine.ResolveMember at that call site,
+// defaults to "first/only" the same way typeGetMethod's own 2-arg
+// (name-only) shape already does.
 type nativeConstructorInfo struct {
-	typeFullName string
+	typeFullName  string
+	overloadIndex int
 }
 
 type nativeMethodInfo struct {
@@ -42,6 +56,17 @@ type nativeFieldInfo struct {
 	fieldName    string
 }
 
+// nativeParameterInfo backs System.Reflection.ParameterInfo (Fase 3.52,
+// MethodBase.GetParameters) — plain data captured once, at GetParameters
+// time, off the real Param/MethodSig metadata (assembly.go's
+// resolveMemberParams); every ParameterInfo member here is a pure
+// read of one of these three fields, needing no further Machine access.
+type nativeParameterInfo struct {
+	paramTypeFullName string
+	name              string
+	position          int
+}
+
 // nativePropertyInfo backs System.Reflection.PropertyInfo (Fase 3.51,
 // Type.GetProperties/GetProperty) — canRead/canWrite come from the real
 // get_Xxx/set_Xxx MethodDef linkage (assembly.go's resolveProperties),
@@ -49,17 +74,52 @@ type nativeFieldInfo struct {
 // CanRead/CanWrite correctly and GetValue/SetValue can reject the
 // unsupported direction with a real error instead of an opaque "method
 // not found" from whatever m.call attempt would otherwise fail deep
-// inside.
+// inside. propertyTypeFullName (Fase 3.52) backs PropertyType —
+// Dapper's own reflection-based row-to-object mapper (SqlMapper's
+// CreateParamInfoGenerator/GetSettableProps) reads it to pick a coercion
+// path per column before ever calling GetValue/SetValue.
 type nativePropertyInfo struct {
-	typeFullName      string
-	propertyName      string
-	canRead, canWrite bool
+	typeFullName         string
+	propertyName         string
+	canRead, canWrite    bool
+	propertyTypeFullName string
+	// indexParamTypes is non-empty only for the narrow well-known-BCL-
+	// indexer fallback (Fase 3.52, internal/interpreter/reflection.go's
+	// wellKnownBclProperties — e.g. DbDataReader's real `this[int]`) —
+	// every ordinary PropertyInfo from Type.GetProperties/GetProperty
+	// against a real plugin TypeDef leaves this nil (vmnet's own
+	// reflection here never models a plugin's own indexer specifically,
+	// see propertyInfoGetIndexParameters' own doc comment).
+	indexParamTypes []string
 }
 
 func init() {
 	register("System.Reflection.PropertyInfo::get_Name", true, propertyInfoGetName)
 	register("System.Reflection.PropertyInfo::get_CanRead", true, propertyInfoGetCanRead)
 	register("System.Reflection.PropertyInfo::get_CanWrite", true, propertyInfoGetCanWrite)
+	register("System.Reflection.PropertyInfo::get_PropertyType", true, propertyInfoGetPropertyType)
+	// GetGetMethod/GetSetMethod (Fase 3.52) accept both the parameterless
+	// overload and the (bool nonPublic) one — vmnet has no visibility
+	// model for reflection at all (see PropertyInfoParts' own doc
+	// comment), so both shapes answer identically: null when that
+	// accessor doesn't exist, the accessor's own MethodInfo otherwise,
+	// regardless of whether nonPublic was requested.
+	register("System.Reflection.PropertyInfo::GetGetMethod", true, propertyInfoGetGetMethod)
+	register("System.Reflection.PropertyInfo::GetSetMethod", true, propertyInfoGetSetMethod)
+	// GetIndexParameters: real reflection returns the indexer's own index
+	// parameters (`this[int i]`), empty for an ordinary property — every
+	// PropertyInfo backed by a real plugin TypeDef (Type.GetProperties/
+	// GetProperty, assembly.go's resolveProperties) comes from a plain
+	// Property row with a get_Xxx/set_Xxx taking no extra index
+	// parameters (an indexer would need one), so those always answer
+	// empty here — real code checking `GetIndexParameters().Length == 0`
+	// to skip indexers (a common pattern in exactly the ORM/serializer
+	// code this whole reflection subsystem targets) sees the correct
+	// answer. The one exception is the narrow well-known-BCL-property
+	// fallback (wellKnownBclProperties, internal/interpreter/
+	// reflection.go) for a real framework indexer like DbDataReader's
+	// `this[int]` — those carry real indexParamTypes.
+	register("System.Reflection.PropertyInfo::GetIndexParameters", true, propertyInfoGetIndexParameters)
 	// MakeGenericMethod(Type[] typeArguments) needs no Machine access at
 	// all — unlike Invoke (which actually has to run the target method),
 	// this just stamps the real closed type-argument names onto a NEW
@@ -67,6 +127,13 @@ func init() {
 	// receiver), so it's a plain bcl.Native rather than a machineRegistry
 	// entry like every other MethodInfo/PropertyInfo member here.
 	register("System.Reflection.MethodInfo::MakeGenericMethod", true, methodInfoMakeGenericMethod)
+	// ParameterInfo (Fase 3.52, MethodBase.GetParameters) — plain reads
+	// off nativeParameterInfo's own captured fields, no Machine access
+	// needed (the resolving work already happened in
+	// internal/interpreter/reflection.go's methodBaseGetParameters).
+	register("System.Reflection.ParameterInfo::get_ParameterType", true, parameterInfoGetParameterType)
+	register("System.Reflection.ParameterInfo::get_Name", true, parameterInfoGetName)
+	register("System.Reflection.ParameterInfo::get_Position", true, parameterInfoGetPosition)
 }
 
 func methodInfoMakeGenericMethod(args []runtime.Value) (runtime.Value, error) {
@@ -134,12 +201,125 @@ func propertyInfoGetCanWrite(args []runtime.Value) (runtime.Value, error) {
 	return runtime.Bool(pi.canWrite), nil
 }
 
+func propertyInfoGetPropertyType(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: PropertyInfo.PropertyType expects a receiver")
+	}
+	pi, ok := nativeOf[*nativePropertyInfo](args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: PropertyInfo.PropertyType receiver is not a PropertyInfo")
+	}
+	if pi.propertyTypeFullName == "" {
+		return runtime.Null(), nil
+	}
+	return NewTypeValue(pi.propertyTypeFullName), nil
+}
+
+// propertyInfoGetGetMethod/propertyInfoGetSetMethod build the accessor's
+// own MethodInfo directly from the stored typeFullName/propertyName —
+// no Machine access needed (unlike methodInfoInvoke, nothing is actually
+// called here), so these stay plain bcl.Native like every other
+// PropertyInfo member above.
+func propertyInfoGetGetMethod(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: PropertyInfo.GetGetMethod expects a receiver")
+	}
+	pi, ok := nativeOf[*nativePropertyInfo](args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: PropertyInfo.GetGetMethod receiver is not a PropertyInfo")
+	}
+	if !pi.canRead {
+		return runtime.Null(), nil
+	}
+	return NewMethodInfoValue(pi.typeFullName, "get_"+pi.propertyName), nil
+}
+
+func propertyInfoGetSetMethod(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: PropertyInfo.GetSetMethod expects a receiver")
+	}
+	pi, ok := nativeOf[*nativePropertyInfo](args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: PropertyInfo.GetSetMethod receiver is not a PropertyInfo")
+	}
+	if !pi.canWrite {
+		return runtime.Null(), nil
+	}
+	return NewMethodInfoValue(pi.typeFullName, "set_"+pi.propertyName), nil
+}
+
+func propertyInfoGetIndexParameters(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: PropertyInfo.GetIndexParameters expects a receiver")
+	}
+	pi, ok := nativeOf[*nativePropertyInfo](args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: PropertyInfo.GetIndexParameters receiver is not a PropertyInfo")
+	}
+	elems := make([]runtime.Value, len(pi.indexParamTypes))
+	for i, t := range pi.indexParamTypes {
+		elems[i] = NewParameterInfoValue(t, fmt.Sprintf("index%d", i), i)
+	}
+	return runtime.ArrRef(&runtime.Array{Elems: elems}), nil
+}
+
+// NewParameterInfoValue builds a System.Reflection.ParameterInfo wrapper
+// — called from internal/interpreter/reflection.go's Machine-aware
+// methodBaseGetParameters.
+func NewParameterInfoValue(paramTypeFullName, name string, position int) runtime.Value {
+	return runtime.ObjRef(&runtime.Object{Native: &nativeParameterInfo{
+		paramTypeFullName: paramTypeFullName,
+		name:              name,
+		position:          position,
+	}})
+}
+
+func parameterInfoGetParameterType(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: ParameterInfo.ParameterType expects a receiver")
+	}
+	pi, ok := nativeOf[*nativeParameterInfo](args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: ParameterInfo.ParameterType receiver is not a ParameterInfo")
+	}
+	return NewTypeValue(pi.paramTypeFullName), nil
+}
+
+func parameterInfoGetName(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: ParameterInfo.Name expects a receiver")
+	}
+	pi, ok := nativeOf[*nativeParameterInfo](args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: ParameterInfo.Name receiver is not a ParameterInfo")
+	}
+	return runtime.String(pi.name), nil
+}
+
+func parameterInfoGetPosition(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: ParameterInfo.Position expects a receiver")
+	}
+	pi, ok := nativeOf[*nativeParameterInfo](args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: ParameterInfo.Position receiver is not a ParameterInfo")
+	}
+	return runtime.Int32(int32(pi.position)), nil
+}
+
 // NewConstructorInfoValue/NewMethodInfoValue/NewFieldInfoValue build the
 // respective System.Reflection wrapper values — called from
 // internal/interpreter/reflection.go's Machine-aware
 // GetConstructor/GetMethod/GetField natives.
 func NewConstructorInfoValue(typeFullName string) runtime.Value {
 	return runtime.ObjRef(&runtime.Object{Native: &nativeConstructorInfo{typeFullName: typeFullName}})
+}
+
+// NewConstructorInfoValueAt builds a ConstructorInfo tagged with WHICH
+// real .ctor overload it names (Fase 3.52, Type.GetConstructors — see
+// nativeConstructorInfo.overloadIndex's own doc comment).
+func NewConstructorInfoValueAt(typeFullName string, overloadIndex int) runtime.Value {
+	return runtime.ObjRef(&runtime.Object{Native: &nativeConstructorInfo{typeFullName: typeFullName, overloadIndex: overloadIndex}})
 }
 
 func NewMethodInfoValue(typeFullName, methodName string) runtime.Value {
@@ -153,12 +333,29 @@ func NewFieldInfoValue(typeFullName, fieldName string) runtime.Value {
 // NewPropertyInfoValue builds a System.Reflection.PropertyInfo wrapper —
 // called from internal/interpreter/reflection.go's Machine-aware
 // GetProperties/GetProperty natives.
-func NewPropertyInfoValue(typeFullName, propertyName string, canRead, canWrite bool) runtime.Value {
+func NewPropertyInfoValue(typeFullName, propertyName string, canRead, canWrite bool, propertyTypeFullName string) runtime.Value {
 	return runtime.ObjRef(&runtime.Object{Native: &nativePropertyInfo{
-		typeFullName: typeFullName,
-		propertyName: propertyName,
-		canRead:      canRead,
-		canWrite:     canWrite,
+		typeFullName:         typeFullName,
+		propertyName:         propertyName,
+		canRead:              canRead,
+		canWrite:             canWrite,
+		propertyTypeFullName: propertyTypeFullName,
+	}})
+}
+
+// NewIndexerPropertyInfoValue is NewPropertyInfoValue plus indexParamTypes
+// — called only from the narrow well-known-BCL-property fallback
+// (internal/interpreter/reflection.go's wellKnownBclProperties) for a
+// real framework indexer (e.g. DbDataReader's `this[int]`) vmnet has no
+// TypeDef to read a real Property row's accessor signature from.
+func NewIndexerPropertyInfoValue(typeFullName, propertyName string, canRead, canWrite bool, propertyTypeFullName string, indexParamTypes []string) runtime.Value {
+	return runtime.ObjRef(&runtime.Object{Native: &nativePropertyInfo{
+		typeFullName:         typeFullName,
+		propertyName:         propertyName,
+		canRead:              canRead,
+		canWrite:             canWrite,
+		propertyTypeFullName: propertyTypeFullName,
+		indexParamTypes:      indexParamTypes,
 	}})
 }
 
@@ -173,6 +370,18 @@ func ConstructorInfoTypeFullName(v runtime.Value) (string, bool) {
 		return "", false
 	}
 	return ci.typeFullName, true
+}
+
+// ConstructorInfoParts is ConstructorInfoTypeFullName plus overloadIndex
+// (Fase 3.52) — used by internal/interpreter/reflection.go's
+// methodBaseGetParameters to find the exact overload this wrapper names
+// among Type.GetConstructors()'s possibly-several real .ctor overloads.
+func ConstructorInfoParts(v runtime.Value) (typeFullName string, overloadIndex int, ok bool) {
+	ci, ok := nativeOf[*nativeConstructorInfo](v)
+	if !ok {
+		return "", 0, false
+	}
+	return ci.typeFullName, ci.overloadIndex, true
 }
 
 func MethodInfoParts(v runtime.Value) (typeFullName, methodName string, ok bool) {

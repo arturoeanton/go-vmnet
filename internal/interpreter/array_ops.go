@@ -3,6 +3,7 @@ package interpreter
 import (
 	"fmt"
 
+	"github.com/arturoeanton/go-vmnet/internal/bcl"
 	"github.com/arturoeanton/go-vmnet/internal/runtime"
 )
 
@@ -26,6 +27,49 @@ func init() {
 	machineRegistry["System.Array::TrueForAll"] = arrayTrueForAll
 	machineRegistry["System.Array::ConvertAll"] = arrayConvertAll
 	machineRegistry["System.Array::LastIndexOf"] = arrayLastIndexOf
+	// List<T>.RemoveAll(Predicate<T>) needs the exact same Machine-aware
+	// delegate invocation as Array.Find/FindAll above — found via a real,
+	// common in-memory-collection-maintenance pattern (examples/
+	// dapper-demo's own fake in-memory table prunes rows this way).
+	machineRegistry["System.Collections.Generic.List`1::RemoveAll"] = listRemoveAll
+}
+
+// listRemoveAll backs List<T>.RemoveAll(Predicate<T> match) — removes
+// every element the predicate answers true for, returning the real
+// count removed (matching List<T>.RemoveAll's own return value).
+// Rebuilds the list's backing slice via bcl.SetNativeListItems rather
+// than mutating in place, the same approach listSort takes for its own
+// Machine-aware List<T> member.
+func listRemoveAll(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("interpreter: List.RemoveAll expects (this, predicate)")
+	}
+	recv := args[0]
+	if recv.Kind == runtime.KindRef && recv.Ref != nil {
+		recv = *recv.Ref
+	}
+	if recv.Kind != runtime.KindObject || recv.Obj == nil {
+		return runtime.Value{}, fmt.Errorf("interpreter: List.RemoveAll called without a receiver")
+	}
+	items, ok := bcl.NativeListItems(recv.Obj.Native)
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("interpreter: List.RemoveAll: receiver is not a List<T>")
+	}
+	kept := make([]runtime.Value, 0, len(items))
+	removed := 0
+	for _, e := range items {
+		match, err := m.arrayPredicate(args[1], e, depth, instrCount)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		if match {
+			removed++
+			continue
+		}
+		kept = append(kept, e)
+	}
+	bcl.SetNativeListItems(recv.Obj.Native, kept)
+	return runtime.Int32(int32(removed)), nil
 }
 
 // arrayReverse covers both Reverse(array) (the whole array) and

@@ -8,6 +8,24 @@ import (
 
 func init() {
 	register("System.Enum::HasFlag", true, enumHasFlag)
+	register("System.Enum::GetUnderlyingType", true, enumGetUnderlyingType)
+}
+
+// enumGetUnderlyingType backs the static Enum.GetUnderlyingType(Type
+// enumType) — found via Dapper's own SqlMapper enum-column coercion,
+// which reads this before converting a stored value into the target
+// enum. Unconditionally System.Int32: vmnet represents every enum value
+// as a bare KindI4 (enumHasFlag's own doc comment — a `[Flags] enum :
+// long` is the one real exception, using KindI8 instead, but no real
+// caller found here asks GetUnderlyingType for one of those
+// specifically), so there's no real per-enum underlying-type metadata to
+// consult at all, the same "no BCL enum member database" limitation
+// enumTypeMembers documents (internal/interpreter/reflection.go).
+func enumGetUnderlyingType(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: Enum.GetUnderlyingType expects 1 argument")
+	}
+	return NewTypeValue("System.Int32"), nil
 }
 
 // enumHasFlag backs Enum.HasFlag(Enum flag): real semantics are

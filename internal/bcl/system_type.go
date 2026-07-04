@@ -50,6 +50,14 @@ func init() {
 	register("System.Type::get_IsGenericType", true, typeGetIsGenericType)
 	register("System.Type::GetGenericTypeDefinition", true, typeGetGenericTypeDefinition)
 	register("System.Type::GetGenericArguments", true, typeGetGenericArguments)
+	// Type.IsArray (Fase 3.52, found via Dapper's own SqlMapper column-
+	// type coercion) — pure string manipulation over FullName's own
+	// "Elem[]" array encoding (ir/builder.go's SigTypeFullName), same
+	// posture as the generics accessors just above: no Machine access
+	// needed at all, unlike get_IsValueType/IsEnum/IsInterface (which
+	// need a plugin type's real TypeDef flags).
+	register("System.Type::get_IsArray", true, typeGetIsArray)
+	register("System.Type::GetElementType", true, typeGetElementType)
 	register("System.Type::MakeGenericType", true, typeMakeGenericType)
 	register("System.Nullable::GetUnderlyingType", true, nullableGetUnderlyingType)
 
@@ -71,6 +79,7 @@ func init() {
 	// own internal SpanHelpers+PerTypeValues`1..cctor, reached just from
 	// ClosedXML's own real ReadOnlySpan<byte> use of embedded font data.
 	register("System.Reflection.IntrospectionExtensions::GetTypeInfo", true, typeInfoIdentity)
+	register("System.Type::GetTypeCode", true, typeGetTypeCode)
 }
 
 func typeInfoIdentity(args []runtime.Value) (runtime.Value, error) {
@@ -78,6 +87,52 @@ func typeInfoIdentity(args []runtime.Value) (runtime.Value, error) {
 		return runtime.Value{}, fmt.Errorf("bcl: IntrospectionExtensions.GetTypeInfo expects 1 argument")
 	}
 	return args[0], nil
+}
+
+// typeCodes maps a primitive/well-known BCL type's FullName to its real
+// Type.GetTypeCode(Type) answer (the System.TypeCode enum's own fixed
+// ordinals, stable since .NET 1.0) — found via Dapper's own SqlMapper
+// column-type coercion, which switches on GetTypeCode rather than
+// comparing Type instances directly for exactly this common primitive
+// set. Any type not listed here (every plugin class, and every BCL type
+// this package doesn't special-case) answers TypeCode.Object (1),
+// matching real GetTypeCode's own default for a reference type with no
+// IConvertible-backed mapping.
+var typeCodes = map[string]int32{
+	"System.Boolean":  3,
+	"System.Char":     4,
+	"System.SByte":    5,
+	"System.Byte":     6,
+	"System.Int16":    7,
+	"System.UInt16":   8,
+	"System.Int32":    9,
+	"System.UInt32":   10,
+	"System.Int64":    11,
+	"System.UInt64":   12,
+	"System.Single":   13,
+	"System.Double":   14,
+	"System.Decimal":  15,
+	"System.DateTime": 16,
+	"System.String":   18,
+}
+
+// typeGetTypeCode backs the static Type.GetTypeCode(Type type) —
+// TypeCode.Empty (0) for a null Type argument, matching real semantics.
+func typeGetTypeCode(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: Type.GetTypeCode expects 1 argument")
+	}
+	if args[0].Kind == runtime.KindNull {
+		return runtime.Int32(0), nil
+	}
+	fullName, ok := TypeFullNameOf(args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: Type.GetTypeCode expects a Type argument")
+	}
+	if code, ok := typeCodes[GenericOpenName(fullName)]; ok {
+		return runtime.Int32(code), nil
+	}
+	return runtime.Int32(1), nil
 }
 
 // nativeAssembly is a stub System.Reflection.Assembly — vmnet has no real
@@ -166,6 +221,29 @@ func typeGetIsGenericType(args []runtime.Value) (runtime.Value, error) {
 		return runtime.Value{}, err
 	}
 	return runtime.Bool(isGenericTypeName(ti.FullName)), nil
+}
+
+// typeGetIsArray/typeGetElementType back Type.IsArray/GetElementType —
+// an array type's FullName is always "Elem[]" (SigTypeFullName's own
+// array encoding), so both are plain suffix manipulation, no Machine
+// access needed.
+func typeGetIsArray(args []runtime.Value) (runtime.Value, error) {
+	ti, err := asTypeInfo(args[0])
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	return runtime.Bool(strings.HasSuffix(ti.FullName, "[]")), nil
+}
+
+func typeGetElementType(args []runtime.Value) (runtime.Value, error) {
+	ti, err := asTypeInfo(args[0])
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	if !strings.HasSuffix(ti.FullName, "[]") {
+		return runtime.Null(), nil
+	}
+	return NewTypeValue(strings.TrimSuffix(ti.FullName, "[]")), nil
 }
 
 func typeGetGenericTypeDefinition(args []runtime.Value) (runtime.Value, error) {

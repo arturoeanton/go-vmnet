@@ -17,6 +17,64 @@ func init() {
 	register("System.Array::Clone", true, arrayClone)
 	register("System.Array::get_Length", true, arrayGetLength)
 	register("System.Array::GetLength", true, arrayGetLengthDim)
+	// Non-generic Array reflection (Fase 3.52) — SetValue/GetValue/
+	// CreateInstance are the shape a reflection-driven caller (working
+	// against a bare System.Array, no compile-time element type at all)
+	// uses instead of ordinary ldelem/stelem/newarr; found via Dapper's
+	// own SqlMapper array-parameter expansion for a SQL `IN (...)`
+	// clause. GetValue/SetValue only cover the single-index overload (no
+	// real caller found here needing a multi-dimensional Array's
+	// int[]-indices form).
+	register("System.Array::CreateInstance", true, arrayCreateInstance)
+	register("System.Array::GetValue", true, arrayGetValue)
+	register("System.Array::SetValue", true, arraySetValue)
+}
+
+// arrayCreateInstance backs Array.CreateInstance(Type elementType, int
+// length) — every element defaults to Null() regardless of elementType:
+// vmnet's Value model has no generic "zero value for this arbitrary
+// Type" constructor outside a real plugin TypeDef (assembly.go's own
+// newObj already needs a resolvable Type for that), and every real
+// caller found here only ever populates the array immediately after
+// creating it (via SetValue), never reads an un-set slot back first.
+func arrayCreateInstance(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 2 || args[1].Kind != runtime.KindI4 {
+		return runtime.Value{}, fmt.Errorf("bcl: Array.CreateInstance expects (Type, int length)")
+	}
+	n := int(args[1].I4)
+	if n < 0 {
+		return runtime.Value{}, &runtime.ManagedException{TypeName: "System.ArgumentOutOfRangeException", Message: "length"}
+	}
+	elems := make([]runtime.Value, n)
+	for i := range elems {
+		elems[i] = runtime.Null()
+	}
+	return runtime.ArrRef(&runtime.Array{Elems: elems}), nil
+}
+
+// arrayGetValue/arraySetValue back the single-index Array.GetValue(int)/
+// SetValue(object, int) reflection overloads.
+func arrayGetValue(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 2 || args[0].Kind != runtime.KindArray || args[0].Arr == nil || args[1].Kind != runtime.KindI4 {
+		return runtime.Value{}, fmt.Errorf("bcl: Array.GetValue expects (array, int index)")
+	}
+	idx := int(args[1].I4)
+	if idx < 0 || idx >= len(args[0].Arr.Elems) {
+		return runtime.Value{}, &runtime.ManagedException{TypeName: "System.IndexOutOfRangeException", Message: "Index was outside the bounds of the array."}
+	}
+	return args[0].Arr.Elems[idx], nil
+}
+
+func arraySetValue(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 3 || args[0].Kind != runtime.KindArray || args[0].Arr == nil || args[2].Kind != runtime.KindI4 {
+		return runtime.Value{}, fmt.Errorf("bcl: Array.SetValue expects (array, value, int index)")
+	}
+	idx := int(args[2].I4)
+	if idx < 0 || idx >= len(args[0].Arr.Elems) {
+		return runtime.Value{}, &runtime.ManagedException{TypeName: "System.IndexOutOfRangeException", Message: "Index was outside the bounds of the array."}
+	}
+	args[0].Arr.Elems[idx] = args[1]
+	return runtime.Value{}, nil
 }
 
 // arrayClone backs Array.Clone() — a shallow copy: each element Value is

@@ -77,9 +77,14 @@ type MemberResolver func(typeFullName, memberName string, paramTypeFullNames []s
 type ManifestResourceResolver func(name string) ([]byte, bool)
 
 // PropertyResolver reads a plugin type's own declared properties (Fase
-// 3.50, Type.GetProperties/GetProperty) — see
-// runtime.Resolvers.ResolveProperties.
-type PropertyResolver func(typeFullName string) (names []string, canRead []bool, canWrite []bool, ok bool)
+// 3.50, Type.GetProperties/GetProperty; propTypes added Fase 3.52 for
+// PropertyInfo.PropertyType) — see runtime.Resolvers.ResolveProperties.
+type PropertyResolver func(typeFullName string) (names []string, canRead []bool, canWrite []bool, propTypes []string, ok bool)
+
+// MemberParamsResolver reads every real overload of a member's own
+// declared parameter list (Fase 3.52, Type.GetConstructors/MethodBase.
+// GetParameters) — see runtime.Resolvers.ResolveMemberParams.
+type MemberParamsResolver func(typeFullName, memberName string) (paramTypes [][]string, paramNames [][]string, ok bool)
 
 // genericMachineNative is a Machine-aware native (like machineNative,
 // linq.go) that additionally needs the call site's own resolved generic

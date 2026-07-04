@@ -1203,6 +1203,7 @@ func (asm *Assembly) resolvers() *runtime.Resolvers {
 		ResolveMember:           asm.resolveMember,
 		ResolveManifestResource: asm.resolveManifestResource,
 		ResolveProperties:       asm.resolveProperties,
+		ResolveMemberParams:     asm.resolveMemberParams,
 	}
 }
 
@@ -1302,6 +1303,20 @@ func (asm *Assembly) resolveFieldBytes(typeFullName, fieldName string) ([]byte, 
 // reflection's AmbiguousMatchException) — acceptable since every real
 // target here uses this shape for an unambiguous, non-overloaded name.
 func (asm *Assembly) resolveMember(typeFullName, memberName string, paramTypeFullNames []string) (string, bool) {
+	// typeFullName can be a CLOSED generic instantiation's own encoded
+	// name (e.g. "Dapper.SqlMapper+TypeHandlerCache`1[[System.Data.
+	// DataTable]]", ir/builder.go's sigTypeFullName encoding — reached
+	// via Type.GetMethod/GetConstructor/GetField called on a Type
+	// obtained from Type.MakeGenericType) — but FindTypeDef only ever
+	// finds a type's OPEN/unbound TypeDef (there's no separate TypeDef
+	// per closed instantiation in real metadata, ECMA-335's own model:
+	// one TypeDef, however many closed uses). bcl.GenericOpenName strips
+	// the "[[...]]" suffix first; every plain (non-generic) name passes
+	// through unchanged, so this is safe as an unconditional first step
+	// (Fase 3.52, found via Dapper's own SqlMapper static ctor reflecting
+	// over TypeHandlerCache<DataTable>/<XmlDocument>/<XDocument>/
+	// <XElement> to cache each one's SetHandler method).
+	typeFullName = bcl.GenericOpenName(typeFullName)
 	namespace, typeName := splitTypeName(typeFullName)
 	typeRID, _, err := asm.md.FindTypeDef(namespace, typeName)
 	if err != nil {
@@ -1347,20 +1362,20 @@ func (asm *Assembly) resolveMember(typeFullName, memberName string, paramTypeFul
 // real linkage a property's accessors use, so this stays correct even
 // for a non-standard accessor name (vanishingly rare in practice, but
 // free to get right here since the real linkage is already read anyway).
-func (asm *Assembly) resolveProperties(typeFullName string) (names []string, canRead []bool, canWrite []bool, ok bool) {
+func (asm *Assembly) resolveProperties(typeFullName string) (names []string, canRead []bool, canWrite []bool, propTypes []string, ok bool) {
 	namespace, typeName := splitTypeName(typeFullName)
 	typeRID, _, err := asm.md.FindTypeDef(namespace, typeName)
 	if err != nil {
 		for _, dep := range asm.deps {
-			if n, r, w, depOK := dep.resolveProperties(typeFullName); depOK {
-				return n, r, w, true
+			if n, r, w, pt, depOK := dep.resolveProperties(typeFullName); depOK {
+				return n, r, w, pt, true
 			}
 		}
-		return nil, nil, nil, false
+		return nil, nil, nil, nil, false
 	}
 	start, end, err := asm.md.TypeDefPropertyRange(typeRID)
 	if err != nil {
-		return nil, nil, nil, false
+		return nil, nil, nil, nil, false
 	}
 	for rid := start; rid < end; rid++ {
 		prop, err := asm.md.Property(rid)
@@ -1374,8 +1389,124 @@ func (asm *Assembly) resolveProperties(typeFullName string) (names []string, can
 		names = append(names, prop.Name)
 		canRead = append(canRead, getterRID != 0)
 		canWrite = append(canWrite, setterRID != 0)
+		propTypes = append(propTypes, asm.propertyTypeFullName(getterRID, setterRID))
 	}
-	return names, canRead, canWrite, true
+	return names, canRead, canWrite, propTypes, true
+}
+
+// propertyTypeFullName answers PropertyInfo.PropertyType (Fase 3.52) —
+// read off whichever real accessor exists rather than a separate parse
+// of the Property row's own PropertySig blob (metadata.Property's own
+// doc comment: the row carries a PropertySig, but every property found
+// in practice has at least one real accessor, and reusing
+// metadata.ParseMethodSig here means no second signature parser has to
+// exist just for this). The getter's return type is authoritative when
+// there is one; a set-only property (get_Xxx absent, real if rare) falls
+// back to the setter's own single "value" parameter type instead.
+func (asm *Assembly) propertyTypeFullName(getterRID, setterRID uint32) string {
+	rid := getterRID
+	useReturn := true
+	if rid == 0 {
+		rid = setterRID
+		useReturn = false
+	}
+	if rid == 0 {
+		return ""
+	}
+	row, err := asm.md.MethodDef(rid)
+	if err != nil {
+		return ""
+	}
+	sig, err := metadata.ParseMethodSig(row.Signature)
+	if err != nil {
+		return ""
+	}
+	var t metadata.SigType
+	if useReturn {
+		t = sig.RetType
+	} else if len(sig.Params) > 0 {
+		t = sig.Params[0]
+	} else {
+		return ""
+	}
+	name, err := ir.SigTypeFullName(asm.md, t)
+	if err != nil {
+		return ""
+	}
+	return name
+}
+
+// resolveMemberParams backs the interpreter's MemberParamsResolver (Fase
+// 3.52: Type.GetConstructors, MethodBase.GetParameters/ParameterInfo) —
+// every real overload of typeFullName's member named memberName
+// (memberName is ".ctor" for a constructor, same convention
+// resolveMember already uses), each described by its own declared
+// parameter type names (metadata.ParseMethodSig + ir.SigTypeFullName,
+// same as propertyTypeFullName above) and real parameter NAMES
+// (paramNamesFor, below) — found via Dapper's own constructor-based
+// row-to-object mapper, which enumerates a target type's constructors to
+// find the best parameter match against a query's column set.
+func (asm *Assembly) resolveMemberParams(typeFullName, memberName string) (paramTypes [][]string, paramNames [][]string, ok bool) {
+	namespace, typeName := splitTypeName(typeFullName)
+	typeRID, _, err := asm.md.FindTypeDef(namespace, typeName)
+	if err != nil {
+		for _, dep := range asm.deps {
+			if pt, pn, depOK := dep.resolveMemberParams(typeFullName, memberName); depOK {
+				return pt, pn, true
+			}
+		}
+		return nil, nil, false
+	}
+	rids, rows, err := asm.md.FindMethodDefCandidates(typeRID, memberName)
+	if err != nil {
+		// A real type with no overload of this member at all (e.g. a
+		// class relying purely on the compiler-synthesized default
+		// .ctor, which has no MethodDef row of its own to find) — ok=true
+		// with zero results, not an error: the type itself did resolve.
+		return nil, nil, true
+	}
+	for i, row := range rows {
+		sig, err := metadata.ParseMethodSig(row.Signature)
+		if err != nil {
+			continue
+		}
+		types := make([]string, len(sig.Params))
+		for j, p := range sig.Params {
+			if name, err := ir.SigTypeFullName(asm.md, p); err == nil {
+				types[j] = name
+			}
+		}
+		paramTypes = append(paramTypes, types)
+		paramNames = append(paramNames, asm.paramNamesFor(rids[i], len(sig.Params)))
+	}
+	return paramTypes, paramNames, true
+}
+
+// paramNamesFor reads methodRID's real Param row names
+// (metadata.MethodDefParamRange/Param — Sequence 1..n map to parameter
+// position 0..n-1; Sequence 0 is the method's own return-value
+// pseudo-param, skipped here), falling back to a synthesized "argN"
+// placeholder for any position with no real Param row at all (rare: only
+// an entirely reflection-emitted or heavily trimmed/optimized method
+// omits a name for a real source-level parameter — every normal C#
+// compiler emits one for every declared parameter).
+func (asm *Assembly) paramNamesFor(methodRID uint32, paramCount int) []string {
+	names := make([]string, paramCount)
+	for i := range names {
+		names[i] = fmt.Sprintf("arg%d", i)
+	}
+	start, end, err := asm.md.MethodDefParamRange(methodRID)
+	if err != nil {
+		return names
+	}
+	for rid := start; rid < end; rid++ {
+		p, err := asm.md.Param(rid)
+		if err != nil || p.Sequence == 0 || int(p.Sequence) > paramCount {
+			continue
+		}
+		names[p.Sequence-1] = p.Name
+	}
+	return names
 }
 
 // resolveTypeByFullName implements interpreter.TypeResolver: it builds a

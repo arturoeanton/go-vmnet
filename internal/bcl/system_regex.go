@@ -61,6 +61,13 @@ func init() {
 	register("System.Text.RegularExpressions.Regex::IsMatch", true, regexIsMatch)
 	register("System.Text.RegularExpressions.Regex::Match", true, regexMatch)
 	register("System.Text.RegularExpressions.Regex::Replace", true, regexReplace)
+	// Regex.Escape(string) is a plain static string transform, no Machine
+	// access needed — Go's regexp.QuoteMeta escapes a slightly different
+	// (mostly overlapping) metacharacter set than real .NET's own Escape
+	// (e.g. real .NET also escapes whitespace and '#', QuoteMeta doesn't),
+	// same documented RE2-vs-.NET-dialect gap nativeRegex's own doc
+	// comment already accepts for pattern matching itself.
+	register("System.Text.RegularExpressions.Regex::Escape", true, regexEscape)
 
 	register("System.Text.RegularExpressions.Match::get_Groups", true, matchGetGroups)
 
@@ -74,6 +81,13 @@ func init() {
 	// comment.
 	register("System.Text.RegularExpressions.Group::get_Success", true, groupGetSuccess)
 	register("System.Text.RegularExpressions.Capture::get_Value", true, groupGetValue)
+}
+
+func regexEscape(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 1 || args[0].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: Regex.Escape expects a string argument")
+	}
+	return runtime.String(regexp.QuoteMeta(args[0].Str)), nil
 }
 
 func compileRegex(pattern string) (*regexp.Regexp, error) {

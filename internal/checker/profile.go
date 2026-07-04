@@ -81,11 +81,15 @@ func init() {
 		"System.Collections.Generic.IDictionary`2::get_Item",
 		"System.Collections.Generic.IDictionary`2::TryGetValue",
 		"System.Collections.Generic.IDictionary`2::ContainsKey",
+		"System.Collections.Generic.IDictionary`2::Add",
+		"System.Collections.Generic.IDictionary`2::Remove",
+		"System.Collections.Generic.IDictionary`2::get_Keys",
 		"System.Collections.Generic.IList`1::get_Item",
 		"System.Collections.Generic.IList`1::set_Item",
 		"System.Collections.IList::Add",
 		"System.Collections.IList::get_Item",
 		"System.Collections.IList::set_Item",
+		"System.Collections.IList::Clear",
 		"System.Collections.Generic.IReadOnlyList`1::get_Item",
 		"System.Collections.Generic.IReadOnlyCollection`1::get_Count",
 		"System.Collections.Generic.IEqualityComparer`1::Equals",
@@ -94,6 +98,11 @@ func init() {
 		"System.Int32::",
 		"System.Int16::",
 		"System.Byte::",
+		"System.SByte::",
+		"System.UInt16::",
+		"System.UInt32::",
+		"System.UInt64::",
+		"System.Single::",
 		"System.Boolean::",
 		"System.String::",
 		"System.Type::",
@@ -102,6 +111,16 @@ func init() {
 		"System.Reflection.MethodInfo::",
 		"System.Reflection.MethodBase::",
 		"System.Reflection.FieldInfo::",
+		// PropertyInfo (Fase 3.51) and ParameterInfo (Fase 3.52) were
+		// simply missing here even though real natives already existed —
+		// every real property/parameter reflection call fully resolved
+		// but was still reported "out of profile", the exact same gap
+		// class as reflectionMachineTargets' own Fase 3.51/3.52 fixes in
+		// analyzer.go (a resolvable-but-unlisted target is reported
+		// out-of-profile rather than unsupported, see inProfile's own doc
+		// comment above — this fixes the "unlisted" half of that).
+		"System.Reflection.PropertyInfo::",
+		"System.Reflection.ParameterInfo::",
 		"System.Linq.Expressions.Expression::",
 		"System.Linq.Expressions.Expression`1::",
 		"System.Linq.Expressions.LambdaExpression::",
@@ -135,6 +154,9 @@ func init() {
 		"System.Array::GetLength",
 		"System.Array::Sort",
 		"System.Array::BinarySearch",
+		"System.Array::CreateInstance",
+		"System.Array::GetValue",
+		"System.Array::SetValue",
 		"System.Array::Reverse",
 		"System.Array::Fill",
 		"System.Array::Find",
@@ -165,6 +187,7 @@ func init() {
 		"System.Comparison`1::",
 		"System.EventHandler",
 		"System.Exception",
+		"System.AggregateException",
 		"System.InvalidOperationException",
 		"System.ArgumentException",
 		"System.ArgumentNullException",
@@ -176,6 +199,32 @@ func init() {
 		"System.FormatException",
 		"System.OverflowException",
 		"System.NotImplementedException",
+		"System.ApplicationException",
+		"System.ObjectDisposedException",
+		"System.Data.DataException",
+		// System.Data/System.Data.Common (Fase 3.52) — Dapper's own
+		// SqlMapper (and any other ADO.NET-based micro-ORM) does its real
+		// object-relational mapping directly against these interfaces/
+		// abstract classes; see adoNetDispatchTypes' own doc comment
+		// (analyzer.go) for why the runtime resolution itself doesn't need
+		// a native per member. Listed here too since a resolvable target
+		// not in this profile's own allowlist is still reported —
+		// out-of-profile rather than unsupported (inProfile's own doc
+		// comment above).
+		"System.Data.IDbConnection::",
+		"System.Data.IDbCommand::",
+		"System.Data.IDbTransaction::",
+		"System.Data.IDataReader::",
+		"System.Data.IDataRecord::",
+		"System.Data.IDataParameter::",
+		"System.Data.IDbDataParameter::",
+		"System.Data.IDataParameterCollection::",
+		"System.Data.Common.DbConnection::",
+		"System.Data.Common.DbCommand::",
+		"System.Data.Common.DbDataReader::",
+		"System.Data.Common.DbParameter::",
+		"System.Data.Common.DbParameterCollection::",
+		"System.Data.Common.DbTransaction::",
 		"System.Environment::get_NewLine",
 		"System.Environment::GetEnvironmentVariable",
 		"System.Double::",
@@ -221,6 +270,7 @@ func init() {
 		"System.Enum::IsDefined",
 		"System.Enum::ToObject",
 		"System.Enum::HasFlag",
+		"System.Enum::GetUnderlyingType",
 		"System.IO.MemoryStream::",
 		"System.IO.Stream::",
 		"System.IO.StringReader::",

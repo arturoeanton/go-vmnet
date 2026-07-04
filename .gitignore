@@ -53,6 +53,12 @@ examples/calculator/obj/
 examples/calculator/coreclr/bin/
 examples/calculator/coreclr/obj/
 
+# .NET build output for the examples/dapper-demo wrapper (same rationale
+# as jint-demo above — DapperDemoWrapper.cs is committed source, the
+# compiled DapperDemoWrapper.dll it produces is not)
+examples/dapper-demo/bin/
+examples/dapper-demo/obj/
+
 # macOS Finder metadata
 .DS_Store
 

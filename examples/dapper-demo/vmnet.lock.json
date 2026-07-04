@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "target": "netstandard2.0",
+  "packages": [
+    {
+      "id": "Dapper",
+      "version": "2.1.79",
+      "selectedAsset": "lib/netstandard2.0/Dapper.dll",
+      "dependencies": [
+        "Microsoft.Bcl.AsyncInterfaces",
+        "System.Reflection.Emit.Lightweight",
+        "System.Threading.Tasks.Extensions"
+      ]
+    },
+    {
+      "id": "Microsoft.Bcl.AsyncInterfaces",
+      "version": "10.0.8",
+      "selectedAsset": "lib/netstandard2.0/Microsoft.Bcl.AsyncInterfaces.dll",
+      "dependencies": [
+        "System.Threading.Tasks.Extensions"
+      ]
+    },
+    {
+      "id": "System.Reflection.Emit.ILGeneration",
+      "version": "4.7.0",
+      "selectedAsset": "lib/netstandard2.0/System.Reflection.Emit.ILGeneration.dll",
+      "dependencies": []
+    },
+    {
+      "id": "System.Reflection.Emit.Lightweight",
+      "version": "4.7.0",
+      "selectedAsset": "lib/netstandard2.0/System.Reflection.Emit.Lightweight.dll",
+      "dependencies": [
+        "System.Reflection.Emit.ILGeneration"
+      ]
+    },
+    {
+      "id": "System.Runtime.CompilerServices.Unsafe",
+      "version": "6.1.2",
+      "selectedAsset": "lib/netstandard2.0/System.Runtime.CompilerServices.Unsafe.dll",
+      "dependencies": []
+    },
+    {
+      "id": "System.Threading.Tasks.Extensions",
+      "version": "4.6.3",
+      "selectedAsset": "lib/netstandard2.0/System.Threading.Tasks.Extensions.dll",
+      "dependencies": [
+        "System.Runtime.CompilerServices.Unsafe"
+      ]
+    }
+  ]
+}

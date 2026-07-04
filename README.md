@@ -192,6 +192,7 @@ Runnable, documented examples in [`examples/`](examples/):
 | [`examples/openxml-demo`](examples/openxml-demo) | Generating a real `.docx` from scratch through the real DocumentFormat.OpenXml package, round-tripped through the real .NET SDK |
 | [`examples/closedxml-demo`](examples/closedxml-demo) | Reading a real `.xlsx` file through the real ClosedXML package, via a tiny compiled C# wrapper for one font-metrics limitation |
 | [`examples/calculator`](examples/calculator) | An arithmetic/loop workload run through vmnet, native Go, and (optionally) real CoreCLR side by side, for a correctness-and-speed comparison |
+| [`examples/dapper-demo`](examples/dapper-demo) | The real Dapper NuGet package's own `SqlMapper.Query`/`Execute`, run against a minimal fake in-memory ADO.NET provider — no real database, no dotnet SDK needed at runtime |
 
 ## CLI
 

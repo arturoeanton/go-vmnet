@@ -169,6 +169,20 @@ func init() {
 	registerCtor("System.Collections.Generic.List`1", func([]runtime.Value) (*runtime.Object, error) {
 		return &runtime.Object{Native: &nativeList{typeName: "System.Collections.Generic.List`1"}}, nil
 	})
+	// A plugin/BCL-package class subclassing List<T> directly (`class
+	// FakeParameterCollection : List<FakeParameter>, IDataParameterCollection`
+	// — a real, common pattern: examples/dapper-demo's own fake ADO.NET
+	// parameter collection does exactly this) chains to its base via a
+	// plain, non-virtual `call List\`1::.ctor(this)` — not `newobj` (only
+	// the exact leaf type gets newobj'd, allocating a plain runtime.Object
+	// with no Native at all; the base call runs on that already-allocated
+	// object). Without this, every native List method reached via the
+	// ancestor chain walk (Add, the indexer, Count, ...) panics/errors on
+	// a nil Native. Same established pattern as Dictionary`2::.ctor's own
+	// dictCtorInPlace below (Fase 3.52 for this one specifically, found
+	// via a real, load-bearing case rather than Dictionary's own
+	// precedent already existing).
+	register("System.Collections.Generic.List`1::.ctor", false, listCtorInPlace)
 	register("System.Collections.Generic.List`1::Add", false, listAdd)
 	register("System.Collections.Generic.List`1::get_Count", true, listCount)
 	register("System.Collections.Generic.List`1::get_Item", true, listGetItem)
@@ -180,6 +194,7 @@ func init() {
 	register("System.Collections.Generic.List`1::Insert", false, listInsert)
 	register("System.Collections.Generic.List`1::Clear", false, listClear)
 	register("System.Collections.Generic.List`1::Remove", true, listRemove)
+	register("System.Collections.Generic.List`1::Reverse", false, listReverse)
 	register("System.Collections.Generic.List`1::GetEnumerator", true, listGetEnumerator)
 	register("System.Collections.Generic.List`1+Enumerator::MoveNext", true, listEnumeratorMoveNext)
 	register("System.Collections.Generic.List`1+Enumerator::get_Current", true, listEnumeratorGetCurrent)
@@ -714,6 +729,21 @@ func listClear(args []runtime.Value) (runtime.Value, error) {
 	return runtime.Value{}, nil
 }
 
+// listReverse backs List<T>.Reverse() — in-place, whole-list reversal
+// (the (index, count) sub-range overload isn't covered here, same
+// "cover what's actually used, extend later" posture arrayLastIndexOf's
+// own doc comment already takes for a narrower Array member).
+func listReverse(args []runtime.Value) (runtime.Value, error) {
+	l, err := asList(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	for i, j := 0, len(l.items)-1; i < j; i, j = i+1, j-1 {
+		l.items[i], l.items[j] = l.items[j], l.items[i]
+	}
+	return runtime.Value{}, nil
+}
+
 // listRemove removes the first element equal to args[1] (reference
 // identity for object/array/struct-shaped values, value equality for
 // primitives/strings — same notion of equality valuesEqual already uses
@@ -890,6 +920,28 @@ func dictCtorInPlace(args []runtime.Value) (runtime.Value, error) {
 		}
 	}
 	args[0].Obj.Native = &nativeDict{m: map[string]dictEntry{}, typeName: typeName}
+	return runtime.Value{}, nil
+}
+
+// listCtorInPlace is List`1::.ctor's own base-chaining native — see the
+// register() call site's doc comment. Mirrors dictCtorInPlace exactly
+// (mutates the already-allocated derived receiver's Native field rather
+// than allocating a fresh Object); every real overload (capacity, an
+// IEnumerable<T> to copy from) is ignored beyond the receiver itself,
+// same documented scope dictCtorInPlace already accepts for Dictionary`2.
+func listCtorInPlace(args []runtime.Value) (runtime.Value, error) {
+	if len(args) == 0 || args[0].Kind != runtime.KindObject || args[0].Obj == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: List`1 constructor called without a receiver")
+	}
+	typeName := "System.Collections.Generic.List`1"
+	if t := args[0].Obj.Type; t != nil {
+		if t.Namespace != "" {
+			typeName = t.Namespace + "." + t.Name
+		} else {
+			typeName = t.Name
+		}
+	}
+	args[0].Obj.Native = &nativeList{typeName: typeName}
 	return runtime.Value{}, nil
 }
 
