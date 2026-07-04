@@ -40,20 +40,32 @@ un wrapper compilado en C# chiquito, para APIs que dependen de azúcar
 sintáctico exclusivo de C#).
 
 ```txt
-Estado: Fase 3.53 — checker + NuGet + despacho virtual real +
-resolución multi-ensamblado + una API de instancias de objetos
-(Assembly.New / Instance.Call) + System.Reflection real + un pase amplio
-de endurecimiento de LINQ/colecciones + demos reales para NPOI,
-System.Text.Json, Newtonsoft.Json, DocumentFormat.OpenXml, ClosedXML,
-Dapper, y (nuevo) un proveedor `Microsoft.Data.Sqlite` real y nativo en
-Go — la primera dependencia externa de Go de vmnet, verificada de punta
-a punta contra el CLI real de sqlite3. 19 paquetes reales rastreados;
-ver docs/es/COMPATIBILITY.md para el desglose por paquete (% de checker,
-demo real, y confianza, mantenidos deliberadamente separados). Sigue la
-Fase 4 (listo para producción: un modelo real de Permissions/sandbox,
-benchmarks, docs finales) — ver docs/es/security.md para el modelo de
-amenazas honesto de hoy. Historia completa: docs/es/ROADMAP.md.
+Estado: Fase 3.53 completa — demos reales de NuGet en Jint, librerías de
+Office/JSON, Dapper, y una base de datos SQLite embebida real; carga
+multi-ensamblado, despacho virtual/de interfaz, endurecimiento de
+reflection, superficie ADO.NET, y un checker de compatibilidad.
+
+Corpus actual: 19 paquetes NuGet reales chequeados con dependencias
+transitivas bajo netstandard-lite. Cobertura promedio de métodos
+limpios: ~93.9% (ver docs/es/COMPATIBILITY.md para el desglose por
+paquete — % de checker, demo real, y confianza, mantenidos
+deliberadamente separados).
+
+Sigue: Fase 4 — listo para producción: un modelo real de
+Permissions/sandbox (ver docs/es/security.md para el modelo de amenazas
+honesto de hoy), benchmarks, CI, y empaquetado de release.
 ```
+
+Demos verificados:
+- **Jint**: un motor de JavaScript real, de punta a punta
+- **NPOI**: lee un `.xls` legacy real
+- **DocumentFormat.OpenXml**: genera un `.docx` real, verificado abriéndolo con el SDK de .NET real
+- **ClosedXML**: lee un `.xlsx` real
+- **System.Text.Json** / **Newtonsoft.Json**: parseo de JSON real
+- **Dapper**: `Query`/`Execute` tanto sobre un proveedor ADO.NET fake como sobre una base de datos
+  SQLite embebida real (vía un proveedor `Microsoft.Data.Sqlite` nuevo y nativo en Go — la primera
+  dependencia externa de Go de vmnet — verificado de forma independiente con el CLI real de
+  `sqlite3`)
 
 *[Read it in English →](README.md)*
 

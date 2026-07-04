@@ -38,19 +38,30 @@ Go, no compilation step beyond `go run`) and
 tiny compiled C# wrapper, for APIs that lean on C#-only sugar).
 
 ```txt
-Status: Fase 3.53 — checker + NuGet + real virtual dispatch +
-multi-assembly resolution + an instance-object API (Assembly.New /
-Instance.Call) + real System.Reflection + a broad LINQ/collections
-hardening pass + real demos for NPOI, System.Text.Json, Newtonsoft.Json,
-DocumentFormat.OpenXml, ClosedXML, Dapper, and (new) a real, Go-native
-Microsoft.Data.Sqlite provider — vmnet's first external Go dependency,
-verified end to end against the real sqlite3 CLI. 19 real packages
-tracked; see docs/en/COMPATIBILITY.md for the per-package breakdown
-(checker %, real demo, and confidence, kept deliberately separate).
-Fase 4 (production readiness: a real Permissions/sandbox model,
-benchmarks, docs polish) is next — see docs/en/security.md for today's
-honest threat model. Full history: docs/en/ROADMAP.md.
+Status: Fase 3.53 complete — real NuGet demos across Jint, Office/JSON
+libraries, Dapper, and a real embedded SQLite database; multi-assembly
+loading, virtual/interface dispatch, reflection hardening, ADO.NET
+surface, and a compatibility checker.
+
+Current corpus: 19 real NuGet packages checked with transitive
+dependencies under netstandard-lite. Average clean-method coverage:
+~93.9% (see docs/en/COMPATIBILITY.md for the per-package breakdown —
+checker %, real demo, and confidence kept deliberately separate).
+
+Next: Fase 4 — production readiness: a real Permissions/sandbox model
+(see docs/en/security.md for today's honest threat model), benchmarks,
+CI, and release packaging.
 ```
+
+Verified demos:
+- **Jint**: a real JavaScript engine, end to end
+- **NPOI**: reads a real legacy `.xls`
+- **DocumentFormat.OpenXml**: generates a real `.docx`, round-tripped through the real .NET SDK
+- **ClosedXML**: reads a real `.xlsx`
+- **System.Text.Json** / **Newtonsoft.Json**: real JSON parsing
+- **Dapper**: `Query`/`Execute` over both a fake ADO.NET provider and a real embedded SQLite
+  database (via a new, Go-native `Microsoft.Data.Sqlite` provider — vmnet's first external Go
+  dependency — independently verified with the real `sqlite3` CLI)
 
 *[Léelo en español →](README.es.md)*
 
