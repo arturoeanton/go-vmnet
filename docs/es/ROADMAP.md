@@ -4682,6 +4682,51 @@ cd examples/sqlite-demo && dotnet build SqliteDemoWrapper.csproj -c Release && g
 ```
 
 ---
+### Fase 3.54 — barrido de paridad solo-checker: nativos reales que los propios allowlists del checker nunca reflejaron
+
+**Objetivo:** con 19 paquetes ya rastreados, corrí el checker contra todo el corpus y agregué cada
+hallazgo de TODOS los paquetes por el callee real (no por paquete) — un callee marcado en muchos
+paquetes a la vez es exactamente lo de mayor apalancamiento para arreglar. La ganancia individual
+más grande: el propio mapa `linqTargets` de `internal/checker/analyzer.go` (su allowlist de
+"resuelto a través del registro separado Machine-aware del intérprete, no `bcl.Lookup`") todavía
+solo listaba los métodos LINQ ORIGINALES de la Fase 3.14 — cada método que el pase de
+endurecimiento de LINQ de las Fases 3.44/3.45 agregó desde entonces (`GroupBy`, `ThenBy`/
+`ThenByDescending`, `Min`, `Sum`, `Average`, `Aggregate`, `Zip`, `Except`, `Intersect`,
+`SkipWhile`, `TakeWhile`, `Reverse`, `AsEnumerable`, `ToHashSet`) era un nativo real y funcional
+que el checker simplemente nunca supo que existía — la misma clase de brecha que las Fases
+3.51/3.52 ya arreglaron una vez para `Type.GetProperties`/`GetConstructors`, solo que nunca se
+barrió específicamente para LINQ.
+
+- [x] Los 14 de arriba se agregaron a `linqTargets`. `GroupBy` sola estaba marcada en 8 de 19
+      paquetes (25 sitios de llamada reales); varias de las otras tocan tantos o más.
+- [x] `System.Activator::CreateInstance` agregado a `reflectionMachineTargets` — una entrada real
+      y funcional de `genericMachineRegistry` desde la Fase 3.39, nunca reflejada (9 paquetes, 52
+      sitios de llamada).
+- [x] `System.Linq.IGrouping\`2::get_Key`/`GetEnumerator` y
+      `System.Linq.IOrderedEnumerable\`1::GetEnumerator` agregados a `interfaceDispatchTargets`
+      (`analyzer.go`) y como prefijos en el propio `bclPrefixes` de `profile.go` — un sitio de
+      llamada real puede estar declarado directamente contra estos nombres de interfaz de la BCL,
+      no solo contra los nombres sintéticos `VmnetInternal.Ordered`/`VmnetInternal.Grouping` ya
+      reconocidos; el checker no puede ver a través de esta redirección de despacho virtual
+      específica más de lo que puede con cualquier otro caso ya en ese mapa (7 paquetes, 26 sitios
+      de llamada solo para `IGrouping\`2::get_Key`).
+
+**Resultado**: el promedio simple entre los 19 paquetes rastreados pasó de 93.9% a **94.2%**, a
+partir de un cambio puramente mecánico y sin ningún riesgo de runtime (no se tocó código del
+intérprete en absoluto — cada fix acá es el checker poniéndose al día con nativos que ya
+funcionaban). Cada uno de los 19 paquetes mejoró o se mantuvo exactamente igual; ninguno
+retrocedió.
+
+### Cómo verificar Fase 3.54
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+```
+
+---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
 

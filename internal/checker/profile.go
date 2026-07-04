@@ -137,6 +137,13 @@ func init() {
 		// them the same way it recognizes every other native-backed type.
 		"VmnetInternal.Ordered::",
 		"VmnetInternal.Grouping::",
+		// A real call site can also be declared directly against the BCL
+		// interface names themselves (IGrouping`2/IOrderedEnumerable`1),
+		// not just the synthetic VmnetInternal.* names above — same real
+		// runtime redirection, just seen from the caller's own declared
+		// type instead of the concrete one.
+		"System.Linq.IGrouping`2::",
+		"System.Linq.IOrderedEnumerable`1::",
 		"System.Lazy`1::",
 		"System.Text.Encoding::",
 		"System.Text.UTF8Encoding::",

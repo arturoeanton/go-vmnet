@@ -364,6 +364,13 @@ var reflectionMachineTargets = map[string]bool{
 	"System.Reflection.ConstructorInfo::GetParameters": true,
 	"System.Reflection.MethodInfo::GetParameters":      true,
 	"System.Reflection.MethodBase::GetParameters":      true,
+	// Activator.CreateInstance(Type, object[]) has been a real,
+	// working genericMachineRegistry entry since Fase 3.39
+	// (internal/interpreter/activator.go) — this map simply never
+	// mirrored it, the same class of gap as every other entry in this
+	// comment block, found the same way (auditing the full 19-package
+	// corpus's aggregated checker findings).
+	"System.Activator::CreateInstance": true,
 }
 
 // asyncMachineTargets lists the async-related methods resolved through
@@ -418,6 +425,29 @@ var linqTargets = map[string]bool{
 	"System.Linq.Enumerable::ElementAt":         true,
 	"System.Linq.Enumerable::Skip":              true,
 	"System.Linq.Enumerable::Union":             true,
+	// The Fase 3.44/3.45 LINQ hardening pass added all of these as real,
+	// working machineRegistry entries (internal/interpreter/linq.go,
+	// linq_orderby.go) but never mirrored them here — every real call
+	// site using any of them was misreported as unsupported despite
+	// already running correctly, the same parity gap already fixed once
+	// for Type.GetProperties/GetProperty (Fase 3.51) and Type.
+	// GetConstructors (Fase 3.52). Found auditing the full 19-package
+	// corpus's own aggregated checker findings, not a single package's.
+	"System.Linq.Enumerable::GroupBy":          true,
+	"System.Linq.Enumerable::ThenBy":           true,
+	"System.Linq.Enumerable::ThenByDescending": true,
+	"System.Linq.Enumerable::Min":              true,
+	"System.Linq.Enumerable::Sum":              true,
+	"System.Linq.Enumerable::Average":          true,
+	"System.Linq.Enumerable::Aggregate":        true,
+	"System.Linq.Enumerable::Zip":              true,
+	"System.Linq.Enumerable::Except":           true,
+	"System.Linq.Enumerable::Intersect":        true,
+	"System.Linq.Enumerable::SkipWhile":        true,
+	"System.Linq.Enumerable::TakeWhile":        true,
+	"System.Linq.Enumerable::Reverse":          true,
+	"System.Linq.Enumerable::AsEnumerable":     true,
+	"System.Linq.Enumerable::ToHashSet":        true,
 	// Not System.Linq.Enumerable, but the same "resolved through a
 	// Machine-aware registry, not bcl.Lookup" reason applies (Fase 3.32):
 	// List<T>.ForEach needs to invoke its Action<T> argument.
@@ -470,6 +500,17 @@ var interfaceDispatchTargets = map[string]bool{
 	"System.Collections.Generic.IReadOnlyCollection`1::get_Count": true,
 	"System.Collections.Generic.IEqualityComparer`1::Equals":      true,
 	"System.Collections.Generic.IEqualityComparer`1::GetHashCode": true,
+	// A LINQ GroupBy/OrderBy result is a real, working native
+	// (bcl.NativeGrouping/NativeOrdered, Fase 3.44/3.45) reached through
+	// exactly this same runtime redirection — `group.Key`/a direct
+	// `foreach` over either result, when the call site happens to be
+	// declared against the real BCL interface name instead of the
+	// already-materialized IEnumerable<T> case above. The checker can no
+	// more see through this virtual dispatch than any other case in this
+	// map; found the same way, auditing the full 19-package corpus.
+	"System.Linq.IGrouping`2::get_Key":                true,
+	"System.Linq.IGrouping`2::GetEnumerator":          true,
+	"System.Linq.IOrderedEnumerable`1::GetEnumerator": true,
 }
 
 func resolvableCtor(md *metadata.Metadata, typeFullName, ctorFullName string) bool {

@@ -4539,6 +4539,47 @@ cd examples/sqlite-demo && dotnet build SqliteDemoWrapper.csproj -c Release && g
 ```
 
 ---
+### Fase 3.54 — checker-only parity sweep: real natives the checker's own allowlists never mirrored
+
+**Goal:** with 19 packages now tracked, ran the checker against the full corpus and aggregated
+every finding across ALL packages by real callee (not per-package) — a callee flagged in many
+packages at once is exactly the highest-leverage thing to fix. The single biggest win: `internal/
+checker/analyzer.go`'s own `linqTargets` map (its allowlist of "resolved through the interpreter's
+separate Machine-aware registry, not `bcl.Lookup`") still only listed the ORIGINAL Fase 3.14 LINQ
+methods — every method the Fase 3.44/3.45 LINQ hardening pass added since (`GroupBy`, `ThenBy`/
+`ThenByDescending`, `Min`, `Sum`, `Average`, `Aggregate`, `Zip`, `Except`, `Intersect`,
+`SkipWhile`, `TakeWhile`, `Reverse`, `AsEnumerable`, `ToHashSet`) was a real, working native the
+checker had simply never learned about — the same class of gap Fase 3.51/3.52 already fixed once
+for `Type.GetProperties`/`GetConstructors`, just never swept for LINQ specifically.
+
+- [x] All 14 of the above added to `linqTargets`. `GroupBy` alone was flagged across 8 of 19
+      packages (25 real call sites); several of the others touch just as many.
+- [x] `System.Activator::CreateInstance` added to `reflectionMachineTargets` — a real,
+      working `genericMachineRegistry` entry since Fase 3.39, never mirrored (9 packages, 52 call
+      sites).
+- [x] `System.Linq.IGrouping\`2::get_Key`/`GetEnumerator` and `System.Linq.IOrderedEnumerable\`1::
+      GetEnumerator` added to `interfaceDispatchTargets` (`analyzer.go`) and as prefixes in
+      `profile.go`'s own `bclPrefixes` — a real call site can be declared directly against these
+      BCL interface names, not just the synthetic `VmnetInternal.Ordered`/`VmnetInternal.Grouping`
+      names already recognized; the checker can no more see through this specific virtual-dispatch
+      redirection than any other case already in that map (7 packages, 26 call sites for
+      `IGrouping\`2::get_Key` alone).
+
+**Result**: simple average across all 19 tracked packages moved from 93.9% to **94.2%**, from a
+purely mechanical, zero-runtime-risk change (no interpreter code touched at all — every fix here
+is the checker catching up to natives that already worked). Every one of the 19 packages improved
+or stayed exactly the same; none regressed.
+
+### How to verify Fase 3.54
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+```
+
+---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 
 **Goal:** turn the functional engine into an adoptable product — reliable, documented, and
