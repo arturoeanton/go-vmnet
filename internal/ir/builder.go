@@ -793,6 +793,15 @@ func sigParamTypeNames(md *metadata.Metadata, sig metadata.MethodSig) []string {
 			// Fase 3.40) to recover which KindI4 call-site argument was
 			// actually a char, e.g. StringBuilder.Append('/').
 			names[i] = "System.Char"
+		case metadata.SigBoolean:
+			// Same reasoning as SigChar above, for TextWriter.Write(bool)/
+			// WriteLine(bool) (internal/bcl/system_io_stringwriter.go, Fase
+			// 3.53): bool is ALSO just a KindI4 0/1 on the stack (spec
+			// §17.1), indistinguishable at the native's own call site from
+			// a plain `Write(int)` overload without this — needed by
+			// convertCharArgsForNative's boolSensitiveNatives conversion to
+			// print "True"/"False" instead of "1"/"0".
+			names[i] = "System.Boolean"
 		}
 	}
 	return names

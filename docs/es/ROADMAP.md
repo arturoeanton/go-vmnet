@@ -4828,6 +4828,92 @@ go test ./...
 ```
 
 ---
+### Fase 3.57 — `TextWriter`/`StringWriter`, `CancellationToken`, `ExceptionDispatchInfo` del barrido de todo el corpus
+
+**Objetivo:** el último y más grande grupo del barrido de prioridad de todo el corpus (Fases
+3.54-3.56): `System.IO.TextWriter`/`StringWriter` (la brecha con más hits de todo el escaneo de
+19 paquetes — 218 sitios de llamada reales entre 6 paquetes), `System.Threading.CancellationToken`/
+`CancellationTokenSource`, y `System.Runtime.ExceptionServices.ExceptionDispatchInfo`. Un cuarto
+objetivo, `CustomAttributeExtensions.GetCustomAttribute<T>`, se investigó pero se encontró que
+necesita un subsistema genuinamente nuevo (ver "Encontrado, no arreglado" abajo) — correctamente
+fuera del alcance de este pase en vez de intentado a medias.
+
+- [x] **`System.IO.TextWriter`/`StringWriter`** (`internal/bcl/system_io_stringwriter.go`, nuevo)
+      — `Write`/`WriteLine` (string/char/object/numérico/bool/`char[]`/`char[],index,count`),
+      `ToString`, `Flush`/`Close`/`Dispose` (no-ops — nada que liberar en un intérprete puro en Go,
+      la misma postura que ya toma cualquier otro no-op de `IDisposable` acá), `NewLine`, más
+      encadenamiento de ctor de base (`StringWriter::.ctor` in-place — necesario para una
+      subclase real, ej. el propio `ReusableStringWriter` de Serilog, mismo patrón ya establecido
+      para las clases base de `Exception`/`Dictionary`/ADO.NET). Verificar esto contra la salida
+      real de `dotnet run` sacó a la luz dos bugs de corrección reales y separados, no
+      específicos de `TextWriter` en sí:
+    - Los argumentos `char` perdían su identidad entrando a `Write`/`WriteLine` — exactamente la
+      misma clase de bug que `charSensitiveNatives` ya existe para arreglar en
+      `StringBuilder.Append` (Fase 3.40), solo que nunca se extendió a este nativo nuevo.
+      Arreglado agregando `System.IO.StringWriter::Write`/`WriteLine`/
+      `System.IO.TextWriter::Write`/`WriteLine` a ese mapa ya existente.
+    - Los argumentos `bool` imprimían `"1"`/`"0"` en vez de `"True"`/`"False"` — una brecha real y
+      no descubierta antes (este código no tiene un Kind distinto para `bool`, spec §17.1, así
+      que un bool boxeado/pasado es un `KindI4` ordinario indistinguible de un `int` en el punto
+      donde un nativo lo recibe). Arreglado de forma acotada (no ensanchando el propio
+      `charSensitiveNatives`, que hubiera necesitado que cada llamador re-derive "char vs bool"
+      del mismo Kind): un nuevo mapa paralelo `boolSensitiveNatives`, acotado solo a
+      `TextWriter.Write`/`WriteLine` (no se encontró ningún sitio de llamada real que lo necesite
+      para `StringBuilder.Append`/`Insert` — ensanchar el comportamiento de un nativo ya en
+      producción sin beneficio real arriesga una regresión no relacionada), más un nuevo caso
+      `metadata.SigBoolean` en la propia captura de nombres de tipo de parámetro de
+      `ir/builder.go` (confirmado inerte para el scoring de resolución de sobrecarga existente
+      antes de incorporarlo).
+- [x] **`System.Threading.CancellationToken`/`CancellationTokenSource`**
+      (`internal/bcl/system_cancellationtoken.go`, nuevo) — estado de cancelación real, mutable,
+      no un stub: `Cancel()` seguido de `ThrowIfCancellationRequested()` en código secuencial
+      plano es un patrón real y alcanzable incluso bajo el modelo síncrono de `async`/`await` de
+      este proyecto (Fase 3.22) — un token que nunca pudiera volverse realmente cancelado se
+      portaría mal silenciosamente para ese caso ordinario, no solo para la cancelación
+      concurrente real que este modelo no intenta. Propagación de una sola vía en
+      `CreateLinkedTokenSource` (un token vinculado observa la cancelación posterior de sus
+      padres; un padre nunca observa la de un hijo vinculado), `Equals`/`op_Equality`,
+      `Register`/`CancellationTokenRegistration` (el registro tiene éxito y se dispone
+      limpiamente pero nunca invoca de verdad el callback — un recorte de alcance documentado:
+      ningún sitio de llamada real en este corpus ejercita la invocación de callback registrado,
+      solo la forma de polling con `ThrowIfCancellationRequested`). Se agregó
+      `System.OperationCanceledException` al registro de tipos de excepción y al recorrido de
+      jerarquía de excepciones (`typecheck.go`) para que un `catch (Exception)` simple lo siga
+      atrapando, igualando la propia jerarquía real de .NET.
+- [x] **`System.Runtime.ExceptionServices.ExceptionDispatchInfo`**
+      (`internal/bcl/system_exceptiondispatchinfo.go`, nuevo) — `Capture`/`Throw`/
+      `SourceException`, reusando la propia referencia real de vuelta al objeto originalmente
+      lanzado que ya tiene `ManagedException` (Fase 3.51) para que un round-trip
+      `Capture(ex).Throw()` relance exactamente la MISMA excepción — los propios campos extra de
+      una excepción personalizada sobreviven, y sigue siendo atrapada por el `catch` más derivado
+      que hubiera atrapado la original más arriba.
+
+**Encontrado, no arreglado** (infraestructura genuinamente nueva necesaria, no una brecha de
+conexión — correctamente diferido): se investigó `CustomAttributeExtensions.GetCustomAttribute<T>`
+(afecta 7 paquetes, 27 sitios de llamada) y se encontró que necesita un subsistema real y nuevo:
+el código ya existente con nombre "attribute" en este proyecto
+(`getattribute.go`/`attribute_createnew.go`/`attribute_metadata.go`) trata enteramente sobre los
+propios atributos *XML* de DocumentFormat.OpenXml — un falso amigo de nombres no relacionado, no
+atributos de reflection del CLR en absoluto. Hoy nada lee la tabla de metadatos real
+`CustomAttribute` (ECMA-335 §II.22.10) — solo existen sus constantes de tag de índice codificado.
+Un soporte real necesita un lector de filas `CustomAttribute`, una búsqueda inversa
+`HasCustomAttribute`, y decodificación real de blob de atributo (§II.23.3: argumentos de
+constructor fijos y con nombre) — una pieza de trabajo genuinamente nueva y de tamaño
+considerable. Se confirmaron llamadores reales que se beneficiarían (los atributos de propiedad
+`[Name]`/`[Index]` de CsvHelper, los chequeos de enum `[Flags]` de FluentValidation, el
+`[ValueConverter]` de AutoMapper) — dejado para un pase futuro dedicado en vez de una
+implementación parcial apurada.
+
+### Cómo verificar Fase 3.57
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+```
+
+---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
 

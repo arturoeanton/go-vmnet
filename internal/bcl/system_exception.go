@@ -50,6 +50,16 @@ func init() {
 		"System.Data.DataException",
 		"System.ApplicationException",
 		"System.ObjectDisposedException",
+		// System.OperationCanceledException (Fase 3.53) — real
+		// CancellationToken.ThrowIfCancellationRequested()
+		// (system_cancellationtoken.go) throws exactly this when a
+		// source it derives from has genuinely been Cancel()'d. Shares
+		// the same plain (message)/(message, innerException) shape as
+		// System.Exception itself; the real BCL's own third (message,
+		// CancellationToken) overload isn't covered here — no real
+		// corpus caller constructs one that way, only vmnet's own
+		// ThrowIfCancellationRequested ever throws this type at all.
+		"System.OperationCanceledException",
 	} {
 		registerCtor(name, newExceptionCtor(name))
 		// A plugin's own exception subclass (`class MyException :

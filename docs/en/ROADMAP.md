@@ -4675,6 +4675,83 @@ go test ./...
 ```
 
 ---
+### Fase 3.57 — `TextWriter`/`StringWriter`, `CancellationToken`, `ExceptionDispatchInfo` from the corpus-wide sweep
+
+**Goal:** the last, largest-scope group of the corpus-wide priority sweep (Fase 3.54-3.56):
+`System.IO.TextWriter`/`StringWriter` (the single highest hit-count gap found in the whole
+19-package scan — 218 real call sites across 6 packages), `System.Threading.CancellationToken`/
+`CancellationTokenSource`, and `System.Runtime.ExceptionServices.ExceptionDispatchInfo`. A fourth
+target, `CustomAttributeExtensions.GetCustomAttribute<T>`, was investigated but found to need a
+genuinely new subsystem (see "Found, not fixed" below) — correctly out of this pass's scope
+rather than attempted halfway.
+
+- [x] **`System.IO.TextWriter`/`StringWriter`** (`internal/bcl/system_io_stringwriter.go`, new) —
+      `Write`/`WriteLine` (string/char/object/numeric/bool/`char[]`/`char[],index,count`),
+      `ToString`, `Flush`/`Close`/`Dispose` (no-ops — nothing to release in a pure-Go interpreter,
+      same posture every other `IDisposable` no-op here already takes), `NewLine`, plus base-ctor
+      chaining (`StringWriter::.ctor` in-place — needed for a real subclass, e.g. Serilog's own
+      `ReusableStringWriter`, same established pattern as `Exception`/`Dictionary`/ADO.NET base
+      classes). Verifying this against real `dotnet run` output surfaced two real, separate
+      correctness bugs, not specific to `TextWriter` itself:
+    - `char` arguments were losing their identity going into `Write`/`WriteLine` — the exact same
+      class of bug `charSensitiveNatives` already exists to fix for `StringBuilder.Append`
+      (Fase 3.40), just never extended to this new native. Fixed by adding
+      `System.IO.StringWriter::Write`/`WriteLine`/`System.IO.TextWriter::Write`/`WriteLine` to that
+      existing map.
+    - `bool` arguments printed `"1"`/`"0"` instead of `"True"`/`"False"` — a real, previously
+      undiscovered gap (this codebase has no distinct `bool` Kind, spec §17.1, so a boxed/passed
+      bool is an ordinary `KindI4` indistinguishable from `int` at the point a native receives it).
+      Fixed narrowly (not by widening `charSensitiveNatives` itself, which would have needed every
+      caller to re-derive "char vs bool" from the same Kind): a new, parallel
+      `boolSensitiveNatives` map, scoped to `TextWriter.Write`/`WriteLine` only (no real call site
+      needing this for `StringBuilder.Append`/`Insert` was found — widening an already-shipped
+      native's behavior with no real benefit risks an unrelated regression), plus a new
+      `metadata.SigBoolean` case in `ir/builder.go`'s own parameter-type-name capture (confirmed
+      inert for existing overload-resolution scoring before landing it).
+- [x] **`System.Threading.CancellationToken`/`CancellationTokenSource`**
+      (`internal/bcl/system_cancellationtoken.go`, new) — real, not stubbed, mutable cancellation
+      state: `Cancel()` followed by `ThrowIfCancellationRequested()` in plain sequential code is a
+      real, reachable pattern even under this project's synchronous `async`/`await` model (Fase
+      3.22) — a token that could never actually become cancelled would silently misbehave for that
+      ordinary case, not just for real concurrent cancellation this model doesn't attempt.
+      One-way `CreateLinkedTokenSource` propagation (a linked token observes its parents' later
+      cancellation; a parent never observes a linked child's), `Equals`/`op_Equality`,
+      `Register`/`CancellationTokenRegistration` (registration succeeds and disposes cleanly but
+      never actually invokes the callback — a documented scope cut: no real call site in this
+      corpus exercises registered-callback invocation, only the `ThrowIfCancellationRequested`
+      polling shape). `System.OperationCanceledException` added to the exception-type registry and
+      to the exception-hierarchy walk (`typecheck.go`) so a plain `catch (Exception)` still
+      matches it, matching real .NET's own hierarchy.
+- [x] **`System.Runtime.ExceptionServices.ExceptionDispatchInfo`**
+      (`internal/bcl/system_exceptiondispatchinfo.go`, new) — `Capture`/`Throw`/`SourceException`,
+      reusing `ManagedException`'s own real back-reference to the originally-thrown object (Fase
+      3.51) so a `Capture(ex).Throw()` round-trip re-raises the exact SAME exception — a custom
+      exception's own extra fields survive, and it's still caught by whichever more-derived
+      `catch` clause upstream would have caught the original.
+
+**Found, not fixed** (genuinely new infrastructure needed, not a wiring gap — correctly deferred):
+`CustomAttributeExtensions.GetCustomAttribute<T>` (affects 7 packages, 27 call sites) was
+investigated and found to need a real, new subsystem: this codebase's existing "attribute"-named
+code (`getattribute.go`/`attribute_createnew.go`/`attribute_metadata.go`) is entirely about
+DocumentFormat.OpenXml's own *XML* attributes — an unrelated naming false-friend, not CLR
+reflection custom attributes at all. Nothing today reads the real `CustomAttribute` metadata table
+(ECMA-335 §II.22.10) — only its coded-index tag constants exist. Real support needs a `CustomAttribute`
+row reader, a reverse `HasCustomAttribute` lookup, and real attribute-blob decoding (§II.23.3: fixed
+and named constructor arguments) — a genuinely new, sizable piece of work. Confirmed real callers
+exist and would benefit (CsvHelper's `[Name]`/`[Index]` property attributes, FluentValidation's
+enum `[Flags]` checks, AutoMapper's `[ValueConverter]`) — left for a dedicated future pass rather
+than a rushed partial implementation.
+
+### How to verify Fase 3.57
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+```
+
+---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 
 **Goal:** turn the functional engine into an adoptable product — reliable, documented, and

@@ -94,6 +94,13 @@ func nativeToString(native any) (string, bool) {
 	switch n := native.(type) {
 	case *nativeStringBuilder:
 		return n.buf, true
+	// StringWriter overrides ToString() (returns its accumulated buffer)
+	// same as StringBuilder above — a call site declared against the base
+	// TextWriter (which does NOT override ToString itself) compiles its
+	// `.ToString()` straight to the inherited System.Object::ToString
+	// MemberRef, same reasoning as StringBuilder's own case here.
+	case *nativeStringWriter:
+		return n.buf.String(), true
 	default:
 		return "", false
 	}

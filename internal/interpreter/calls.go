@@ -313,31 +313,69 @@ var charSensitiveNatives = map[string]bool{
 	"System.Text.StringBuilder::Append":     true,
 	"System.Text.StringBuilder::AppendLine": true,
 	"System.Text.StringBuilder::Insert":     true,
+	// TextWriter.Write(char)/WriteLine(char) (internal/bcl/system_io_
+	// stringwriter.go, Fase 3.53) has the identical problem AppendLine
+	// above already documents: without this, a `Write('/')`-shaped real
+	// call site would append the numeric code point ("47") instead of the
+	// character itself.
+	"System.IO.StringWriter::Write":     true,
+	"System.IO.StringWriter::WriteLine": true,
+	"System.IO.TextWriter::Write":       true,
+	"System.IO.TextWriter::WriteLine":   true,
+}
+
+// boolSensitiveNatives is charSensitiveNatives' own Boolean counterpart,
+// scoped narrower (TextWriter.Write/WriteLine only, not StringBuilder.
+// Append/Insert — no real call site found needing it there, and widening
+// an already-shipped native's behavior without one risks an unrelated
+// regression for no benefit): real TextWriter.Write(bool)/WriteLine(bool)
+// prints "True"/"False", not vmnet's uniform KindI4 0/1 that a plain
+// `Write(int)` overload also produces from the exact same Value shape —
+// confirmed against real `dotnet run` output (StringWriter.Write(true)
+// prints "True") while chasing this file's own textWriterWrite bug.
+var boolSensitiveNatives = map[string]bool{
+	"System.IO.StringWriter::Write":     true,
+	"System.IO.StringWriter::WriteLine": true,
+	"System.IO.TextWriter::Write":       true,
+	"System.IO.TextWriter::WriteLine":   true,
 }
 
 // convertCharArgsForNative converts args in place (on a copy, made lazily
-// only if a real conversion is needed) for a charSensitiveNatives entry.
-// paramTypeNames indexes the call's own declared (non-receiver)
-// parameters 1:1 (ir.Call.ParamTypeNames' own convention) — args[0] is
-// the receiver for these instance methods, so argument i+1 is
-// paramTypeNames[i]'s value.
+// only if a real conversion is needed) for a charSensitiveNatives/
+// boolSensitiveNatives entry. paramTypeNames indexes the call's own
+// declared (non-receiver) parameters 1:1 (ir.Call.ParamTypeNames' own
+// convention) — args[0] is the receiver for these instance methods, so
+// argument i+1 is paramTypeNames[i]'s value.
 func convertCharArgsForNative(fullName string, args []runtime.Value, paramTypeNames []string) []runtime.Value {
-	if !charSensitiveNatives[fullName] || len(paramTypeNames) == 0 {
+	charSensitive := charSensitiveNatives[fullName]
+	boolSensitive := boolSensitiveNatives[fullName]
+	if (!charSensitive && !boolSensitive) || len(paramTypeNames) == 0 {
 		return args
 	}
 	out := args
 	copied := false
+	ensureCopy := func() {
+		if !copied {
+			out = append([]runtime.Value(nil), args...)
+			copied = true
+		}
+	}
 	for i, name := range paramTypeNames {
 		argIdx := i + 1
 		if argIdx >= len(out) {
 			break
 		}
-		if name == "System.Char" && out[argIdx].Kind == runtime.KindI4 {
-			if !copied {
-				out = append([]runtime.Value(nil), args...)
-				copied = true
-			}
+		if charSensitive && name == "System.Char" && out[argIdx].Kind == runtime.KindI4 {
+			ensureCopy()
 			out[argIdx] = runtime.String(string(rune(out[argIdx].I4)))
+		}
+		if boolSensitive && name == "System.Boolean" && out[argIdx].Kind == runtime.KindI4 {
+			ensureCopy()
+			if out[argIdx].I4 != 0 {
+				out[argIdx] = runtime.String("True")
+			} else {
+				out[argIdx] = runtime.String("False")
+			}
 		}
 	}
 	return out
