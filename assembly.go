@@ -87,6 +87,15 @@ type Assembly struct {
 	// (cacheMu): resolveExplicitImpl is a pure function of the loaded
 	// metadata, which never changes after LoadBytes/LoadFile returns.
 	explicitImpls map[string]explicitImplResult
+
+	// permissions points back at the owning VM's own capability gate
+	// (vm.go's LoadBytes sets this to &vm.permissions, never a copy) —
+	// shared, not cloned, so mutating vm.Permissions() after this
+	// Assembly is already loaded still takes effect on every call made
+	// through it afterward (see Permissions() in permissions.go and
+	// machine() in call.go, which passes this straight into every
+	// interpreter.Machine it builds).
+	permissions *runtime.Permissions
 }
 
 // explicitImplResult is resolveExplicitImpl's cached return value —

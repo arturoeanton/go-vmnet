@@ -60,6 +60,22 @@ func init() {
 		// corpus caller constructs one that way, only vmnet's own
 		// ThrowIfCancellationRequested ever throws this type at all.
 		"System.OperationCanceledException",
+		// System.UnauthorizedAccessException/System.IO.
+		// FileNotFoundException/System.IO.DirectoryNotFoundException (Fase
+		// 3.59) — the new deny-by-default Permissions gate
+		// (internal/interpreter/permissions.go) throws
+		// UnauthorizedAccessException directly as a Go error rather than
+		// through this ctor path, so registering it here isn't required
+		// for that to work; it's registered anyway so a plugin that
+		// explicitly does `new UnauthorizedAccessException("...")` (or
+		// catches/rethrows one) compiles and behaves like any other
+		// exception type here. FileNotFoundException/
+		// DirectoryNotFoundException back the new System.IO.File/
+		// Directory/FileInfo natives' own real "no such file/directory"
+		// failures (system_io_file.go) the same way.
+		"System.UnauthorizedAccessException",
+		"System.IO.FileNotFoundException",
+		"System.IO.DirectoryNotFoundException",
 	} {
 		registerCtor(name, newExceptionCtor(name))
 		// A plugin's own exception subclass (`class MyException :

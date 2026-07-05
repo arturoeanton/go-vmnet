@@ -319,6 +319,19 @@ func init() {
 		"System.IO.FileSystemInfo::",
 		"System.IO.Path::",
 		"System.Threading.Monitor::",
+		// Fase 3.59: real, Permissions-gated System.IO.File/Directory/
+		// FileStream/FileInfo/DirectoryInfo (internal/bcl/system_io_file.
+		// go, internal/interpreter/permissions.go) plus the two new
+		// exception types the deny-by-default gate and the new
+		// FileNotFoundException-on-a-missing-file path throw.
+		"System.IO.File::",
+		"System.IO.Directory::",
+		"System.IO.FileStream::",
+		"System.IO.FileInfo::",
+		"System.IO.DirectoryInfo::",
+		"System.UnauthorizedAccessException",
+		"System.IO.FileNotFoundException",
+		"System.IO.DirectoryNotFoundException",
 	)
 	// netstandard-lite currently promises exactly the same BCL surface as
 	// rules (System.Type moved into `rules` in Fase 3.14, System.Convert

@@ -11,9 +11,14 @@ import (
 )
 
 // VM is the vmnet entry point: it loads assemblies and runs methods from
-// them. See docs/en/spec.md §6. Fase 1 has no configurable options yet
-// (profiles, limits, permissions land in Fase 2-4 — see docs/en/ROADMAP.md).
-type VM struct{}
+// them. See docs/en/spec.md §6.
+type VM struct {
+	// permissions is the deny-by-default capability gate every Assembly
+	// loaded from this VM carries a pointer back to (see Permissions()
+	// and Assembly.machine() in call.go) — the zero value denies
+	// everything it covers, matching docs/en/security.md's threat model.
+	permissions runtime.Permissions
+}
 
 // New creates a VM.
 func New() *VM {
@@ -47,5 +52,6 @@ func (vm *VM) LoadBytes(name string, data []byte) (*Assembly, error) {
 		methods:       map[uint32]*runtime.Method{},
 		types:         map[string]*runtime.Type{},
 		explicitImpls: map[string]explicitImplResult{},
+		permissions:   &vm.permissions,
 	}, nil
 }

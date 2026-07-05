@@ -4955,6 +4955,149 @@ go test ./...
 ```
 
 ---
+### Fase 3.59 — un modelo `Permissions` real, más `System.IO.File`/`Directory`/`FileStream`/`FileInfo`/`DirectoryInfo` deny-by-default
+
+**Objetivo:** hacer aterrizar la puerta de capacidad `Permissions` prometida hace tiempo (el propio
+checklist de Fase 4 de este archivo, `docs/en/security.md`) para I/O de disco real específicamente,
+y después implementar la superficie `System.IO.File`/`Directory`/`FileStream`/`FileInfo`/
+`DirectoryInfo` que un barrido de todo el corpus (la misma metodología de hallazgos agregados que
+usaron las Fases 3.54-3.58, esta vez apuntando a `System.IO.File`/`Directory`/`FileStream`/`Path`,
+`System.Diagnostics.Process`, y `System.Net.*`) mostró que tenía demanda real, aunque modesta (~40
+hits entre `ClosedXML`/`NPOI`) — detrás de esa misma puerta desde la primera línea de código, en
+vez de enviarla sin puerta y retrofitearla después.
+
+- **`internal/runtime/permissions.go`** (nuevo): el propio struct `Permissions`
+  (`AllowFileRead`/`AllowFileWrite`/`AllowConsole`/`AllowNetwork`) — puesto deliberadamente en
+  `internal/runtime`, no en `internal/interpreter` ni en el paquete `vmnet` de nivel superior, así
+  tanto `internal/bcl` como `internal/interpreter` pueden ver el mismo tipo sin ningún ciclo de
+  import (el paquete de nivel superior ya depende de ambos; `internal/bcl` nunca debe depender de
+  `internal/interpreter`). `AllowFileRead`/`AllowFileWrite` se hacen cumplir desde esta Fase;
+  `AllowConsole`/`AllowNetwork` existen por compatibilidad a futuro con la promesa documentada de
+  hace tiempo de este proyecto pero todavía no protegen nada — `System.Console.Write`/`WriteLine`
+  sigue siempre permitido, sin cambios.
+- **`permissions.go`** (raíz del repo, nuevo): la API pública — `type Permissions =
+  runtime.Permissions` y `func (vm *VM) Permissions() *Permissions`, devolviendo un puntero al
+  propio estado de `vm` (a diferencia de `vm.NuGet()`, que devuelve un lector de manifest/lockfile
+  fresco y sin estado en cada llamada) así una mutación hecha después de `LoadFile`/`LoadPackage`
+  igual toma efecto en cada llamada subsiguiente a través de ese mismo `Assembly`.
+- **Conectando `Permissions` desde `VM` hasta `Machine`**: `VM` ganó un campo `permissions
+  runtime.Permissions` (antes `type VM struct{}`, completamente vacío); `Assembly` ganó un campo
+  `permissions *runtime.Permissions`, seteado a `&vm.permissions` en `LoadBytes` (cada camino de
+  carga — `LoadFile`, `LoadPackage` — pasa por esta única función); `Assembly.machine()` de
+  `call.go` ganó `.WithPermissions(asm.permissions)` en su cadena de builder, igualando cada otro
+  `With*Resolver` que ya está ahí. `interpreter.Machine` ganó un campo `Permissions
+  *runtime.Permissions` y un setter `WithPermissions` — `nil` (cualquier Machine construido sin
+  esto, incluyendo cada fixture de test preexistente) se trata idéntico a un `&runtime.
+  Permissions{}` explícito con todo denegado, nunca como "permitir todo".
+- **La puerta en sí, `internal/interpreter/permissions.go`**: en vez de conectar un chequeo de
+  Permissions dentro de cada nativo individual (lo que significaría cambiar de forma invasiva las
+  firmas de función `Native`/`NativeCtor` simples de `internal/bcl`, o darle a esa capa más baja
+  conciencia de un Machine que nunca estuvo pensada para tener — ver el propio comentario de
+  `calls.go` sobre por qué los `bcl.Native` simples no pueden ver un `Machine`), `tryCall` (el
+  único punto de embudo que ya distingue nativos `bcl.Lookup` simples de los Machine-aware) y
+  `newObj` (el embudo para `bcl.LookupCtor`) consultan cada uno un mapa chico —
+  `permissionGatedBCLNatives`/`permissionGatedBCLCtors` — indexado por el nombre completo exacto
+  del nativo, ANTES de siquiera llamar al nativo. Una capacidad denegada tira un
+  `System.UnauthorizedAccessException` real (`unauthorized`, mismo archivo) sin que el propio
+  código Go del nativo protegido corra en absoluto — ningún efecto parcial, ningún canal lateral
+  de tiempo entre "denegado" y "el archivo no existe."
+- **`internal/bcl/system_io_file.go`** (nuevo): los propios nativos reales — `File.Exists`/
+  `OpenRead`/`ReadAllText`/`ReadAllBytes`/`WriteAllText`/`WriteAllBytes`/`Delete`/`SetAttributes`/
+  `Create`/`Copy`, `Directory.CreateDirectory`/`Exists`, el constructor de `FileStream` (cada
+  `FileMode` real — `CreateNew`/`Create`/`Open`/`OpenOrCreate`/`Truncate`/`Append`, la misma
+  postura de "sin TypeDef para un enum de BCL, switch sobre el int32 crudo" que ya usa el propio
+  manejo de `SeekOrigin` de `msSeek`), y `FileInfo`/`DirectoryInfo` (constructores que nunca tocan
+  disco por sí mismos, igualando la semántica perezosa real, más sus miembros reales que sí tocan
+  disco). Cada uno de estos asume que su propia puerta de permiso ya corrió y siempre realiza el
+  I/O real sin condiciones — `internal/bcl` en sí se mantiene completamente agnóstico de permisos,
+  a propósito.
+- **`nativeMemoryStream` de `internal/bcl/system_io.go` ganó dos campos**: `typeName` (el mismo
+  patrón que ya usa `nativeList` para distinguir `List\`1` del legado `ArrayList`) así un stream
+  real, respaldado por disco, se reporta a sí mismo como `System.IO.FileStream`, no
+  `System.IO.MemoryStream`, al despacho virtual y a `NativeTypeName`; y `diskPath`, no vacío solo
+  para un stream capaz de escribir, volcado a la ruta real de una sola vez por `msClose` en el
+  primer `Close`/`Dispose` — cada llamada intermedia de `Read`/`Write`/`Seek`/`Position`/`Length`
+  durante la vida del stream opera puramente sobre el `buf` en memoria, exactamente como ya hace un
+  `MemoryStream`, así `FileStream` obtiene gratis cada miembro de `System.IO.Stream` con solo
+  agregar `"System.IO.FileStream"` como un tercer prefijo al loop de registro ya existente.
+- **Se retrofitearon dos nativos preexistentes de I/O de archivo real, previamente sin ninguna
+  puerta en absoluto**, bajo la misma puerta en vez de dejarlos inconsistentes una vez que existía
+  una puerta: abrir una `Microsoft.Data.Sqlite.SqliteConnection` real (Fase 3.53) ahora requiere
+  `AllowFileRead` y `AllowFileWrite` a la vez; `System.IO.Path.GetTempFileName` (crea un archivo
+  real y vacío en disco vía `os.CreateTemp`, no solo un string de ruta) ahora requiere
+  `AllowFileWrite`.
+- **Un bug real y latente de jerarquía de excepciones, encontrado y arreglado mientras se agregaba
+  esto**: el mapa `exceptionBaseType` mantenido a mano de `internal/interpreter/typecheck.go` no
+  tenía ninguna entrada para `System.IO.IOException`/`FileNotFoundException`/
+  `DirectoryNotFoundException`/`EndOfStreamException`/`InvalidDataException`/
+  `ObjectDisposedException`/`System.Data.DataException`/`ApplicationException` — cada uno de estos
+  ya tenía un constructor registrado (`internal/bcl/system_exception.go`) pero ninguna entrada de
+  jerarquía, así que el recorrido de `nativeMatches` chocaba con un nombre sin entrada en el mapa,
+  intentaba `ResolveType` contra un nombre de BCL plano sin ningún `TypeDef` en el ensamblado
+  cargado, obtenía un error, y devolvía `false` — significando que un `catch (Exception e)` plano
+  (o `catch (IOException e)` para las dos subtipos de `System.IO`) **fallaba en silencio en
+  matchear a alguno de estos**, dejándolo propagar sin atrapar. Los propios tiros nuevos de esta
+  Fase de `System.IO.FileNotFoundException`/`System.UnauthorizedAccessException` hubieran chocado
+  con esto inmediatamente la primera vez que algún llamador envolviera uno en un `catch (Exception
+  e)` plano — arreglado agregando los ocho al mapa con sus tipos base reales de .NET.
+- **`internal/checker/profile.go`**: se agregaron `"System.IO.File::"`/`"System.IO.Directory::"`/
+  `"System.IO.FileStream::"`/`"System.IO.FileInfo::"`/`"System.IO.DirectoryInfo::"` más los dos
+  nombres de tipo de excepción nuevos a `bclPrefixes` de `ProfileRules` (heredado por
+  `ProfileNetStandardLite`) — necesario para el propio test de auto-consistencia del checker
+  (`TestAnalyze_OwnAssemblyIsCompatible`), que requiere que cada método del propio ensamblado
+  fixture de vmnet analice limpio; a diferencia de la mayoría del trabajo de paridad de checker de
+  este proyecto, esto NO es "cero trabajo extra de allowlist a pesar de ser un nativo simple" — el
+  scoping por prefijo de namespace del profile es una puerta separada y deliberada de "qué promete
+  este profile" encima de la mera resolubilidad en tiempo de ejecución (ver el propio comentario
+  de `bclPrefixes`).
+- **Nuevo fixture dorado, `tests/fixtures/csharp/FileIO.cs`**, más `TestPermissions_FileIO` en
+  `vmnet_test.go`: ejercita denegado-por-defecto (incluyendo el propio `catch
+  (UnauthorizedAccessException)`/`catch (Exception)` del fixture, probando el fix de jerarquía de
+  excepciones de arriba), lectura+escritura otorgadas con una re-verificación independiente vía
+  `os.ReadFile` de que resultó un archivo *real* (no una ilusión interna de vmnet), y solo-lectura-
+  otorgada-igual-deniega-escritura.
+- **Nuevo demo, `examples/permissions-demo`**: el mismo C# compilado idéntico
+  (`Vmnet.Fixtures.FileIO`, reusado de la misma forma en que `examples/hello` reusa
+  `SimpleMath`/`Strings`) corrido tres veces contra tres configuraciones distintas de
+  `Permissions`, con una relectura del lado de Go independiente confirmando que el archivo del
+  caso otorgado es real.
+
+### Encontrado, no arreglado (esta Fase)
+
+- **`AllowConsole`/`AllowNetwork` todavía no protegen nada** — definidos en `Permissions` por
+  compatibilidad a futuro con la promesa documentada de hace tiempo de este proyecto, pero
+  `System.Console.*` sigue siempre permitido y no existe ningún nativo que toque la red. Ver
+  `docs/en/security.md`.
+- **`System.Diagnostics.Process`**: el mismo barrido de todo el corpus que motivó el trabajo de
+  File/Directory de arriba encontró **cero** usos reales en los 19 paquetes rastreados —
+  deliberadamente no implementado hasta que aparezca demanda real, en vez de construido de forma
+  especulativa.
+- **`System.Net.Http`/`System.Net.IPAddress`**: se encontró demanda real modesta (`HttpClient`/
+  `HttpResponseMessage`/`HttpContent` de `ClosedXML`, `IPAddress` de `SimpleBase`, probablemente
+  para formateo/validación en vez de redes de verdad) — no implementado esta Fase; un candidato
+  para una futura, protegido por `AllowNetwork` desde su primera línea en vez de retrofiteado.
+- **Los argumentos `FileAccess`/`FileShare` del constructor de `FileStream` se aceptan pero no se
+  hacen cumplir** — los propios métodos Stream de vmnet no rechazan una violación de modo de
+  acceso/compartición en absoluto (la misma postura que ya tiene el resto de `system_io.go`); solo
+  la ruta y el `FileMode` determinan qué capacidad de `Permissions` se requiere.
+- **`FileMode.CreateNew` de `File.Copy` no se distingue de `Create`/`Truncate`** — el
+  `FileMode.CreateNew` real tira `IOException` si el destino ya existe; esta simplificación
+  siempre tiene éxito en su lugar. No se encontró ningún llamador real del corpus que dependa de
+  ese camino de falla específico.
+
+### Cómo verificar Fase 3.59
+
+```bash
+dotnet build tests/fixtures/csharp/Fixtures.csproj -c Release
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+cd examples/permissions-demo && go run . && cd -
+cd examples/sqlite-demo && go run . && cd -   # confirma que el retrofit de SqliteConnection sigue funcionando una vez otorgados AllowFileRead/AllowFileWrite
+```
+
+---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
 
@@ -4964,21 +5107,27 @@ con benchmarks — el paquete completo para que un equipo de ingeniería apruebe
 ### Tareas
 
 **Seguridad / sandbox**
-- [ ] Modelo `Permissions` completo (`AllowConsole/AllowFileRead/AllowNetwork`, deny-by-default)
-      conectado a todos los métodos nativos de BCL
+- [x] Modelo `Permissions` (`AllowFileRead`/`AllowFileWrite`, deny-by-default) conectado a cada
+      método nativo de BCL que toca I/O de disco real — aterrizado en la Fase 3.59
+      (`permissions.go`, `internal/runtime/permissions.go`, `internal/interpreter/permissions.go`).
+      `AllowConsole`/`AllowNetwork` existen en el mismo struct por compatibilidad a futuro pero
+      siguen sin hacerse cumplir — ver `docs/en/security.md`.
 - [x] `MaxArrayLength` — adelantado a Fase 3.5 junto con el soporte de `System.Array` (tenía que
       existir desde el día uno de `newarr`, no tenía sentido esperar a Fase 4)
 - [ ] `MaxStringBytes`
 - [x] `docs/en/security.md`/`docs/es/security.md` — threat model, qué se bloquea por default
-      (agregado después de la Fase 3.53, adelantado respecto al resto de esta sección — ver esos
-      archivos para el estado actual y honesto: hoy no existe ninguna superficie de
-      `System.IO.File`/`System.Diagnostics.Process`/sockets, así que todavía no hay nada que un
-      modelo `Permissions` deba controlar en ese frente)
-- [ ] **Diferido explícitamente hasta después del release actual**: soporte real de
-      `System.IO.File`/`System.Diagnostics.Process`/sockets. Agregar esto ANTES de que el modelo
-      `Permissions` de arriba esté completo le daría al código interpretado capacidad real de
-      filesystem/proceso/red sin ninguna puerta deny-by-default — el modelo `Permissions` necesita
-      llegar primero o junto con esto, no después.
+      (actualizado en la Fase 3.59 para la puerta `Permissions` real ya en su lugar)
+- [x] Soporte real de `System.IO.File`/`Directory`/`FileStream`/`FileInfo`/`DirectoryInfo` —
+      aterrizado en la Fase 3.59, detrás de la puerta `Permissions` de arriba desde su primera
+      línea de código (ver la propia entrada de esa Fase para la metodología del barrido de corpus
+      y la superficie exacta protegida).
+- [ ] Soporte real de `System.Diagnostics.Process`/sockets — todavía no implementado; el barrido
+      de corpus de la Fase 3.59 encontró cero demanda real de `Process` y cero de
+      `System.Net.Sockets` crudo en los 19 paquetes rastreados, así que ninguno está planeado hasta
+      que aparezca demanda real. Se encontró demanda real modesta de `System.Net.Http`
+      (`ClosedXML`) — un candidato para una Fase futura, protegido por `AllowNetwork` desde su
+      primera línea en vez de retrofiteado como tuvieron que ser los dos nativos de archivo
+      preexistentes sin puerta en la Fase 3.59.
 
 **Modelo de errores**
 - [ ] Catálogo completo de códigos `VMNET_*` (spec §30.2) implementado consistentemente

@@ -395,6 +395,11 @@ func convertCharArgsForNative(fullName string, args []runtime.Value, paramTypeNa
 // by the outermost call target's name.
 func (m *Machine) tryCall(fullName string, args []runtime.Value, depth int, instrCount *int64, paramTypeNames []string, methodGenericArgs []string) (v runtime.Value, hasReturn bool, err error, found bool, resolveErr error) {
 	if native, hr, ok := bcl.Lookup(fullName); ok {
+		if gate, gated := permissionGatedBCLNatives[fullName]; gated {
+			if denyErr := gate(m.Permissions, args); denyErr != nil {
+				return runtime.Value{}, hr, denyErr, true, nil
+			}
+		}
 		v, err = native(convertCharArgsForNative(fullName, args, paramTypeNames))
 		return v, hr, err, true, nil
 	}
@@ -539,6 +544,11 @@ func (m *Machine) newObj(in newObjArgs, depth int, instrCount *int64) (runtime.V
 	}
 
 	if ctor, ok := bcl.LookupCtor(in.TypeFullName); ok {
+		if gate, gated := permissionGatedBCLCtors[in.TypeFullName]; gated {
+			if denyErr := gate(m.Permissions, in.Args); denyErr != nil {
+				return runtime.Value{}, denyErr
+			}
+		}
 		obj, err := ctor(in.Args)
 		if err != nil {
 			return runtime.Value{}, err

@@ -19,7 +19,8 @@ func (asm *Assembly) machine() *interpreter.Machine {
 		WithPropertyResolver(r.ResolveProperties).
 		WithMemberParamsResolver(r.ResolveMemberParams).
 		WithFieldsResolver(r.ResolveFields).
-		WithMethodsResolver(r.ResolveMethods)
+		WithMethodsResolver(r.ResolveMethods).
+		WithPermissions(asm.permissions)
 }
 
 // Call resolves typeName.methodName (e.g. "Rules.Engine", "Eval") and

@@ -4790,6 +4790,138 @@ go test ./...
 ```
 
 ---
+## Fase 3.59 — a real `Permissions` model, plus deny-by-default `System.IO.File`/`Directory`/`FileStream`/`FileInfo`/`DirectoryInfo`
+
+**Goal:** land the long-promised `Permissions` capability gate (this file's own Fase 4 checklist,
+`docs/en/security.md`) for real disk I/O specifically, then implement the `System.IO.File`/
+`Directory`/`FileStream`/`FileInfo`/`DirectoryInfo` surface a corpus-wide scan (the same aggregated-
+findings methodology Fase 3.54-3.58 used, this time targeting `System.IO.File`/`Directory`/
+`FileStream`/`Path`, `System.Diagnostics.Process`, and `System.Net.*`) showed real, if modest,
+demand for (~40 hits across `ClosedXML`/`NPOI`) — behind that same gate from the very first line of
+code, rather than shipping it ungated and retrofitting later.
+
+- **`internal/runtime/permissions.go`** (new): the `Permissions` struct itself
+  (`AllowFileRead`/`AllowFileWrite`/`AllowConsole`/`AllowNetwork`) — deliberately placed in
+  `internal/runtime`, not `internal/interpreter` or the top-level `vmnet` package, so both
+  `internal/bcl` and `internal/interpreter` can see the same type with no import cycle (the
+  top-level package already depends on both; `internal/bcl` must never depend on
+  `internal/interpreter`). `AllowFileRead`/`AllowFileWrite` are enforced starting this Fase;
+  `AllowConsole`/`AllowNetwork` exist for forward compatibility with this project's own
+  long-standing documented promise but gate nothing yet — `System.Console.Write`/`WriteLine` stays
+  always-allowed, unchanged.
+- **`permissions.go`** (repo root, new): the public API — `type Permissions = runtime.Permissions`
+  and `func (vm *VM) Permissions() *Permissions`, returning a pointer into `vm`'s own state (unlike
+  `vm.NuGet()`, which returns a fresh, stateless manifest/lockfile reader every call) so a mutation
+  made after `LoadFile`/`LoadPackage` still takes effect on every subsequent call through that same
+  `Assembly`.
+- **Threading `Permissions` from `VM` down to `Machine`**: `VM` gained a `permissions
+  runtime.Permissions` field (previously `type VM struct{}`, completely empty); `Assembly` gained a
+  `permissions *runtime.Permissions` field, set to `&vm.permissions` in `LoadBytes` (every load path
+  — `LoadFile`, `LoadPackage` — funnels through this one function); `call.go`'s
+  `Assembly.machine()` gained `.WithPermissions(asm.permissions)` in its builder chain, mirroring
+  every other `With*Resolver` call already there. `interpreter.Machine` gained a `Permissions
+  *runtime.Permissions` field and `WithPermissions` setter — `nil` (any Machine built without it,
+  every pre-existing test fixture included) is treated identically to an explicit, all-denied
+  `&runtime.Permissions{}`, never as "allow everything."
+- **The actual gate, `internal/interpreter/permissions.go`**: rather than threading a Permissions
+  check into every individual native (which would mean invasively changing `internal/bcl`'s plain
+  `Native`/`NativeCtor` function signatures, or giving that lower layer awareness of a Machine it
+  was never meant to have — see `calls.go`'s own doc comment on why plain `bcl.Native`s can't see a
+  `Machine`), `tryCall` (the single funnel point that already distinguishes plain `bcl.Lookup`
+  natives from Machine-aware ones) and `newObj` (the funnel for `bcl.LookupCtor`) each consult one
+  small map — `permissionGatedBCLNatives`/`permissionGatedBCLCtors` — keyed by the exact native full
+  name, BEFORE ever calling into the native itself. A denied capability throws a real
+  `System.UnauthorizedAccessException` (`unauthorized`, same file) without the gated native's own Go
+  code ever running at all — no partial effect, no timing side channel between "denied" and "file
+  doesn't exist."
+- **`internal/bcl/system_io_file.go`** (new): the real natives themselves — `File.Exists`/
+  `OpenRead`/`ReadAllText`/`ReadAllBytes`/`WriteAllText`/`WriteAllBytes`/`Delete`/`SetAttributes`/
+  `Create`/`Copy`, `Directory.CreateDirectory`/`Exists`, `FileStream`'s constructor (every real
+  `FileMode` — `CreateNew`/`Create`/`Open`/`OpenOrCreate`/`Truncate`/`Append`, same "no TypeDef for
+  a BCL enum, switch on the raw int32" posture `msSeek`'s own `SeekOrigin` handling already uses),
+  and `FileInfo`/`DirectoryInfo` (constructors that never touch disk themselves, matching real
+  lazy semantics, plus their real disk-touching members). Every one of these assumes its own
+  permission gate already ran and always performs the real I/O unconditionally — `internal/bcl`
+  itself stays completely permission-agnostic, by design.
+- **`internal/bcl/system_io.go`'s `nativeMemoryStream` grew two fields**: `typeName` (same pattern
+  `nativeList` already uses to distinguish `List\`1` from the legacy `ArrayList`) so a real,
+  disk-backed stream reports itself as `System.IO.FileStream`, not `System.IO.MemoryStream`, to
+  virtual dispatch and `NativeTypeName`; and `diskPath`, non-empty only for a write-capable stream,
+  flushed to the real path in one shot by `msClose` on the first `Close`/`Dispose` — every
+  intermediate `Read`/`Write`/`Seek`/`Position`/`Length` call during the stream's life operates
+  purely on the in-memory `buf`, exactly like a `MemoryStream` already does, so `FileStream` gets
+  every one of `System.IO.Stream`'s members for free by just adding `"System.IO.FileStream"` as a
+  third prefix to the existing registration loop.
+- **Retrofitted two pre-existing, previously entirely ungated real-file-I/O natives** under the
+  same gate rather than leaving them inconsistent once a gate existed at all: opening a real
+  `Microsoft.Data.Sqlite.SqliteConnection` (Fase 3.53) now requires both `AllowFileRead` and
+  `AllowFileWrite`; `System.IO.Path.GetTempFileName` (creates a real, empty file on disk via
+  `os.CreateTemp`, not just a path string) now requires `AllowFileWrite`.
+- **A real, latent exception-hierarchy bug, found and fixed while adding this**:
+  `internal/interpreter/typecheck.go`'s hand-maintained `exceptionBaseType` map had no entry at all
+  for `System.IO.IOException`/`FileNotFoundException`/`DirectoryNotFoundException`/
+  `EndOfStreamException`/`InvalidDataException`/`ObjectDisposedException`/`System.Data.DataException`/
+  `ApplicationException` — every one of these already had a registered constructor
+  (`internal/bcl/system_exception.go`) but no hierarchy entry, so `nativeMatches`'s walk hit a name
+  with no map entry, tried `ResolveType` against a plain BCL name with no `TypeDef` in the loaded
+  assembly, got an error, and returned `false` — meaning a plain `catch (Exception e)` (or `catch
+  (IOException e)` for the `System.IO` subtypes) **silently failed to match one of these at all**,
+  letting it propagate uncaught. This Fase's own new `System.IO.FileNotFoundException`/
+  `System.UnauthorizedAccessException` throws would have hit this immediately the first time any
+  caller wrapped one in a plain `catch (Exception e)` — fixed by adding all eight to the map with
+  their real .NET base types.
+- **`internal/checker/profile.go`**: added `"System.IO.File::"`/`"System.IO.Directory::"`/
+  `"System.IO.FileStream::"`/`"System.IO.FileInfo::"`/`"System.IO.DirectoryInfo::"` plus the two new
+  exception type names to `ProfileRules`'s `bclPrefixes` (inherited by `ProfileNetStandardLite`) —
+  needed for the checker's own self-consistency dogfood test
+  (`TestAnalyze_OwnAssemblyIsCompatible`), which requires every method in vmnet's own fixture
+  assembly to analyze clean; unlike most of this project's checker-parity work, this ISN'T "zero
+  extra allowlist work despite being a plain native" — the profile's own namespace-prefix scoping is
+  a separate, deliberate "what does this profile promise" gate on top of mere runtime resolvability
+  (see `bclPrefixes`'s own doc comment).
+- **New golden fixture, `tests/fixtures/csharp/FileIO.cs`**, plus `TestPermissions_FileIO` in
+  `vmnet_test.go`: exercises denied-by-default (including the fixture's own `catch
+  (UnauthorizedAccessException)`/`catch (Exception)`, proving the exception-hierarchy fix above),
+  granted read+write with an independent `os.ReadFile` re-check that a *real* file resulted (not a
+  vmnet-internal illusion), and read-only-granted-still-denies-write.
+- **New demo, `examples/permissions-demo`**: the identical compiled C# (`Vmnet.Fixtures.FileIO`,
+  reused the same way `examples/hello` reuses `SimpleMath`/`Strings`) run three times against three
+  different `Permissions` configurations, with an independent Go-side re-read confirming the
+  granted case's file is real.
+
+### Found, not fixed (this Fase)
+
+- **`AllowConsole`/`AllowNetwork` gate nothing yet** — defined on `Permissions` for forward
+  compatibility with this project's own long-standing documented promise, but `System.Console.*`
+  remains always-allowed and no network-touching native exists at all. See `docs/en/security.md`.
+- **`System.Diagnostics.Process`**: the same corpus-wide scan that motivated the File/Directory work
+  above found **zero** real uses across all 19 tracked packages — deliberately not implemented
+  until real demand appears, rather than built speculatively.
+- **`System.Net.Http`/`System.Net.IPAddress`**: modest real demand found (`ClosedXML`'s
+  `HttpClient`/`HttpResponseMessage`/`HttpContent`, `SimpleBase`'s `IPAddress`, likely for
+  formatting/validation rather than actual networking) — not implemented this Fase; a candidate for
+  a future one, gated by `AllowNetwork` from its very first line rather than retrofitted.
+- **`FileStream`'s `FileAccess`/`FileShare` constructor arguments are accepted but not enforced** —
+  vmnet's own Stream methods don't reject an access-mode/sharing violation at all (same posture the
+  rest of `system_io.go` already has); only the path and `FileMode` determine which `Permissions`
+  capability is required.
+- **`File.Copy`'s `CreateNew` `FileMode` doesn't distinguish itself from `Create`/`Truncate`** — real
+  `FileMode.CreateNew` throws `IOException` if the destination already exists; this simplification
+  always succeeds instead. No real corpus caller found relies on that specific failure path.
+
+### How to verify Fase 3.59
+
+```bash
+dotnet build tests/fixtures/csharp/Fixtures.csproj -c Release
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+cd examples/permissions-demo && go run . && cd -
+cd examples/sqlite-demo && go run . && cd -   # confirms the SqliteConnection retrofit still works once AllowFileRead/AllowFileWrite are granted
+```
+
+---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 
 **Goal:** turn the functional engine into an adoptable product — reliable, documented, and
@@ -4798,20 +4930,25 @@ benchmarked — the complete package for an engineering team to approve a real p
 ### Tasks
 
 **Security / sandbox**
-- [ ] Complete `Permissions` model (`AllowConsole/AllowFileRead/AllowNetwork`, deny-by-default)
-      wired into every native BCL method
+- [x] `Permissions` model (`AllowFileRead`/`AllowFileWrite`, deny-by-default) wired into every
+      native BCL method that touches real disk I/O — landed Fase 3.59 (`permissions.go`,
+      `internal/runtime/permissions.go`, `internal/interpreter/permissions.go). `AllowConsole`/
+      `AllowNetwork` exist on the same struct for forward compatibility but remain unenforced —
+      see `docs/en/security.md`.
 - [x] `MaxArrayLength` — pulled forward into Fase 3.5 alongside `System.Array` support (it had to
       exist from day one of `newarr`, no point waiting for Fase 4)
 - [ ] `MaxStringBytes`
 - [x] `docs/en/security.md`/`docs/es/security.md` — threat model, what gets blocked by default
-      (added post-Fase 3.53, ahead of the rest of this section — see those files for the current,
-      honest state: no `System.IO.File`/`System.Diagnostics.Process`/socket surface exists at all
-      today, so there's nothing for a `Permissions` model to gate yet on that front)
-- [ ] **Explicitly deferred until after the current release**: real `System.IO.File`/
-      `System.Diagnostics.Process`/socket support. Adding these BEFORE the `Permissions` model
-      above is complete would hand interpreted code real filesystem/process/network capability
-      with no deny-by-default gate — the `Permissions` model needs to land first or alongside,
-      not after.
+      (updated Fase 3.59 for the real `Permissions` gate now in place)
+- [x] Real `System.IO.File`/`Directory`/`FileStream`/`FileInfo`/`DirectoryInfo` support — landed
+      Fase 3.59, behind the `Permissions` gate above from its first line of code (see that Fase's
+      own entry for the corpus-scan methodology and exact gated surface).
+- [ ] Real `System.Diagnostics.Process`/socket support — still not implemented; the Fase 3.59
+      corpus scan found zero real demand for `Process` and zero for raw `System.Net.Sockets`
+      across all 19 tracked packages, so neither is planned until real demand appears. Modest real
+      demand for `System.Net.Http` was found (`ClosedXML`) — a candidate for a future Fase, gated
+      by `AllowNetwork` from its first line rather than retrofitted the way the two pre-existing
+      ungated file natives had to be in Fase 3.59.
 
 **Error model**
 - [ ] Full catalog of `VMNET_*` codes (spec §30.2) implemented consistently

@@ -138,6 +138,12 @@ func NativeTypeName(native any) (string, bool) {
 	case *nativeArrayEnumerator:
 		return "System.Array+ArrayEnumerator", true
 	case *nativeMemoryStream:
+		// typeName distinguishes a real, disk-backed FileStream from the
+		// default MemoryStream (Fase 3.59) — same pattern nativeList's own
+		// case above uses for List`1 vs ArrayList.
+		if n.typeName != "" {
+			return n.typeName, true
+		}
 		return "System.IO.MemoryStream", true
 	case *nativeConstructorInfo:
 		return "System.Reflection.ConstructorInfo", true
@@ -240,6 +246,15 @@ func NativeTypeName(native any) (string, bool) {
 		return "VmnetInternal.Grouping", true
 	case *nativeDBNull:
 		return "System.DBNull", true
+	case *nativeFileInfo:
+		// Real System.IO.FileInfo (Fase 3.59, system_io_file.go) — needed
+		// so a call site declared against FileSystemInfo (FileInfo's real
+		// base) still redirects to FileInfo's own concrete registrations
+		// via virtual dispatch, the same reason nativeSqliteConnection's
+		// own case above exists for IDbConnection-declared call sites.
+		return "System.IO.FileInfo", true
+	case *nativeDirectoryInfo:
+		return "System.IO.DirectoryInfo", true
 	case *nativeSqliteConnection:
 		// Real, Go-native ADO.NET provider (Fase 3.53, system_data_sqlite.go)
 		// — needed for the exact same reason nativeStringComparer's own case

@@ -25,6 +25,16 @@ type Machine struct {
 	ResolveMethods          MethodsResolver
 	Limits                  Limits
 
+	// Permissions is the deny-by-default capability gate (Fase 3.59,
+	// internal/runtime/permissions.go) checked by permissionGatedBCLNatives
+	// (calls.go) before any permission-gated plain bcl.Native runs — real
+	// filesystem access, today. nil (a Machine built without
+	// WithPermissions, e.g. most existing tests/fixtures) is treated
+	// exactly like a non-nil zero value: every gated capability denied,
+	// never "ungated" — a missing Permissions must never silently behave
+	// as "allow everything".
+	Permissions *runtime.Permissions
+
 	// cctorsRunning tracks static constructors currently executing on
 	// this Machine's own call chain (a Machine is never shared across
 	// goroutines — see call.go's asm.machine()), so a .cctor that reads
@@ -115,6 +125,16 @@ func (m *Machine) WithFieldsResolver(r FieldsResolver) *Machine {
 // GetMethods) — same rationale as WithFieldBytesResolver/WithMemberResolver.
 func (m *Machine) WithMethodsResolver(r MethodsResolver) *Machine {
 	m.ResolveMethods = r
+	return m
+}
+
+// WithPermissions attaches the deny-by-default capability gate (Fase
+// 3.59) — same rationale as WithFieldBytesResolver/WithMemberResolver: a
+// separate setter so every existing caller (tests especially) keeps
+// compiling unchanged. Unset (nil) behaves identically to an explicit
+// &runtime.Permissions{} — every gated capability denied.
+func (m *Machine) WithPermissions(p *runtime.Permissions) *Machine {
+	m.Permissions = p
 	return m
 }
 

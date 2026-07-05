@@ -2,6 +2,7 @@ package bcl
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/arturoeanton/go-vmnet/internal/runtime"
 )
@@ -26,6 +27,22 @@ type nativeMemoryStream struct {
 	buf    []byte
 	pos    int
 	closed bool
+
+	// typeName distinguishes a real, disk-backed System.IO.FileStream
+	// from the default System.IO.MemoryStream (Fase 3.59, system_io_file.
+	// go) — same typeName-field pattern nativeList already uses to tell
+	// List`1 apart from the legacy ArrayList. "" means MemoryStream.
+	typeName string
+
+	// diskPath is non-empty only for a write-capable FileStream (File.
+	// Create/FileInfo.Create, or FileStream/FileInfo.Open opened in any
+	// mode but Open) — every Read/Write/Seek/Position call during the
+	// stream's lifetime operates purely on buf in memory, exactly like a
+	// MemoryStream; msClose flushes the final buf content to this real
+	// path in one shot on Close/Dispose, matching the observable end
+	// state of a real incrementally-written file without vmnet needing
+	// its own separate incremental-disk-write plumbing.
+	diskPath string
 }
 
 func (ms *nativeMemoryStream) writeAt(data []byte) {
@@ -49,7 +66,7 @@ func init() {
 	// own backing state in their own real fields, not in a native buffer.
 	register("System.IO.Stream::.ctor", false, streamCtorNoop)
 
-	for _, prefix := range []string{"System.IO.MemoryStream", "System.IO.Stream"} {
+	for _, prefix := range []string{"System.IO.MemoryStream", "System.IO.Stream", "System.IO.FileStream"} {
 		register(prefix+"::Write", false, msWrite)
 		register(prefix+"::WriteByte", false, msWriteByte)
 		register(prefix+"::Read", true, msRead)
@@ -308,10 +325,24 @@ func msFlush(args []runtime.Value) (runtime.Value, error) {
 // StringBuilder's Capacity stand-in): real code paths in these packages
 // close a stream once, at the very end, so there's nothing meaningful
 // left to guard against in practice.
+//
+// A real, disk-backed FileStream (diskPath != "", Fase 3.59) flushes its
+// entire in-memory buf to that real path here, once, on the first
+// Close/Dispose — matching the observable end state of a real
+// incrementally-written file (see nativeMemoryStream's own doc comment)
+// without needing separate incremental-disk-write plumbing. Guarded by
+// !ms.closed so a caller than calls both Close() and Dispose() (a common,
+// real `using` + explicit Close() pattern) doesn't re-write the same
+// bytes twice.
 func msClose(args []runtime.Value) (runtime.Value, error) {
 	ms, err := asMemoryStream(args)
 	if err != nil {
 		return runtime.Value{}, err
+	}
+	if !ms.closed && ms.diskPath != "" {
+		if werr := os.WriteFile(ms.diskPath, ms.buf, 0644); werr != nil {
+			return runtime.Value{}, &runtime.ManagedException{TypeName: "System.IO.IOException", Message: werr.Error()}
+		}
 	}
 	ms.closed = true
 	return runtime.Value{}, nil

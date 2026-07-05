@@ -223,6 +223,29 @@ var exceptionBaseType = map[string]string{
 	"System.NotImplementedException":     "System.SystemException",
 	"System.OperationCanceledException":  "System.SystemException",
 	"System.SystemException":             "System.Exception",
+
+	// System.IO.*/System.ObjectDisposedException/System.Data.DataException/
+	// System.ApplicationException/System.UnauthorizedAccessException (Fase
+	// 3.59) — every one of these already had a registered constructor
+	// (system_exception.go) but no hierarchy entry here, which meant
+	// `catch (Exception e)` (or `catch (IOException e)` for the two
+	// System.IO subtypes) silently failed to match one of them at all:
+	// nativeMatches's walk hit a name with no exceptionBaseType entry,
+	// tried ResolveType on a plain BCL name with no TypeDef in the loaded
+	// assembly, got an error, and returned false — a real, latent bug this
+	// Fase's own new System.IO.FileNotFoundException/
+	// UnauthorizedAccessException throws would otherwise have hit
+	// immediately the first time any caller wrapped one in a plain
+	// `catch (Exception e)`.
+	"System.IO.IOException":                "System.SystemException",
+	"System.IO.FileNotFoundException":      "System.IO.IOException",
+	"System.IO.DirectoryNotFoundException": "System.IO.IOException",
+	"System.IO.EndOfStreamException":       "System.IO.IOException",
+	"System.IO.InvalidDataException":       "System.IO.IOException",
+	"System.UnauthorizedAccessException":   "System.SystemException",
+	"System.ObjectDisposedException":       "System.InvalidOperationException",
+	"System.Data.DataException":            "System.SystemException",
+	"System.ApplicationException":          "System.Exception",
 }
 
 // nativeMatches handles isinst/castclass against a native-backed

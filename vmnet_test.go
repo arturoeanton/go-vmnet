@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -1812,6 +1813,161 @@ func TestInstanceAPI(t *testing.T) {
 	t.Run("New error for unknown type", func(t *testing.T) {
 		if _, err := asm.New("Vmnet.Fixtures.DoesNotExist"); err == nil {
 			t.Error("New(DoesNotExist) succeeded, want error")
+		}
+	})
+}
+
+// loadFixtureWithPermissions is loadFixture, but on a VM whose Permissions
+// the caller gets to configure before the fixture assembly loads — needed
+// since Permissions is deny-by-default per-VM state (permissions.go), not
+// a global, and loadFixture's own vm is private to it.
+func loadFixtureWithPermissions(t *testing.T, configure func(*Permissions)) *Assembly {
+	t.Helper()
+	vm := New()
+	if configure != nil {
+		configure(vm.Permissions())
+	}
+	asm, err := vm.LoadFile(filepath.FromSlash(fixtureRelPath))
+	if err != nil {
+		t.Skipf("fixture assembly not built: %v (run `dotnet build tests/fixtures/csharp/Fixtures.csproj -c Release`)", err)
+	}
+	return asm
+}
+
+// TestPermissions_FileIO exercises Fase 3.59's deny-by-default capability
+// gate end to end against real disk I/O: denied by default (the zero
+// Permissions value), then explicitly granted, with the file operations
+// themselves — File/Directory/FileStream/FileInfo/DirectoryInfo — proven
+// to actually touch a real, temporary path on disk, not just return
+// plausible-looking values.
+func TestPermissions_FileIO(t *testing.T) {
+	dir := t.TempDir()
+	textPath := filepath.Join(dir, "hello.txt")
+	subDir := filepath.Join(dir, "sub")
+
+	t.Run("denied by default", func(t *testing.T) {
+		asm := loadFixtureWithPermissions(t, nil)
+
+		_, err := asm.Call("Vmnet.Fixtures.FileIO", "WriteThenReadText", String(textPath), String("hi"))
+		if err == nil {
+			t.Fatal("WriteThenReadText with no Permissions granted succeeded, want UnauthorizedAccessException")
+		}
+		var ex *runtime.ManagedException
+		if !errors.As(err, &ex) || ex.TypeName != "System.UnauthorizedAccessException" {
+			t.Errorf("WriteThenReadText error = %v, want a System.UnauthorizedAccessException", err)
+		}
+
+		// The fixture's own catch (UnauthorizedAccessException)/catch
+		// (Exception) both need to actually match a ManagedException
+		// thrown with this exact TypeName — verifies the typecheck.go
+		// exceptionBaseType fix (System.UnauthorizedAccessException ->
+		// System.SystemException -> System.Exception), not just that the
+		// gate throws something.
+		out, err := asm.Call("Vmnet.Fixtures.FileIO", "ReadCatchingUnauthorized", String(textPath))
+		if err != nil {
+			t.Fatalf("ReadCatchingUnauthorized error = %v", err)
+		}
+		if got := out.Native().(string); got != "DENIED" {
+			t.Errorf("ReadCatchingUnauthorized() = %q, want %q", got, "DENIED")
+		}
+	})
+
+	t.Run("granted: real read+write round-trip", func(t *testing.T) {
+		asm := loadFixtureWithPermissions(t, func(p *Permissions) {
+			p.AllowFileRead = true
+			p.AllowFileWrite = true
+		})
+
+		out, err := asm.Call("Vmnet.Fixtures.FileIO", "WriteThenReadText", String(textPath), String("hello vmnet"))
+		if err != nil {
+			t.Fatalf("WriteThenReadText error = %v", err)
+		}
+		if got := out.Native().(string); got != "hello vmnet" {
+			t.Errorf("WriteThenReadText() = %q, want %q", got, "hello vmnet")
+		}
+		// Prove it's a REAL file, not just an in-memory illusion.
+		if data, rerr := os.ReadFile(textPath); rerr != nil || string(data) != "hello vmnet" {
+			t.Errorf("real file at %s = %q, %v; want %q, nil", textPath, data, rerr, "hello vmnet")
+		}
+
+		lenOut, err := asm.Call("Vmnet.Fixtures.FileIO", "WriteThenReadBytesLength", String(textPath), String("abc"))
+		if err != nil {
+			t.Fatalf("WriteThenReadBytesLength error = %v", err)
+		}
+		if got := lenOut.Native().(int32); got != 3 {
+			t.Errorf("WriteThenReadBytesLength() = %d, want 3", got)
+		}
+
+		fsOut, err := asm.Call("Vmnet.Fixtures.FileIO", "WriteViaFileStreamThenReadViaFile", String(textPath), String("via filestream"))
+		if err != nil {
+			t.Fatalf("WriteViaFileStreamThenReadViaFile error = %v", err)
+		}
+		if got := fsOut.Native().(string); got != "via filestream" {
+			t.Errorf("WriteViaFileStreamThenReadViaFile() = %q, want %q", got, "via filestream")
+		}
+
+		fiLen, err := asm.Call("Vmnet.Fixtures.FileIO", "FileInfoLength", String(textPath))
+		if err != nil {
+			t.Fatalf("FileInfoLength error = %v", err)
+		}
+		if got := fiLen.Native().(int64); got != int64(len("via filestream")) {
+			t.Errorf("FileInfoLength() = %d, want %d", got, len("via filestream"))
+		}
+
+		fiExists, err := asm.Call("Vmnet.Fixtures.FileIO", "FileInfoExists", String(textPath))
+		if err != nil {
+			t.Fatalf("FileInfoExists error = %v", err)
+		}
+		if got := fiExists.Native().(int32); got == 0 {
+			t.Error("FileInfoExists(real file) = false, want true")
+		}
+
+		delOut, err := asm.Call("Vmnet.Fixtures.FileIO", "DeleteAndCheck", String(textPath))
+		if err != nil {
+			t.Fatalf("DeleteAndCheck error = %v", err)
+		}
+		if got := delOut.Native().(int32); got != 0 {
+			t.Error("DeleteAndCheck() File.Exists after Delete = true, want false")
+		}
+		if _, statErr := os.Stat(textPath); statErr == nil {
+			t.Error("real file still exists on disk after DeleteAndCheck")
+		}
+
+		dirOut, err := asm.Call("Vmnet.Fixtures.FileIO", "CreateDirectoryAndCheck", String(subDir))
+		if err != nil {
+			t.Fatalf("CreateDirectoryAndCheck error = %v", err)
+		}
+		if got := dirOut.Native().(int32); got == 0 {
+			t.Error("CreateDirectoryAndCheck() = false, want true")
+		}
+		if info, statErr := os.Stat(subDir); statErr != nil || !info.IsDir() {
+			t.Errorf("real directory at %s missing after CreateDirectoryAndCheck: %v", subDir, statErr)
+		}
+
+		diExists, err := asm.Call("Vmnet.Fixtures.FileIO", "DirectoryInfoExists", String(subDir))
+		if err != nil {
+			t.Fatalf("DirectoryInfoExists error = %v", err)
+		}
+		if got := diExists.Native().(int32); got == 0 {
+			t.Error("DirectoryInfoExists(real dir) = false, want true")
+		}
+	})
+
+	t.Run("read-only grant still denies write", func(t *testing.T) {
+		readOnlyPath := filepath.Join(dir, "readonly-target.txt")
+		asm := loadFixtureWithPermissions(t, func(p *Permissions) {
+			p.AllowFileRead = true
+		})
+		_, err := asm.Call("Vmnet.Fixtures.FileIO", "WriteThenReadText", String(readOnlyPath), String("nope"))
+		if err == nil {
+			t.Fatal("WriteThenReadText with only AllowFileRead granted succeeded, want UnauthorizedAccessException")
+		}
+		var ex *runtime.ManagedException
+		if !errors.As(err, &ex) || ex.TypeName != "System.UnauthorizedAccessException" {
+			t.Errorf("WriteThenReadText error = %v, want a System.UnauthorizedAccessException", err)
+		}
+		if _, statErr := os.Stat(readOnlyPath); statErr == nil {
+			t.Error("a file was created on disk despite AllowFileWrite being denied")
 		}
 	})
 }

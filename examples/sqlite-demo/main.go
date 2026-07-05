@@ -43,6 +43,12 @@ func main() {
 	os.Remove(dbPath) // idempotent: a repeat `go run .` starts from an empty file, same as every other demo re-running its own fixture from scratch.
 
 	vm := vmnet.New()
+	// Fase 3.59: real disk I/O is deny-by-default now — opening a real
+	// SqliteConnection touches a real file on disk (reads and can create/
+	// write it), so this demo must explicitly opt in, the same way any
+	// real embedding program would. See docs/en/security.md.
+	vm.Permissions().AllowFileRead = true
+	vm.Permissions().AllowFileWrite = true
 
 	if err := vm.NuGet().Add("Dapper", "2.1.79"); err != nil {
 		log.Fatalf("NuGet().Add: %v", err)
