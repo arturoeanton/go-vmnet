@@ -6003,6 +6003,66 @@ go doc -all . | diff - <(cat docs/en/api-stability.md)  # sanity-check only; exp
 ```
 
 ---
+## Fase 3.72 — `MaxStringBytes`, the string analogue of `MaxArrayLength`
+
+**Goal:** the first item of Priority 3 (incremental hardening) — `newarr` has been bounded against
+an adversarial length since Fase 3.5 (`MaxArrayLength`), but nothing bounded a single string-
+producing call from requesting an equally adversarial size; a real call site like `new
+string('x', int.MaxValue)` or `"x".PadLeft(int.MaxValue)` could attempt a multi-gigabyte
+allocation in one step.
+
+**Result: a new `Limits.MaxStringBytes` (default 64 MiB), enforced at both the two known call
+sites that can request a huge allocation from a bare `int` argument BEFORE any allocation happens,
+and — as a general safety net — after every native BCL call's result, in case some other native
+this Fase didn't specifically audit produces something oversized.**
+
+- **Two real, adversarial call sites, checked before the allocation**: `new string(char, int
+  count)` (`Machine.newObj`'s own dedicated `System.String` path, since a vmnet string is a plain
+  `KindString`, not the `KindObject` every other native ctor returns) and
+  `String.PadLeft`/`PadRight`'s own `width` argument (a new `stringSizeGatedBCLNatives` map in
+  `calls.go`, mirroring `permissionGatedBCLNatives`'s own established pattern of a name-keyed pre-
+  call gate). Deliberately narrow, not a general "any int argument might be a size" heuristic: `new
+  string(char[], start, length)`'s own `char[]` came from a real `newarr`, already bounded by
+  `MaxArrayLength` — nothing new to gate there.
+- **A general post-call safety net** (`Machine.checkStringLimit`, called from all three of
+  `tryCall`'s own native-dispatch paths — plain `bcl.Lookup`, `genericMachineRegistry`,
+  `machineRegistry`): any native call whose result is a `KindString` longer than `MaxStringBytes`
+  is rejected with `ErrStringTooLarge`, even if it wasn't one of the two specifically pre-checked
+  call sites above (e.g. `String.Concat` of two already-large-but-individually-under-the-limit
+  strings, or `StringBuilder.ToString()` after a large buffer).
+  Checking the RESULT is deliberately insufficient on its own for the pre-checked call sites — by
+  the time `strings.Repeat` in Go's own standard library returns (or panics) from an absurd count,
+  the allocation attempt already happened; the pre-check exists specifically to stop that class of
+  case before it can.
+- **`ErrStringTooLarge`** classifies the same way `ErrArrayTooLarge`/`ErrCallDepthExceeded`/
+  `ErrInstructionLimitExceeded` already do (`errors.go`'s own `classify`) — spec §30.2 has one
+  `CodeCallDepthExceeded` code for the whole "a configured execution-resource limit was exceeded"
+  family, not one per specific limit.
+- **A real, honest, pre-existing gap this Fase's own investigation surfaced, not introduced**:
+  there is no public API to configure ANY `Limits` field (`MaxCallDepth`/`MaxInstructions`/
+  `MaxStackDepth`/`MaxArrayLength`, and now `MaxStringBytes`) — `call.go`'s own machine-construction
+  path always uses `interpreter.DefaultLimits()`. This predates `MaxStringBytes` (it was already
+  true for `MaxArrayLength` since Fase 3.5) and is out of this Fase's own scope to fix, but is
+  worth naming plainly rather than leaving implicit — a future Fase exposing configurable limits
+  through `VM`/`Assembly` would need to update `docs/en/api-stability.md`'s own frozen surface
+  accordingly.
+- **Four new tests** (`internal/interpreter/eval_test.go`, hand-built IR in the same style as the
+  existing `TestInvoke_MaxStackDepth`/`TestInvoke_CallDepthExceeded`): the `PadLeft` pre-check, the
+  `new string(...)` pre-check, a legitimate small `PadLeft` still working normally under the limit,
+  and the post-call safety net catching an oversized `String.Concat` result the pre-checks don't
+  cover.
+
+### How to verify Fase 3.72
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+go test -run "TestInvoke_MaxStringBytes" -v ./internal/interpreter/...
+```
+
+---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 
 **Goal:** turn the functional engine into an adoptable product — reliable, documented, and
@@ -6018,7 +6078,9 @@ benchmarked — the complete package for an engineering team to approve a real p
       see `docs/en/security.md`.
 - [x] `MaxArrayLength` — pulled forward into Fase 3.5 alongside `System.Array` support (it had to
       exist from day one of `newarr`, no point waiting for Fase 4)
-- [ ] `MaxStringBytes`
+- [x] `MaxStringBytes` — landed Fase 3.72 (`internal/interpreter/limits.go`/`calls.go`), checked
+      before the allocation at the two known adversarial call sites (`new string(char, count)`,
+      `PadLeft`/`PadRight`) plus a general post-call safety net for every other native
 - [x] `docs/en/security.md`/`docs/es/security.md` — threat model, what gets blocked by default
       (updated Fase 3.59 for the real `Permissions` gate now in place)
 - [x] Real `System.IO.File`/`Directory`/`FileStream`/`FileInfo`/`DirectoryInfo` support — landed

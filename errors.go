@@ -140,8 +140,9 @@ func classify(err error) *Error {
 		return &Error{Code: CodeStackOverflow, Message: err.Error(), Cause: err}
 	case errors.Is(err, interpreter.ErrCallDepthExceeded),
 		errors.Is(err, interpreter.ErrInstructionLimitExceeded),
-		errors.Is(err, interpreter.ErrArrayTooLarge):
-		// All three are "a configured execution-resource limit was
+		errors.Is(err, interpreter.ErrArrayTooLarge),
+		errors.Is(err, interpreter.ErrStringTooLarge):
+		// All four are "a configured execution-resource limit was
 		// exceeded" (spec §26.1/§13.3) — spec §30.2 only lists one code
 		// for this whole family, not one per specific limit.
 		return &Error{Code: CodeCallDepthExceeded, Message: err.Error(), Cause: err}

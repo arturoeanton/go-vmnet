@@ -86,3 +86,117 @@ func TestInvoke_CallDepthExceeded(t *testing.T) {
 		t.Fatalf("Invoke() error = %v, want ErrCallDepthExceeded", err)
 	}
 }
+
+// TestInvoke_MaxStringBytes_PadLeft proves the Fase 3.72 pre-call size
+// check: `"x".PadLeft(a huge width)` must be rejected BEFORE
+// strings.Repeat ever runs, not after — the whole point of checking
+// PadLeft's own width argument ahead of the call (calls.go's
+// checkStringSizeRequest), rather than relying on checkStringLimit's
+// after-the-fact check, which would already be too late for a real,
+// multi-gigabyte allocation attempt.
+func TestInvoke_MaxStringBytes_PadLeft(t *testing.T) {
+	method := &runtime.Method{
+		FullName:  "Broken::HugePad",
+		HasReturn: true,
+		MaxStack:  2,
+		IR: []ir.Instr{
+			ir.LoadString{Value: "x"},
+			ir.LoadConstI4{Value: 999_999_999},
+			ir.Call{FullName: "System.String::PadLeft", ArgCount: 2, HasReturn: true},
+			ir.Return{HasValue: true},
+		},
+	}
+
+	limits := DefaultLimits()
+	limits.MaxStringBytes = 1024
+
+	m := New(nil, nil, limits)
+	_, err := m.Invoke(method, nil)
+	if !errors.Is(err, ErrStringTooLarge) {
+		t.Fatalf("Invoke() error = %v, want ErrStringTooLarge", err)
+	}
+}
+
+// TestInvoke_MaxStringBytes_NewStringCtor mirrors the PadLeft case above
+// for `new string(char, int)` — the other bare-int-argument string
+// constructor with no preceding array allocation to have already been
+// bounded by MaxArrayLength.
+func TestInvoke_MaxStringBytes_NewStringCtor(t *testing.T) {
+	method := &runtime.Method{
+		FullName:  "Broken::HugeNewString",
+		HasReturn: true,
+		MaxStack:  2,
+		IR: []ir.Instr{
+			ir.LoadConstI4{Value: int32('x')},
+			ir.LoadConstI4{Value: 999_999_999},
+			ir.NewObj{TypeFullName: "System.String", CtorFullName: "System.String::.ctor", ArgCount: 2},
+			ir.Return{HasValue: true},
+		},
+	}
+
+	limits := DefaultLimits()
+	limits.MaxStringBytes = 1024
+
+	m := New(nil, nil, limits)
+	_, err := m.Invoke(method, nil)
+	if !errors.Is(err, ErrStringTooLarge) {
+		t.Fatalf("Invoke() error = %v, want ErrStringTooLarge", err)
+	}
+}
+
+// TestInvoke_MaxStringBytes_AllowsSmallResult proves MaxStringBytes only
+// rejects a genuinely oversized result — a legitimate, small PadLeft call
+// under the limit must keep working normally.
+func TestInvoke_MaxStringBytes_AllowsSmallResult(t *testing.T) {
+	method := &runtime.Method{
+		FullName:  "Broken::SmallPad",
+		HasReturn: true,
+		MaxStack:  2,
+		IR: []ir.Instr{
+			ir.LoadString{Value: "x"},
+			ir.LoadConstI4{Value: 5},
+			ir.Call{FullName: "System.String::PadLeft", ArgCount: 2, HasReturn: true},
+			ir.Return{HasValue: true},
+		},
+	}
+
+	limits := DefaultLimits()
+	limits.MaxStringBytes = 1024
+
+	m := New(nil, nil, limits)
+	v, err := m.Invoke(method, nil)
+	if err != nil {
+		t.Fatalf("Invoke() error = %v, want nil", err)
+	}
+	if v.Kind != runtime.KindString || v.Str != "    x" {
+		t.Errorf("Invoke() = %+v, want the string %q", v, "    x")
+	}
+}
+
+// TestInvoke_MaxStringBytes_CatchesResultAfterTheFact proves
+// checkStringLimit's own general, post-call safety net: a native not in
+// stringSizeGatedBCLNatives (Concat, here) that still manages to produce
+// an oversized result gets caught after the call returns.
+func TestInvoke_MaxStringBytes_CatchesResultAfterTheFact(t *testing.T) {
+	big := strings.Repeat("x", 2000)
+	method := &runtime.Method{
+		FullName:  "Broken::HugeConcat",
+		HasReturn: true,
+		MaxStack:  2,
+		IR: []ir.Instr{
+			ir.LoadString{Value: big},
+			ir.LoadString{Value: big},
+			ir.Call{FullName: "System.String::Concat", ArgCount: 2, HasReturn: true},
+			ir.Return{HasValue: true},
+		},
+	}
+
+	limits := DefaultLimits()
+	limits.MaxStringBytes = 1024
+
+	m := New(nil, nil, limits)
+	_, err := m.Invoke(method, nil)
+	if !errors.Is(err, ErrStringTooLarge) {
+		t.Fatalf("Invoke() error = %v, want ErrStringTooLarge", err)
+	}
+}

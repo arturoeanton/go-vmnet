@@ -418,6 +418,72 @@ func convertCharArgsForNative(fullName string, args []runtime.Value, paramTypeNa
 	return out
 }
 
+// checkStringLimit enforces MaxStringBytes (Fase 3.72) at every real
+// string-producing choke point — every native BCL call result (tryCall's
+// three registries) and `new string(...)` (newObj's own separate path
+// below, since a vmnet string is a plain KindString, not the KindObject
+// every other native ctor returns). A single, real call site — `new
+// string('x', int.MaxValue)`, "x".PadLeft(int.MaxValue), a String.Concat
+// of already-large operands, StringBuilder.ToString() after a very large
+// buffer — can attempt a multi-gigabyte allocation in one step, before
+// MaxInstructions (which only bounds a LOOP of many small steps) ever
+// gets a chance to trip; the same "one call, not a loop" gap
+// MaxArrayLength already closed for newarr. err is passed through
+// unchanged (and the limit is never checked) when err is already
+// non-nil, so a real native failure is never masked by a resource-limit
+// error about its own (possibly meaningless) zero-value result.
+func (m *Machine) checkStringLimit(v runtime.Value, err error) (runtime.Value, error) {
+	if err != nil || v.Kind != runtime.KindString {
+		return v, err
+	}
+	if m.Limits.MaxStringBytes > 0 && len(v.Str) > m.Limits.MaxStringBytes {
+		return runtime.Value{}, ErrStringTooLarge
+	}
+	return v, err
+}
+
+// stringSizeGatedBCLNatives (Fase 3.72) covers the small, explicit set of
+// BCL natives whose own single call can request a string of an
+// attacker-chosen size straight from a bare int argument, with no
+// preceding allocation of its own to have already been bounded by
+// another limit — checked BEFORE the call, since checkStringLimit's own
+// after-the-fact check runs too late here: `"x".PadLeft(int.MaxValue)`
+// would already have asked Go's strings.Repeat to build a ~2GB string (or
+// worse, depending on the pad width) before there's any result to check.
+// This is deliberately narrow, not a general "any int argument might be a
+// size" heuristic: `new string(char[], start, length)`'s own char[] came
+// from a real newarr, already bounded by MaxArrayLength, so there's
+// nothing new to gate there.
+var stringSizeGatedBCLNatives = map[string]func(args []runtime.Value) (requestedSize int, ok bool){
+	"System.String::PadLeft":  padWidthRequest,
+	"System.String::PadRight": padWidthRequest,
+}
+
+func padWidthRequest(args []runtime.Value) (int, bool) {
+	if len(args) < 2 || args[1].Kind != runtime.KindI4 {
+		return 0, false
+	}
+	return int(args[1].I4), true
+}
+
+// checkStringSizeRequest runs a stringSizeGatedBCLNatives entry (if
+// fullName has one) against args, returning ErrStringTooLarge before any
+// allocation happens when the requested size already exceeds
+// MaxStringBytes.
+func (m *Machine) checkStringSizeRequest(fullName string, args []runtime.Value) error {
+	if m.Limits.MaxStringBytes <= 0 {
+		return nil
+	}
+	sizeFn, gated := stringSizeGatedBCLNatives[fullName]
+	if !gated {
+		return nil
+	}
+	if size, ok := sizeFn(args); ok && size > m.Limits.MaxStringBytes {
+		return ErrStringTooLarge
+	}
+	return nil
+}
+
 // tryCall attempts fullName as either a BCL native or an interpreted
 // method, reporting via found whether the name resolved at all — as
 // opposed to resolving but then failing at runtime (err), which the
@@ -437,7 +503,11 @@ func (m *Machine) tryCall(fullName string, args []runtime.Value, depth int, inst
 				return runtime.Value{}, hr, denyErr, true, nil
 			}
 		}
+		if sizeErr := m.checkStringSizeRequest(fullName, args); sizeErr != nil {
+			return runtime.Value{}, hr, sizeErr, true, nil
+		}
 		v, err = native(convertCharArgsForNative(fullName, args, paramTypeNames))
+		v, err = m.checkStringLimit(v, err)
 		return v, hr, err, true, nil
 	}
 	// genericMachineRegistry (Fase 3.40) is checked before the ordinary
@@ -449,6 +519,7 @@ func (m *Machine) tryCall(fullName string, args []runtime.Value, depth int, inst
 	// ordinary interpreted method bodies too).
 	if native, ok := genericMachineRegistry[fullName]; ok {
 		v, err = native(m, args, methodGenericArgs, depth, instrCount)
+		v, err = m.checkStringLimit(v, err)
 		return v, true, err, true, nil
 	}
 	// Machine-aware natives (LINQ, Fase 3.15; Type::IsAssignableFrom,
@@ -458,6 +529,7 @@ func (m *Machine) tryCall(fullName string, args []runtime.Value, depth int, inst
 	// linq.go/reflection.go.
 	if native, ok := machineRegistry[fullName]; ok {
 		v, err = native(m, args, depth, instrCount)
+		v, err = m.checkStringLimit(v, err)
 		return v, true, err, true, nil
 	}
 	if m.Resolve == nil {
@@ -548,7 +620,20 @@ func (m *Machine) newObj(in newObjArgs, depth int, instrCount *int64) (runtime.V
 	// treats a string as an Object). `new string(...)` needs its own
 	// path for exactly that reason.
 	if in.TypeFullName == "System.String" {
-		return bcl.NewStringFromCtor(in.Args)
+		// `new string(char c, int count)` requests its output size
+		// directly from a bare int argument, with no preceding
+		// allocation of its own to have already been bounded (unlike
+		// the char[]-based overloads, whose array came from a real
+		// newarr already gated by MaxArrayLength) — same "check before
+		// the call, not after" reasoning as stringSizeGatedBCLNatives
+		// above.
+		if m.Limits.MaxStringBytes > 0 && len(in.Args) == 2 &&
+			in.Args[0].Kind == runtime.KindI4 && in.Args[1].Kind == runtime.KindI4 &&
+			int(in.Args[1].I4) > m.Limits.MaxStringBytes {
+			return runtime.Value{}, ErrStringTooLarge
+		}
+		v, err := bcl.NewStringFromCtor(in.Args)
+		return m.checkStringLimit(v, err)
 	}
 
 	// System.IntPtr is a real value type in .NET, but vmnet represents
