@@ -174,6 +174,18 @@ func init() {
 	register("System.Linq.Expressions.Expression::Block", true, expressionBlock)
 	register("System.Linq.Expressions.Expression::Default", true, expressionDefault)
 	register("System.Linq.Expressions.Expression::Empty", true, expressionEmpty)
+	register("System.Linq.Expressions.Expression::Throw", true, expressionThrow)
+	register("System.Linq.Expressions.Expression::Coalesce", true, expressionCoalesce)
+	register("System.Linq.Expressions.Expression::Catch", true, expressionCatch)
+	register("System.Linq.Expressions.Expression::TryCatch", true, expressionTryCatch)
+	register("System.Linq.Expressions.Expression::TryFinally", true, expressionTryFinally)
+	register("System.Linq.Expressions.Expression::TryCatchFinally", true, expressionTryCatchFinally)
+	register("System.Linq.Expressions.TryExpression::get_Body", true, tryExpressionGetBody)
+	register("System.Linq.Expressions.TryExpression::get_Handlers", true, tryExpressionGetHandlers)
+	register("System.Linq.Expressions.TryExpression::get_Finally", true, tryExpressionGetFinally)
+	register("System.Linq.Expressions.CatchBlock::get_Test", true, catchBlockGetTest)
+	register("System.Linq.Expressions.CatchBlock::get_Variable", true, catchBlockGetVariable)
+	register("System.Linq.Expressions.CatchBlock::get_Body", true, catchBlockGetBody)
 	register("System.Linq.Expressions.Expression::IfThen", true, expressionIfThen)
 	register("System.Linq.Expressions.Expression::IfThenElse", true, expressionIfThenElse)
 	register("System.Linq.Expressions.Expression::Condition", true, expressionIfThenElse)
@@ -366,6 +378,9 @@ const (
 	exprTypePreDecrementAssign  = 78
 	exprTypePostIncrementAssign = 79
 	exprTypePostDecrementAssign = 80
+	exprTypeThrow               = 60
+	exprTypeCoalesce            = 7
+	exprTypeTry                 = 61
 )
 
 // Exported mirrors of the exprTypeXxx values above, needed by
@@ -422,6 +437,12 @@ func expressionGetNodeType(args []runtime.Value) (runtime.Value, error) {
 			return runtime.Int32(int32(n.opType)), nil
 		case *nativeBinaryCompareExpression:
 			return runtime.Int32(int32(n.opType)), nil
+		case *nativeThrowExpression:
+			return runtime.Int32(exprTypeThrow), nil
+		case *nativeCoalesceExpression:
+			return runtime.Int32(exprTypeCoalesce), nil
+		case *nativeTryExpression:
+			return runtime.Int32(exprTypeTry), nil
 		}
 	}
 	return runtime.Value{}, fmt.Errorf("bcl: Expression.NodeType: receiver isn't one of the Expression shapes this subsystem models (see system_linq_expressions.go's own doc comment)")
@@ -482,6 +503,14 @@ func expressionGetType(args []runtime.Value) (runtime.Value, error) {
 			return expressionGetType([]runtime.Value{n.operand})
 		case *nativeBinaryCompareExpression:
 			name = "System.Boolean"
+		case *nativeThrowExpression:
+			if n.typeName != "" {
+				name = n.typeName
+			}
+		case *nativeCoalesceExpression:
+			return expressionGetType([]runtime.Value{n.left})
+		case *nativeTryExpression:
+			return expressionGetType([]runtime.Value{n.body})
 		}
 	}
 	return NewTypeValue(name), nil
@@ -532,13 +561,26 @@ func expressionCall(args []runtime.Value) (runtime.Value, error) {
 			instance, methodArg, argsArg = args[0], args[1], runtime.Value{}
 		}
 	case 3:
-		instance, methodArg, argsArg = args[0], args[1], args[2]
+		// Two more real, distinct overloads share THIS arity: Call(
+		// MethodInfo method, Expression arg0, Expression arg1) — STATIC,
+		// two bare args, no array — and Call(Expression instance,
+		// MethodInfo method, Expression[]/IEnumerable<Expression>
+		// arguments) — instance + method + an actual array/list. Same
+		// disambiguation posture as the 2-arg case above: whichever
+		// position actually holds a MethodInfo wins.
+		if _, _, ok := MethodInfoParts(args[0]); ok {
+			instance = runtime.Null()
+			methodArg = args[0]
+			argsArg = runtime.ArrRef(&runtime.Array{Elems: []runtime.Value{args[1], args[2]}})
+		} else {
+			instance, methodArg, argsArg = args[0], args[1], args[2]
+		}
 	default:
 		return runtime.Value{}, fmt.Errorf("bcl: Expression.Call: unsupported argument shape (%d args)", len(args))
 	}
 	typeName, methodName, ok := MethodInfoParts(methodArg)
 	if !ok {
-		return runtime.Value{}, fmt.Errorf("bcl: Expression.Call: 2nd argument is not a MethodInfo")
+		return runtime.Value{}, fmt.Errorf("bcl: Expression.Call: 2nd argument is not a MethodInfo (nargs=%d)", len(args))
 	}
 	return runtime.ObjRef(&runtime.Object{Native: &nativeCallExpression{
 		instance:   instance,
@@ -628,6 +670,9 @@ func convertExpressionGetOperand(args []runtime.Value) (runtime.Value, error) {
 	if i, ok := nativeOf[*nativeIncDecExpression](firstArg(args)); ok {
 		return i.operand, nil
 	}
+	if t, ok := nativeOf[*nativeThrowExpression](firstArg(args)); ok {
+		return t.value, nil
+	}
 	return runtime.Null(), nil
 }
 
@@ -716,6 +761,196 @@ func BinaryCompareExpressionParts(v runtime.Value) (opType int, left, right runt
 	return b.opType, b.left, b.right, true
 }
 
+// nativeCoalesceExpression backs Expression.Coalesce(left, right) — the
+// `??` null-coalescing operator, a real BinaryExpression with its own
+// value-producing semantics (unlike ReferenceEqual/NotEqual's boolean
+// result): evaluates left; if it isn't null, THAT's the result; otherwise
+// right is evaluated and returned. Found via AutoMapper's own
+// mapping-plan generation guarding a possibly-null source member before
+// mapping it. Approximates the node's own .Type as left's declared
+// type (real .NET computes the least-derived common type of both
+// branches; every real caller found so far has both sides share one
+// type already).
+type nativeCoalesceExpression struct {
+	left, right runtime.Value
+}
+
+func expressionCoalesce(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 2 {
+		return runtime.Value{}, fmt.Errorf("bcl: Expression.Coalesce expects (Expression left, Expression right)")
+	}
+	return runtime.ObjRef(&runtime.Object{Native: &nativeCoalesceExpression{left: args[0], right: args[1]}}), nil
+}
+
+// CoalesceExpressionParts exposes left/right to exprcompile.go's own
+// evaluator and exprvisitor.go's own rebuild logic.
+func CoalesceExpressionParts(v runtime.Value) (left, right runtime.Value, ok bool) {
+	c, ok := nativeOf[*nativeCoalesceExpression](v)
+	if !ok {
+		return runtime.Value{}, runtime.Value{}, false
+	}
+	return c.left, c.right, true
+}
+
+func NewCoalesceExpressionValue(left, right runtime.Value) runtime.Value {
+	return runtime.ObjRef(&runtime.Object{Native: &nativeCoalesceExpression{left: left, right: right}})
+}
+
+// nativeCatchBlock backs System.Linq.Expressions.CatchBlock — unlike
+// every other node type in this file, a real CatchBlock is NOT itself an
+// Expression subtype (it has no NodeType/Type of its own), so it's
+// deliberately never wired into KindOfExprNode/expressionGetNodeType/
+// expressionGetType — only TryExpression (below) ever holds one, and
+// only exprcompile.go's own Try evaluation ever reads it. Found via
+// AutoMapper's own mapping-plan generation wrapping a property-mapping
+// expression in a real `try { ... } catch (Exception ex) { ... }`
+// template for its own contextual exception messages.
+type nativeCatchBlock struct {
+	testType string
+	variable runtime.Value // KindNull for the Catch(Type, Expression) overload (no bound variable)
+	body     runtime.Value
+}
+
+func expressionCatch(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 2 {
+		return runtime.Value{}, fmt.Errorf("bcl: Expression.Catch expects (Type|ParameterExpression, Expression body)")
+	}
+	cb := &nativeCatchBlock{body: args[1], variable: runtime.Null()}
+	if IsParameterExpression(args[0]) {
+		cb.variable = args[0]
+		cb.testType, _ = ParameterExpressionTypeName(args[0])
+	} else if name, ok := TypeFullNameOf(args[0]); ok {
+		cb.testType = name
+	} else {
+		return runtime.Value{}, fmt.Errorf("bcl: Expression.Catch: 1st argument is not a Type or ParameterExpression")
+	}
+	return runtime.ObjRef(&runtime.Object{Native: cb}), nil
+}
+
+// CatchBlockParts exposes a CatchBlock's own test type, bound exception
+// variable (KindNull if none), and handler body to exprcompile.go's own
+// Try evaluator.
+func CatchBlockParts(v runtime.Value) (testType string, variable, body runtime.Value, ok bool) {
+	cb, ok := nativeOf[*nativeCatchBlock](v)
+	if !ok {
+		return "", runtime.Value{}, runtime.Value{}, false
+	}
+	return cb.testType, cb.variable, cb.body, true
+}
+
+// nativeTryExpression backs Expression.TryCatch/TryFinally/
+// TryCatchFinally — a real TryExpression, evaluated for real (not just
+// modeled) by exprcompile.go's own ExprNodeTry case: runs body, and on a
+// real thrown exception, dispatches to the first matching catch (by
+// real exception-hierarchy assignability, internal/interpreter/
+// exceptions.go's own exceptionMatchesCatch), then always runs finally
+// (if any) on the way out, matching real .NET's own try/catch/finally
+// semantics.
+type nativeTryExpression struct {
+	body    runtime.Value
+	catches []runtime.Value // each a *nativeCatchBlock
+	finally runtime.Value   // KindNull if no finally block
+}
+
+func expressionTryCatch(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: Expression.TryCatch expects (Expression body, params CatchBlock[] handlers)")
+	}
+	return runtime.ObjRef(&runtime.Object{Native: &nativeTryExpression{body: args[0], catches: exprArgsFrom(argsOrEmpty(args, 1)), finally: runtime.Null()}}), nil
+}
+
+func expressionTryFinally(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 2 {
+		return runtime.Value{}, fmt.Errorf("bcl: Expression.TryFinally expects (Expression body, Expression finallyBlock)")
+	}
+	return runtime.ObjRef(&runtime.Object{Native: &nativeTryExpression{body: args[0], finally: args[1]}}), nil
+}
+
+func expressionTryCatchFinally(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 3 {
+		return runtime.Value{}, fmt.Errorf("bcl: Expression.TryCatchFinally expects (Expression body, Expression finallyBlock, params CatchBlock[] handlers)")
+	}
+	return runtime.ObjRef(&runtime.Object{Native: &nativeTryExpression{body: args[0], finally: args[1], catches: exprArgsFrom(argsOrEmpty(args, 2))}}), nil
+}
+
+// argsOrEmpty returns args[i] if present, a zero Value (KindNull-ish,
+// exprArgsFrom's own default-to-nil path) otherwise — a `params
+// CatchBlock[]` argument omitted entirely case-2's own arity already
+// guards against isn't reachable through the registered overloads above
+// but this keeps index access safe regardless.
+func argsOrEmpty(args []runtime.Value, i int) runtime.Value {
+	if i < len(args) {
+		return args[i]
+	}
+	return runtime.Value{}
+}
+
+// TryExpressionParts exposes body/catches/finally to exprcompile.go's
+// own evaluator and exprvisitor.go's own rebuild logic.
+func TryExpressionParts(v runtime.Value) (body runtime.Value, catches []runtime.Value, finallyExpr runtime.Value, ok bool) {
+	t, ok := nativeOf[*nativeTryExpression](v)
+	if !ok {
+		return runtime.Value{}, nil, runtime.Value{}, false
+	}
+	return t.body, t.catches, t.finally, true
+}
+
+func NewTryExpressionValue(body runtime.Value, catches []runtime.Value, finallyExpr runtime.Value) runtime.Value {
+	return runtime.ObjRef(&runtime.Object{Native: &nativeTryExpression{body: body, catches: catches, finally: finallyExpr}})
+}
+
+func NewCatchBlockValue(testType string, variable, body runtime.Value) runtime.Value {
+	return runtime.ObjRef(&runtime.Object{Native: &nativeCatchBlock{testType: testType, variable: variable, body: body}})
+}
+
+func tryExpressionGetBody(args []runtime.Value) (runtime.Value, error) {
+	t, ok := nativeOf[*nativeTryExpression](firstArg(args))
+	if !ok {
+		return runtime.Null(), nil
+	}
+	return t.body, nil
+}
+
+func tryExpressionGetHandlers(args []runtime.Value) (runtime.Value, error) {
+	t, ok := nativeOf[*nativeTryExpression](firstArg(args))
+	if !ok {
+		return runtime.ArrRef(runtime.NewArray(0)), nil
+	}
+	return runtime.ArrRef(&runtime.Array{Elems: append([]runtime.Value(nil), t.catches...)}), nil
+}
+
+func tryExpressionGetFinally(args []runtime.Value) (runtime.Value, error) {
+	t, ok := nativeOf[*nativeTryExpression](firstArg(args))
+	if !ok {
+		return runtime.Null(), nil
+	}
+	return t.finally, nil
+}
+
+func catchBlockGetTest(args []runtime.Value) (runtime.Value, error) {
+	cb, ok := nativeOf[*nativeCatchBlock](firstArg(args))
+	if !ok {
+		return runtime.Null(), nil
+	}
+	return NewTypeValue(cb.testType), nil
+}
+
+func catchBlockGetVariable(args []runtime.Value) (runtime.Value, error) {
+	cb, ok := nativeOf[*nativeCatchBlock](firstArg(args))
+	if !ok {
+		return runtime.Null(), nil
+	}
+	return cb.variable, nil
+}
+
+func catchBlockGetBody(args []runtime.Value) (runtime.Value, error) {
+	cb, ok := nativeOf[*nativeCatchBlock](firstArg(args))
+	if !ok {
+		return runtime.Null(), nil
+	}
+	return cb.body, nil
+}
+
 func expressionAssign(args []runtime.Value) (runtime.Value, error) {
 	if len(args) < 2 {
 		return runtime.Value{}, fmt.Errorf("bcl: Expression.Assign expects (Expression left, Expression right)")
@@ -730,6 +965,9 @@ func assignExpressionGetLeft(args []runtime.Value) (runtime.Value, error) {
 	if b, ok := nativeOf[*nativeBinaryCompareExpression](firstArg(args)); ok {
 		return b.left, nil
 	}
+	if c, ok := nativeOf[*nativeCoalesceExpression](firstArg(args)); ok {
+		return c.left, nil
+	}
 	return runtime.Null(), nil
 }
 
@@ -739,6 +977,9 @@ func assignExpressionGetRight(args []runtime.Value) (runtime.Value, error) {
 	}
 	if b, ok := nativeOf[*nativeBinaryCompareExpression](firstArg(args)); ok {
 		return b.right, nil
+	}
+	if c, ok := nativeOf[*nativeCoalesceExpression](firstArg(args)); ok {
+		return c.right, nil
 	}
 	return runtime.Null(), nil
 }
@@ -794,6 +1035,43 @@ func expressionDefault(args []runtime.Value) (runtime.Value, error) {
 
 func expressionEmpty(args []runtime.Value) (runtime.Value, error) {
 	return runtime.ObjRef(&runtime.Object{Native: &nativeDefaultExpression{typeName: "System.Void"}}), nil
+}
+
+// nativeThrowExpression backs Expression.Throw(Expression) and
+// Expression.Throw(Expression, Type) — a real UnaryExpression (matching
+// .NET's own concrete type for this factory) whose evaluation
+// (internal/interpreter/exprcompile.go) actually raises the evaluated
+// value as a real exception, not just models the tree's shape. Found via
+// AutoMapper's own mapping-plan generation, which builds a real
+// `throw new ArgumentNullException(...)` template for a null-source
+// guard.
+type nativeThrowExpression struct {
+	value    runtime.Value
+	typeName string
+}
+
+func expressionThrow(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: Expression.Throw expects (Expression value, ...)")
+	}
+	typeName := "System.Void"
+	if len(args) > 1 {
+		if name, ok := TypeFullNameOf(args[1]); ok {
+			typeName = name
+		}
+	}
+	return runtime.ObjRef(&runtime.Object{Native: &nativeThrowExpression{value: args[0], typeName: typeName}}), nil
+}
+
+// ThrowExpressionParts exposes the thrown value expression and the
+// node's own declared .Type to exprcompile.go's own evaluator and
+// exprvisitor.go's own rebuild logic.
+func ThrowExpressionParts(v runtime.Value) (value runtime.Value, typeName string, ok bool) {
+	t, ok := nativeOf[*nativeThrowExpression](v)
+	if !ok {
+		return runtime.Value{}, "", false
+	}
+	return t.value, t.typeName, true
 }
 
 func expressionIfThen(args []runtime.Value) (runtime.Value, error) {
@@ -895,6 +1173,9 @@ const (
 	ExprNodeInvoke
 	ExprNodeIncDec
 	ExprNodeBinaryCompare
+	ExprNodeThrow
+	ExprNodeCoalesce
+	ExprNodeTry
 )
 
 // KindOfExprNode identifies v's own real Expression node kind, or
@@ -935,6 +1216,12 @@ func KindOfExprNode(v runtime.Value) ExprNodeKind {
 		return ExprNodeIncDec
 	case *nativeBinaryCompareExpression:
 		return ExprNodeBinaryCompare
+	case *nativeThrowExpression:
+		return ExprNodeThrow
+	case *nativeCoalesceExpression:
+		return ExprNodeCoalesce
+	case *nativeTryExpression:
+		return ExprNodeTry
 	default:
 		return ExprNodeNone
 	}
@@ -1114,6 +1401,10 @@ func NewConvertExpressionValue(operand runtime.Value, typeName string) runtime.V
 
 func NewIncDecExpressionValue(opType int, operand runtime.Value) runtime.Value {
 	return runtime.ObjRef(&runtime.Object{Native: &nativeIncDecExpression{opType: opType, operand: operand}})
+}
+
+func NewThrowExpressionValue(value runtime.Value, typeName string) runtime.Value {
+	return runtime.ObjRef(&runtime.Object{Native: &nativeThrowExpression{value: value, typeName: typeName}})
 }
 
 func NewAssignExpressionValue(left, right runtime.Value) runtime.Value {

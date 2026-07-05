@@ -211,6 +211,24 @@ type NewObj struct {
 	// FromKey chain, leaving a real XLFill permanently broken (NRE on its
 	// first `.Key` read, from real ClosedXML style-loading code).
 	ParamTypeNames []string
+
+	// ClassGenericArgs holds the constructed generic CLASS's own real
+	// closed type argument names — e.g. ["Vmnet.Fixtures.Source",
+	// "Vmnet.Fixtures.Dest"] for `newobj MappingExpression`2<Source,
+	// Dest>::.ctor(...)` — resolved from the MemberRef.Class TypeSpec's
+	// own Instantiation the same way MethodSpec's Instantiation feeds
+	// Call.MethodGenericArgs (Fase 3.60's own precedent one level up: a
+	// generic method's own T lives on the CALL, a generic class's own
+	// lives on the resulting OBJECT). Nil for a non-generic class. May
+	// contain "!!N" sentinels (ir.methodSpecGenericArgNames's own
+	// encoding) when an arg is itself the ENCLOSING generic method's own
+	// still-open type parameter being forwarded — resolved at execution
+	// time against the calling frame's own MethodGenericArgs, exactly
+	// like Call.MethodGenericArgs's own forwarded entries (Fase 3.66,
+	// found via AutoMapper's own CreateMapCore<TSource,TDestination>
+	// forwarding into `newobj MappingExpression`2<!!TSource,
+	// !!TDestination>::.ctor(...)`).
+	ClassGenericArgs []string
 }
 
 // LoadField/StoreField implement ldfld/stfld: pop an object reference
@@ -349,6 +367,20 @@ type LoadTypeToken struct {
 	TypeFullName            string
 	IsMethodGenericParam    bool
 	MethodGenericParamIndex int
+
+	// IsClassGenericParam marks the analogous case one level up
+	// (Fase 3.66): `typeof(T)` on the ENCLOSING CLASS's own generic
+	// parameter (a VAR, `!N`, ClassGenericParamIndex == N) rather than
+	// the enclosing METHOD's (`!!N`, IsMethodGenericParam above) — the
+	// same method body runs for every closed instantiation of its own
+	// declaring generic class, so this resolves at execution time from
+	// the current frame's own receiver object's runtime.Object.
+	// ClassGenericArgs (populated at that object's own `newobj` site,
+	// see ir.NewObj.ClassGenericArgs's own doc comment), not at IR-build
+	// time. TypeFullName is meaningless when this is true, exactly like
+	// IsMethodGenericParam's own convention.
+	IsClassGenericParam    bool
+	ClassGenericParamIndex int
 }
 
 // LoadFieldToken implements ldtoken (spec §III.4.16) when its operand is

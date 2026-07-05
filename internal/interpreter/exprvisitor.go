@@ -86,12 +86,13 @@ func expressionVisitorVisit(m *Machine, args []runtime.Value, depth int, instrCo
 		visitMethod = "VisitNew"
 	case bcl.ExprNodeNewArrayInit:
 		visitMethod = "VisitNewArray"
-	case bcl.ExprNodeConvert, bcl.ExprNodeIncDec:
-		// Both are real UnaryExpression shapes — see nativeConvertExpression/
-		// nativeIncDecExpression's own doc comments.
+	case bcl.ExprNodeConvert, bcl.ExprNodeIncDec, bcl.ExprNodeThrow:
+		// All three are real UnaryExpression shapes — see
+		// nativeConvertExpression/nativeIncDecExpression/
+		// nativeThrowExpression's own doc comments.
 		visitMethod = "VisitUnary"
-	case bcl.ExprNodeAssign, bcl.ExprNodeBinaryCompare:
-		// Both are real BinaryExpression shapes.
+	case bcl.ExprNodeAssign, bcl.ExprNodeBinaryCompare, bcl.ExprNodeCoalesce:
+		// All three are real BinaryExpression shapes.
 		visitMethod = "VisitBinary"
 	case bcl.ExprNodeBlock:
 		visitMethod = "VisitBlock"
@@ -203,6 +204,14 @@ func expressionVisitorVisitUnary(m *Machine, args []runtime.Value, depth int, in
 		}
 		return bcl.NewIncDecExpressionValue(opType, newOperand), nil
 	}
+	if bcl.KindOfExprNode(node) == bcl.ExprNodeThrow {
+		value, typeName, _ := bcl.ThrowExpressionParts(node)
+		newValue, err := visitChild(m, args[0], value, depth, instrCount)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		return bcl.NewThrowExpressionValue(newValue, typeName), nil
+	}
 	operand, typeName, _ := bcl.ConvertExpressionParts(node)
 	newOperand, err := visitChild(m, args[0], operand, depth, instrCount)
 	if err != nil {
@@ -224,6 +233,18 @@ func expressionVisitorVisitBinary(m *Machine, args []runtime.Value, depth int, i
 			return runtime.Value{}, err
 		}
 		return bcl.NewBinaryCompareExpressionValue(opType, newLeft, newRight), nil
+	}
+	if bcl.KindOfExprNode(node) == bcl.ExprNodeCoalesce {
+		left, right, _ := bcl.CoalesceExpressionParts(node)
+		newLeft, err := visitChild(m, args[0], left, depth, instrCount)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		newRight, err := visitChild(m, args[0], right, depth, instrCount)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		return bcl.NewCoalesceExpressionValue(newLeft, newRight), nil
 	}
 	left, right, _ := bcl.AssignExpressionParts(node)
 	newLeft, err := visitChild(m, args[0], left, depth, instrCount)

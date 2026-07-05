@@ -45,6 +45,13 @@ func activatorCreateInstance(m *Machine, args []runtime.Value, methodGenericArgs
 		TypeFullName: methodGenericArgs[0],
 		CtorFullName: methodGenericArgs[0] + "::.ctor",
 		Args:         nil,
+		// methodGenericArgs[0] is already a real, fully closed type name
+		// (Activator.CreateInstance<T>() only ever reaches this branch
+		// once T itself resolved to something concrete, see the ""
+		// check above) — parsed directly off its own "[[...]]" suffix,
+		// same posture Machine.New's own doc comment documents (Fase
+		// 3.66).
+		ClassGenericArgs: bcl.ClosedGenericArgs(methodGenericArgs[0]),
 	}, depth, instrCount)
 }
 

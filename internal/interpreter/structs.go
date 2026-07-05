@@ -20,6 +20,19 @@ func (m *Machine) defaultValueFor(typeFullName string) runtime.Value {
 	if typeFullName == "" {
 		return runtime.Null()
 	}
+	// A closed generic instantiation's own encoded name (e.g.
+	// "System.ValueTuple`2[[System.Reflection.ConstructorInfo],
+	// [System.Reflection.ParameterInfo[]]]", ir/builder.go's
+	// sigTypeFullName encoding) — bcl.LookupValueType's own registry is
+	// keyed by the OPEN name only ("System.ValueTuple`2"), same as every
+	// other GenericOpenName-first caller (assembly.go's resolveMember is
+	// the established precedent). Without this, a closed generic BCL
+	// value type (found via Enumerable.FirstOrDefault<ValueTuple`2<...>>
+	// on an empty sequence, Fase 3.66) fell all the way through to
+	// Null() below — silently wrong for a real value-typed default,
+	// later crashing as a NullReferenceException on the first field
+	// read.
+	typeFullName = bcl.GenericOpenName(typeFullName)
 	// Primitive value types have no TypeDef anywhere (they're a bare Kind
 	// on Value, not a runtime.Type) and aren't in bcl.LookupValueType
 	// either (that registry is for struct-shaped BCL types like DateTime,

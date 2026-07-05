@@ -40,7 +40,21 @@ func init() {
 	machineRegistry["System.Linq.Enumerable::All"] = linqAll
 	machineRegistry["System.Linq.Enumerable::ToList"] = linqToList
 	machineRegistry["System.Linq.Enumerable::ToArray"] = linqToArray
-	machineRegistry["System.Linq.Enumerable::FirstOrDefault"] = linqFirstOrDefault
+	// FirstOrDefault/LastOrDefault/SingleOrDefault<T> (unlike the plain
+	// machineRegistry entries around them) need their own call site's
+	// real generic type argument — an empty/no-match result must answer
+	// with a real typed default(T), not always Null(), the same
+	// "genuinely needs the call site's T" reasoning OfType<T> below
+	// already documents (Fase 3.66, found via AutoMapper's own
+	// ObjectFactory.CallConstructor: FirstOrDefault<ValueTuple`2<
+	// ConstructorInfo, ParameterInfo[]>>() on an empty sequence used to
+	// answer Null(), and the very next instruction's `ldfld ...::Item2`
+	// crashed with a NullReferenceException — a real ValueTuple`2 zero
+	// value would have let real AutoMapper code's own `brtrue` branch
+	// correctly treat it as "no matching constructor found").
+	genericMachineRegistry["System.Linq.Enumerable::FirstOrDefault"] = linqFirstOrDefault
+	genericMachineRegistry["System.Linq.Enumerable::LastOrDefault"] = linqLastOrDefault
+	genericMachineRegistry["System.Linq.Enumerable::SingleOrDefault"] = linqSingleOrDefault
 	machineRegistry["System.Linq.Enumerable::SelectMany"] = linqSelectMany
 	machineRegistry["System.Linq.Enumerable::Take"] = linqTake
 	machineRegistry["System.Linq.Enumerable::Contains"] = linqContains
@@ -52,7 +66,6 @@ func init() {
 	// share linqCast's plain machineRegistry registration (Fase 3.42).
 	genericMachineRegistry["System.Linq.Enumerable::OfType"] = linqOfType
 	machineRegistry["System.Linq.Enumerable::First"] = linqFirst
-	machineRegistry["System.Linq.Enumerable::LastOrDefault"] = linqLastOrDefault
 	machineRegistry["System.Linq.Enumerable::Count"] = linqCount
 	machineRegistry["System.Linq.Enumerable::Distinct"] = linqDistinct
 	// OrderBy/OrderByDescending/ThenBy/ThenByDescending are registered by
@@ -77,7 +90,6 @@ func init() {
 	machineRegistry["System.Linq.Enumerable::ToHashSet"] = linqToHashSet
 	machineRegistry["System.Collections.Generic.List`1::ForEach"] = listForEach
 	machineRegistry["System.Linq.Enumerable::Single"] = linqSingle
-	machineRegistry["System.Linq.Enumerable::SingleOrDefault"] = linqSingleOrDefault
 	machineRegistry["System.Linq.Enumerable::ElementAt"] = linqElementAt
 	machineRegistry["System.Linq.Enumerable::Skip"] = linqSkip
 	machineRegistry["System.Linq.Enumerable::Union"] = linqUnion
@@ -258,11 +270,19 @@ func linqToArray(m *Machine, args []runtime.Value, depth int, instrCount *int64)
 }
 
 // linqFirstOrDefault covers FirstOrDefault(source) and
-// FirstOrDefault(source, predicate); an empty/no-match result is Null(),
-// not a real typed default(T) — same documented approximation as
-// Dictionary.TryGetValue's miss case (Fase 3.13): vmnet has no generic
-// type-argument info at this call site to produce a typed zero instead.
-func linqFirstOrDefault(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+// FirstOrDefault(source, predicate). An empty/no-match result answers
+// with a real typed default(T) when the call site's own generic type
+// argument is available (methodGenericArgs, Fase 3.66 — genuinely needed
+// for a value-typed T: Null() there is not just "an approximation", it's
+// a WRONG Kind that later crashes as a NullReferenceException the
+// instant real code reads one of the zero value's own fields, e.g. real
+// AutoMapper code doing `FirstOrDefault<ValueTuple<...>>().Item2`,
+// mirroring Dictionary.TryGetValue's own analogous miss-case gap, Fase
+// 3.13). Falls back to Null() when methodGenericArgs isn't available
+// (e.g. a call reached through a path that doesn't thread it through
+// yet) — no worse than this native's own previous, unconditional
+// behavior.
+func linqFirstOrDefault(m *Machine, args []runtime.Value, methodGenericArgs []string, depth int, instrCount *int64) (runtime.Value, error) {
 	if len(args) < 1 {
 		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.FirstOrDefault expects a source")
 	}
@@ -270,9 +290,10 @@ func linqFirstOrDefault(m *Machine, args []runtime.Value, depth int, instrCount 
 	if err != nil {
 		return runtime.Value{}, err
 	}
+	empty := linqOrDefaultZero(m, methodGenericArgs)
 	if len(args) == 1 {
 		if len(elems) == 0 {
-			return runtime.Null(), nil
+			return empty, nil
 		}
 		return elems[0], nil
 	}
@@ -285,7 +306,18 @@ func linqFirstOrDefault(m *Machine, args []runtime.Value, depth int, instrCount 
 			return e, nil
 		}
 	}
-	return runtime.Null(), nil
+	return empty, nil
+}
+
+// linqOrDefaultZero is FirstOrDefault/LastOrDefault/SingleOrDefault's
+// shared "no result" answer: a real typed default(T) via
+// Machine.defaultValueFor when the call site's own generic type argument
+// is known, Null() otherwise (see linqFirstOrDefault's own doc comment).
+func linqOrDefaultZero(m *Machine, methodGenericArgs []string) runtime.Value {
+	if len(methodGenericArgs) < 1 || methodGenericArgs[0] == "" {
+		return runtime.Null()
+	}
+	return m.defaultValueFor(methodGenericArgs[0])
 }
 
 // linqSelectMany flattens each element's own inner sequence (produced by
@@ -473,7 +505,7 @@ func linqFirst(m *Machine, args []runtime.Value, depth int, instrCount *int64) (
 	return runtime.Value{}, &runtime.ManagedException{TypeName: "System.InvalidOperationException", Message: "Sequence contains no matching element"}
 }
 
-func linqLastOrDefault(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+func linqLastOrDefault(m *Machine, args []runtime.Value, methodGenericArgs []string, depth int, instrCount *int64) (runtime.Value, error) {
 	if len(args) < 1 {
 		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.LastOrDefault expects a source")
 	}
@@ -481,9 +513,10 @@ func linqLastOrDefault(m *Machine, args []runtime.Value, depth int, instrCount *
 	if err != nil {
 		return runtime.Value{}, err
 	}
+	empty := linqOrDefaultZero(m, methodGenericArgs)
 	if len(args) == 1 {
 		if len(elems) == 0 {
-			return runtime.Null(), nil
+			return empty, nil
 		}
 		return elems[len(elems)-1], nil
 	}
@@ -496,7 +529,7 @@ func linqLastOrDefault(m *Machine, args []runtime.Value, depth int, instrCount *
 			return elems[i], nil
 		}
 	}
-	return runtime.Null(), nil
+	return empty, nil
 }
 
 func linqCount(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
@@ -1102,7 +1135,7 @@ func linqSingle(m *Machine, args []runtime.Value, depth int, instrCount *int64) 
 	}
 }
 
-func linqSingleOrDefault(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+func linqSingleOrDefault(m *Machine, args []runtime.Value, methodGenericArgs []string, depth int, instrCount *int64) (runtime.Value, error) {
 	if len(args) < 1 {
 		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.SingleOrDefault expects a source")
 	}
@@ -1126,7 +1159,7 @@ func linqSingleOrDefault(m *Machine, args []runtime.Value, depth int, instrCount
 	}
 	switch len(matches) {
 	case 0:
-		return runtime.Null(), nil
+		return linqOrDefaultZero(m, methodGenericArgs), nil
 	case 1:
 		return matches[0], nil
 	default:

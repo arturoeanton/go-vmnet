@@ -67,6 +67,21 @@ type Type struct {
 	BaseTypeFullName string
 	Interfaces       []string
 
+	// BaseTypeGenericArgs holds BaseTypeFullName's own real closed
+	// generic type argument names, SEPARATELY from BaseTypeFullName
+	// itself (which stays the bare open name — every existing consumer
+	// of it, e.g. the virtual-dispatch ancestor walk and field
+	// inheritance, resolves it straight back into a TypeDef and would
+	// break if it suddenly carried a "[[...]]" suffix). nil when the
+	// base isn't a generic instantiation at all. An entry may be a "!N"
+	// sentinel (ir.NewObj.ClassGenericArgs's own encoding) when the base
+	// is instantiated over THIS type's own still-open generic parameter
+	// (e.g. `class DefaultClassMap<TClass> : ClassMap<TClass>`) —
+	// resolved against a receiver's own real ClassGenericArgs only at
+	// Type.BaseType's own call time (internal/interpreter/reflection.go's
+	// own typeGetBaseType), Fase 3.66.
+	BaseTypeGenericArgs []string
+
 	// FieldDefaults/StaticFieldDefaults hold default(T) for each field
 	// (parallel to Fields/StaticFields) — a typed zero (Int32(0), Int64(0),
 	// ...) for value-typed fields, or Null() for reference-typed ones

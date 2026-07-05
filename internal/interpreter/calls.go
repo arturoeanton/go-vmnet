@@ -617,7 +617,7 @@ func (m *Machine) newObj(in newObjArgs, depth int, instrCount *int64) (runtime.V
 	for i, def := range typ.FieldDefaults {
 		fields[i] = def.Clone()
 	}
-	obj := &runtime.Object{Type: typ, Fields: fields}
+	obj := &runtime.Object{Type: typ, Fields: fields, ClassGenericArgs: in.ClassGenericArgs}
 	objVal := runtime.ObjRef(obj)
 
 	ctorArgs := make([]runtime.Value, 0, len(in.Args)+1)
@@ -660,4 +660,15 @@ type newObjArgs struct {
 	// (loaddomtree.go/elementfactory.go's parameterless `new T()`s) with
 	// no IR-level ctor token to read a signature from.
 	ParamTypeNames []string
+
+	// ClassGenericArgs is the constructed generic CLASS's own real,
+	// already-forwarding-resolved closed type argument names (Fase
+	// 3.66, ir.NewObj.ClassGenericArgs — resolved against the calling
+	// frame's own MethodGenericArgs by eval.go's own ir.NewObj case
+	// before reaching here). Stored on the resulting runtime.Object so
+	// its own methods' `typeof(T)` on a CLASS-level generic parameter
+	// (ir.LoadTypeToken.IsClassGenericParam) can answer correctly for
+	// as long as the object exists — nil for a non-generic class or a
+	// native constructor call with no IR-level newobj site.
+	ClassGenericArgs []string
 }

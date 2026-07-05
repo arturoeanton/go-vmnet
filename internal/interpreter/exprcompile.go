@@ -77,21 +77,41 @@ func compiledExpressionInvoke(m *Machine, args []runtime.Value, depth int, instr
 		// erroring outright.
 		body = tree
 	}
-	return evalExprNode(m, body, env, depth, instrCount)
+	return evalExprNode(m, body, env, depth, instrCount, 0)
 }
+
+// maxExprEvalDepth bounds evalExprNode's own recursive tree walk (Fase
+// 3.66, found via AutoMapper's own mapping-plan generation for a real
+// object graph: unlike an ordinary interpreted method's CIL loop, which
+// grows m.Limits.MaxInstructions without growing the Go call stack, this
+// recursion adds one real Go stack frame per node — a genuinely large
+// (or accidentally self-referential) tree can overflow the actual OS
+// stack long before any of the interpreter's existing resource limits
+// would trip, crashing the whole process rather than surfacing a
+// graceful error). 4096 is comfortably below Go's default stack growth
+// ceiling for this function's own frame size, while still generous for
+// any real expression tree found so far (a few dozen levels deep at
+// most).
+const maxExprEvalDepth = 4096
 
 // evalExprNode walks node against env (the current lambda parameter/
 // Block-local bindings, keyed by each ParameterExpression's own identity
 // — internal/bcl/system_linq_expressions.go's own ExprNodeIdentity) and
-// returns its real, evaluated value.
-func evalExprNode(m *Machine, node runtime.Value, env map[*runtime.Object]runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+// returns its real, evaluated value. exprDepth is THIS function's own
+// recursion depth (distinct from depth, the interpreter's own CIL call
+// depth) — see maxExprEvalDepth's own doc comment for why it exists as
+// its own, separately-tracked counter.
+func evalExprNode(m *Machine, node runtime.Value, env map[*runtime.Object]runtime.Value, depth int, instrCount *int64, exprDepth int) (runtime.Value, error) {
+	if exprDepth > maxExprEvalDepth {
+		return runtime.Value{}, ErrStackOverflow
+	}
 	switch bcl.KindOfExprNode(node) {
 	case bcl.ExprNodeLambda:
 		// A nested lambda evaluated directly (rare outside Invoke, but
 		// tolerated) — its own value IS its body's value, same as the
 		// top-level compile entry point above.
 		body, _ := bcl.LambdaExpressionBody(node)
-		return evalExprNode(m, body, env, depth, instrCount)
+		return evalExprNode(m, body, env, depth, instrCount, exprDepth+1)
 
 	case bcl.ExprNodeParameter:
 		obj, ok := bcl.ExprNodeIdentity(node)
@@ -113,7 +133,7 @@ func evalExprNode(m *Machine, node runtime.Value, env map[*runtime.Object]runtim
 
 	case bcl.ExprNodeMember:
 		propName, inner, _ := bcl.MemberExpressionParts(node)
-		receiver, err := evalExprNode(m, inner, env, depth, instrCount)
+		receiver, err := evalExprNode(m, inner, env, depth, instrCount, exprDepth+1)
 		if err != nil {
 			return runtime.Value{}, err
 		}
@@ -126,7 +146,7 @@ func evalExprNode(m *Machine, node runtime.Value, env map[*runtime.Object]runtim
 
 	case bcl.ExprNodeCall:
 		instance, typeName, methodName, argNodes, _ := bcl.CallExpressionParts(node)
-		evaluatedArgs, err := evalExprList(m, argNodes, env, depth, instrCount)
+		evaluatedArgs, err := evalExprList(m, argNodes, env, depth, instrCount, exprDepth+1)
 		if err != nil {
 			return runtime.Value{}, err
 		}
@@ -134,7 +154,7 @@ func evalExprNode(m *Machine, node runtime.Value, env map[*runtime.Object]runtim
 			v, _, err := m.call(typeName+"::"+methodName, evaluatedArgs, false, depth, instrCount, nil, nil)
 			return v, err
 		}
-		receiver, err := evalExprNode(m, instance, env, depth, instrCount)
+		receiver, err := evalExprNode(m, instance, env, depth, instrCount, exprDepth+1)
 		if err != nil {
 			return runtime.Value{}, err
 		}
@@ -150,15 +170,24 @@ func evalExprNode(m *Machine, node runtime.Value, env map[*runtime.Object]runtim
 
 	case bcl.ExprNodeNew:
 		typeName, argNodes, _ := bcl.NewExpressionParts(node)
-		evaluatedArgs, err := evalExprList(m, argNodes, env, depth, instrCount)
+		evaluatedArgs, err := evalExprList(m, argNodes, env, depth, instrCount, exprDepth+1)
 		if err != nil {
 			return runtime.Value{}, err
 		}
-		return m.newObj(newObjArgs{TypeFullName: typeName, CtorFullName: typeName + "::.ctor", Args: evaluatedArgs}, depth, instrCount)
+		// typeName came from a real ConstructorInfo/Type value (Expression.
+		// New's own constructor argument) — already fully closed, exactly
+		// like Machine.New's own reflection-based construction entry
+		// point (Fase 3.66, found via CsvHelper's own ObjectCreator
+		// caching a compiled `Expression.New(ctor).Compile()` delegate
+		// per closed type): parsed directly off typeName's own "[[...]]"
+		// suffix, no forwarding-resolution needed (this evaluator has no
+		// notion of an enclosing generic method's own open type
+		// parameter at all).
+		return m.newObj(newObjArgs{TypeFullName: typeName, CtorFullName: typeName + "::.ctor", Args: evaluatedArgs, ClassGenericArgs: bcl.ClosedGenericArgs(typeName)}, depth, instrCount)
 
 	case bcl.ExprNodeNewArrayInit:
 		_, elemNodes, _ := bcl.NewArrayExpressionParts(node)
-		evaluated, err := evalExprList(m, elemNodes, env, depth, instrCount)
+		evaluated, err := evalExprList(m, elemNodes, env, depth, instrCount, exprDepth+1)
 		if err != nil {
 			return runtime.Value{}, err
 		}
@@ -166,7 +195,7 @@ func evalExprNode(m *Machine, node runtime.Value, env map[*runtime.Object]runtim
 
 	case bcl.ExprNodeConvert:
 		operand, typeName, _ := bcl.ConvertExpressionParts(node)
-		v, err := evalExprNode(m, operand, env, depth, instrCount)
+		v, err := evalExprNode(m, operand, env, depth, instrCount, exprDepth+1)
 		if err != nil {
 			return runtime.Value{}, err
 		}
@@ -174,7 +203,7 @@ func evalExprNode(m *Machine, node runtime.Value, env map[*runtime.Object]runtim
 
 	case bcl.ExprNodeAssign:
 		left, right, _ := bcl.AssignExpressionParts(node)
-		v, err := evalExprNode(m, right, env, depth, instrCount)
+		v, err := evalExprNode(m, right, env, depth, instrCount, exprDepth+1)
 		if err != nil {
 			return runtime.Value{}, err
 		}
@@ -195,7 +224,7 @@ func evalExprNode(m *Machine, node runtime.Value, env map[*runtime.Object]runtim
 			// real setter, the same way an ordinary compiled `stfld`/
 			// `callvirt set_Xxx` site already would.
 			propName, inner, _ := bcl.MemberExpressionParts(left)
-			receiver, err := evalExprNode(m, inner, env, depth, instrCount)
+			receiver, err := evalExprNode(m, inner, env, depth, instrCount, exprDepth+1)
 			if err != nil {
 				return runtime.Value{}, err
 			}
@@ -225,7 +254,7 @@ func evalExprNode(m *Machine, node runtime.Value, env map[*runtime.Object]runtim
 		}
 		var result runtime.Value
 		for _, expr := range body {
-			v, err := evalExprNode(m, expr, env, depth, instrCount)
+			v, err := evalExprNode(m, expr, env, depth, instrCount, exprDepth+1)
 			if err != nil {
 				return runtime.Value{}, err
 			}
@@ -239,27 +268,54 @@ func evalExprNode(m *Machine, node runtime.Value, env map[*runtime.Object]runtim
 
 	case bcl.ExprNodeConditional:
 		test, ifTrue, ifFalse, _ := bcl.ConditionalExpressionParts(node)
-		t, err := evalExprNode(m, test, env, depth, instrCount)
+		t, err := evalExprNode(m, test, env, depth, instrCount, exprDepth+1)
 		if err != nil {
 			return runtime.Value{}, err
 		}
 		if t.Truthy() {
-			return evalExprNode(m, ifTrue, env, depth, instrCount)
+			return evalExprNode(m, ifTrue, env, depth, instrCount, exprDepth+1)
 		}
 		if ifFalse.Kind == runtime.KindNull {
 			// A real IfThen (no else branch) with a false test — void,
 			// same as real IfThen's own documented return-nothing shape.
 			return runtime.Value{}, nil
 		}
-		return evalExprNode(m, ifFalse, env, depth, instrCount)
+		return evalExprNode(m, ifFalse, env, depth, instrCount, exprDepth+1)
 
 	case bcl.ExprNodeInvoke:
 		exprToInvoke, argNodes, _ := bcl.InvokeExpressionParts(node)
-		fnVal, err := evalExprNode(m, exprToInvoke, env, depth, instrCount)
+		evaluatedArgs, err := evalExprList(m, argNodes, env, depth, instrCount, exprDepth+1)
 		if err != nil {
 			return runtime.Value{}, err
 		}
-		evaluatedArgs, err := evalExprList(m, argNodes, env, depth, instrCount)
+		if bcl.KindOfExprNode(exprToInvoke) == bcl.ExprNodeLambda {
+			// The overwhelmingly common real shape: Expression.Invoke on
+			// a LITERAL nested LambdaExpression node (a sub-expression
+			// built once and spliced into several call sites — real
+			// AutoMapper mapping-plan generation does exactly this for
+			// per-member sub-mappings), not a compiled delegate VALUE.
+			// Evaluating exprToInvoke directly (like any other node)
+			// would run its body immediately with whatever's already in
+			// env for its own parameters — wrong; this binds the
+			// ACTUALLY EVALUATED arguments to the lambda's own
+			// parameters in a fresh scope first, then evaluates its
+			// body, exactly like compiledExpressionInvoke's own
+			// top-level entry point does for the outer Compile()'d
+			// lambda.
+			params, _ := bcl.LambdaExpressionParameters(exprToInvoke)
+			body, _ := bcl.LambdaExpressionBody(exprToInvoke)
+			inner := make(map[*runtime.Object]runtime.Value, len(env)+len(params))
+			for k, v := range env {
+				inner[k] = v
+			}
+			for i, p := range params {
+				if obj, ok := bcl.ExprNodeIdentity(p); ok && i < len(evaluatedArgs) {
+					inner[obj] = evaluatedArgs[i]
+				}
+			}
+			return evalExprNode(m, body, inner, depth, instrCount, exprDepth+1)
+		}
+		fnVal, err := evalExprNode(m, exprToInvoke, env, depth, instrCount, exprDepth+1)
 		if err != nil {
 			return runtime.Value{}, err
 		}
@@ -269,13 +325,78 @@ func evalExprNode(m *Machine, node runtime.Value, env map[*runtime.Object]runtim
 		v, _, err := m.invokeFunc(fnVal.Func, evaluatedArgs, depth, instrCount)
 		return v, err
 
-	case bcl.ExprNodeBinaryCompare:
-		opType, left, right, _ := bcl.BinaryCompareExpressionParts(node)
-		lv, err := evalExprNode(m, left, env, depth, instrCount)
+	case bcl.ExprNodeTry:
+		// Real evaluation — found via AutoMapper's own mapping-plan
+		// generation wrapping a property-mapping expression in a real
+		// try/catch/finally template. A finally block always runs on
+		// the way out, on EITHER path (matching real .NET semantics),
+		// via a deferred-style closure rather than a Go `defer` (this
+		// isn't a Go function boundary, just one branch of a larger
+		// expression evaluation).
+		body, catches, finallyExpr, _ := bcl.TryExpressionParts(node)
+		result, err := evalExprNode(m, body, env, depth, instrCount, exprDepth+1)
+		if err != nil {
+			if mex, ok := err.(*runtime.ManagedException); ok {
+				for _, cb := range catches {
+					testType, variable, catchBody, _ := bcl.CatchBlockParts(cb)
+					if !m.exceptionMatchesCatch(mex, testType) {
+						continue
+					}
+					if obj, ok := bcl.ExprNodeIdentity(variable); ok {
+						exObj := mex.Object
+						if exObj == nil {
+							exObj = &runtime.Object{Native: mex}
+						}
+						env[obj] = runtime.ObjRef(exObj)
+					}
+					result, err = evalExprNode(m, catchBody, env, depth, instrCount, exprDepth+1)
+					break
+				}
+			}
+		}
+		if finallyExpr.Kind != runtime.KindNull {
+			if _, ferr := evalExprNode(m, finallyExpr, env, depth, instrCount, exprDepth+1); ferr != nil {
+				return runtime.Value{}, ferr
+			}
+		}
+		return result, err
+
+	case bcl.ExprNodeThrow:
+		// Real evaluation, not just tree-shape modeling — found via
+		// AutoMapper's own null-source-guard template
+		// (`throw new ArgumentNullException(...)`). Evaluating the
+		// thrown-value expression runs its own `newobj` (via
+		// ExprNodeNew), producing a real exception instance that
+		// valueAsThrowable (eval.go) turns into the same Go error a
+		// real `throw` IL instruction propagates.
+		valueExpr, _, _ := bcl.ThrowExpressionParts(node)
+		v, err := evalExprNode(m, valueExpr, env, depth, instrCount, exprDepth+1)
 		if err != nil {
 			return runtime.Value{}, err
 		}
-		rv, err := evalExprNode(m, right, env, depth, instrCount)
+		if throwErr := valueAsThrowable(v); throwErr != nil {
+			return runtime.Value{}, throwErr
+		}
+		return runtime.Value{}, fmt.Errorf("interpreter: compiled expression: Throw's value isn't a recognized exception instance")
+
+	case bcl.ExprNodeCoalesce:
+		left, right, _ := bcl.CoalesceExpressionParts(node)
+		lv, err := evalExprNode(m, left, env, depth, instrCount, exprDepth+1)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		if lv.Kind != runtime.KindNull && !(lv.Kind == runtime.KindObject && lv.Obj == nil) {
+			return lv, nil
+		}
+		return evalExprNode(m, right, env, depth, instrCount, exprDepth+1)
+
+	case bcl.ExprNodeBinaryCompare:
+		opType, left, right, _ := bcl.BinaryCompareExpressionParts(node)
+		lv, err := evalExprNode(m, left, env, depth, instrCount, exprDepth+1)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		rv, err := evalExprNode(m, right, env, depth, instrCount, exprDepth+1)
 		if err != nil {
 			return runtime.Value{}, err
 		}
@@ -294,7 +415,7 @@ func evalExprNode(m *Machine, node runtime.Value, env map[*runtime.Object]runtim
 		if !ok {
 			return runtime.Value{}, fmt.Errorf("interpreter: compiled expression: increment/decrement operand has no identity")
 		}
-		old, err := evalExprNode(m, operand, env, depth, instrCount)
+		old, err := evalExprNode(m, operand, env, depth, instrCount, exprDepth+1)
 		if err != nil {
 			return runtime.Value{}, err
 		}
@@ -359,10 +480,10 @@ func addIntDelta(v runtime.Value, delta int64) runtime.Value {
 	}
 }
 
-func evalExprList(m *Machine, nodes []runtime.Value, env map[*runtime.Object]runtime.Value, depth int, instrCount *int64) ([]runtime.Value, error) {
+func evalExprList(m *Machine, nodes []runtime.Value, env map[*runtime.Object]runtime.Value, depth int, instrCount *int64, exprDepth int) ([]runtime.Value, error) {
 	out := make([]runtime.Value, len(nodes))
 	for i, n := range nodes {
-		v, err := evalExprNode(m, n, env, depth, instrCount)
+		v, err := evalExprNode(m, n, env, depth, instrCount, exprDepth+1)
 		if err != nil {
 			return nil, err
 		}

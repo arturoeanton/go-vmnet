@@ -5688,6 +5688,205 @@ go run ./cmd/vmnet check package --profile=netstandard-lite microsoft.extensions
 ```
 
 ---
+## Fase 3.66 — parámetros genéricos a nivel de clase, try/catch/finally real en árboles de expresión, y causas raíz precisas para AutoMapper/CsvHelper/FluentValidation
+
+**Objetivo:** llevar las tres pistas propias "encontrado, no arreglado" de la Fase 3.65 a una
+conclusión real — el crash del propio `Mapper.Map<T>()` de AutoMapper, la brecha de `Dictionary`
+con clave con forma de array de CsvHelper (Fase 3.64), y el desajuste de `Comparer<T>.Default` en
+los validadores numéricos de FluentValidation (Fase 3.64) — iterando contra cada falla real
+exactamente como toda Fase anterior lo hizo, en vez de volver a adivinar de memoria.
+
+**Resultado: una capacidad arquitectónica genuinamente nueva y general (parámetros genéricos a
+nivel de clase, finalmente rastreados por instancia); dos errores reales más arreglados de raíz (la
+brecha de clave-array de `Dictionary`, y toda una clase de errores de secuencia vacía en
+`Enumerable.FirstOrDefault/LastOrDefault/SingleOrDefault<T>`); una regresión real detectada y
+arreglada por el propio gate de verificación completo de esta Fase antes de que llegara a un
+commit; y, para los dos paquetes que todavía no funcionan de punta a punta, una causa raíz PRECISA
+y reproducida en lugar de una conjetura — un diagnóstico sustancialmente más fuerte que el que
+tenían la Fase 3.64/3.65 para cualquiera de los dos.**
+
+- **La causa raíz real del `NullReferenceException` en `ValueTuple\`2.Item2` de AutoMapper (la
+  propia entrada "encontrado, no arreglado" de la Fase 3.65): `Enumerable.FirstOrDefault<T>()` (y
+  `LastOrDefault`/`SingleOrDefault`) responden una secuencia vacía/sin coincidencia con `Null()` en
+  vez de un `default(T)` real y tipado.** Para un tipo valor `T` (acá `ValueTuple\`2<ConstructorInfo,
+  ParameterInfo[]>`, del propio `constructors.Select(...).FirstOrDefault()` real de `AutoMapper.
+  Execution.ObjectFactory.CallConstructor`), `Null()` no es una aproximación — es el `Kind`
+  completamente EQUIVOCADO, y el siguiente `ldfld ...::Item2` choca. Arreglado de dos formas:
+  `Machine.defaultValueFor` (`internal/interpreter/structs.go`, ya la propia lógica real de
+  `default(T)` de `initobj`) ahora pela el sufijo `"[[...]]"` propio de una instanciación genérica
+  cerrada antes de consultar `bcl.LookupValueType` — un registro de nombre simple, un fallo de una
+  línea para cualquier cosa que no sea un nombre genérico abierto; y `FirstOrDefault`/`LastOrDefault`/
+  `SingleOrDefault` se movieron del `machineRegistry` plano al `genericMachineRegistry` (el mismo
+  mecanismo que `OfType<T>` ya estableció, Fase 3.42), así su propia respuesta vacía/sin coincidencia
+  puede llamar a `Machine.defaultValueFor` con el propio `T` real y resuelto del sitio de llamada en
+  vez de responder siempre `Null()`.
+- **Una capacidad arquitectónica completamente nueva: parámetros genéricos a nivel de clase,
+  rastreados por instancia de objeto real.** La Fase 3.60 le dio al propio parámetro de tipo abierto
+  de un MÉTODO genérico (`typeof(T)` dentro de `AddSingleton<TService,TImplementation>()`, un
+  MVAR/`!!N`) una respuesta real, resuelta de nuevo en cada llamada vía `Frame.MethodGenericArgs`.
+  Nada análogo existía para el propio parámetro de tipo de una CLASE genérica (`typeof(TSource)`
+  dentro del propio constructor de `MappingExpressionBase\`3<TSource,TDestination,...>`, un VAR/`!N`)
+  — cada lectura de este tipo respondía silenciosamente `""`, un tipo sin resolver. Encontrado vía el
+  propio `CreateMap<Source,Dest>()` de AutoMapper: su propio `TypeMap` real se registraba bajo un
+  `TypePair` VACÍO/equivocado (construido de `new TypePair(typeof(TSource), typeof(TDestination))`
+  dentro de un constructor de clase base genérica), así que `Mapper.Map<Dest>(source)` después
+  lanzaba `"Missing type map configuration or unsupported mapping"` — un bug real, silencioso y
+  serio de corrección para CUALQUIER clase genérica en esta forma, no solo AutoMapper. Arreglado con
+  un nuevo campo `runtime.Object.ClassGenericArgs []string` (reflejando `Frame.MethodGenericArgs` un
+  nivel más arriba: el propio T de un método genérico vive en la LLAMADA, el propio de una clase
+  genérica vive en el OBJETO, mientras exista), poblado en cada camino de construcción real
+  encontrado hasta ahora:
+  - `ir.NewObj.ClassGenericArgs` (campo nuevo) — los propios argumentos de tipo cerrados de un sitio
+    literal `newobj AlgoGenerico\`N<Args>::.ctor(...)`, resueltos del propio `Instantiation` del
+    TypeSpec de `MemberRef.Class` (la nueva `typeSpecInstantiationArgNames` de `ir/builder.go`),
+    incluyendo un centinela `"!!N"` (la MISMA codificación que la propia `methodSpecGenericArgNames`
+    de la Fase 3.60 ya estableció) cuando un argumento es en sí mismo el propio parámetro de tipo
+    todavía abierto del método genérico ENVOLVENTE siendo reenviado — resuelto contra el propio
+    `MethodGenericArgs` del frame que llama en el momento de ejecución (`resolveForwardedGenericArgs`,
+    ya construido exactamente para esta forma).
+  - `Machine.New`/`Activator.CreateInstance<T>()`/el propio caso `Expression.New` del evaluador de
+    expresiones — todos los caminos de construcción basados en reflection/árbol-de-expresión, donde
+    el nombre de tipo que llega a `newObj` ya está completamente cerrado (`bcl.ClosedGenericArgs`, un
+    nuevo parser exportado para el sufijo `"[[...]]"`, parseado directamente, sin necesitar reenvío).
+  - `ir.LoadTypeToken.IsClassGenericParam`/`ClassGenericParamIndex` (campos nuevos, reflejando
+    exactamente `IsMethodGenericParam`) — `typeof(T)` sobre un VAR a nivel de clase ahora resuelve
+    desde el propio objeto receptor del método ACTUAL (`frame.Args[0].Obj.ClassGenericArgs[N]`) en
+    vez de responder siempre `""`.
+  - `System.Object.GetType()` (la nueva `closedTypeFullNameOf` de `internal/bcl/system_type.go`)
+    ahora reporta el propio nombre cerrado REAL de un objeto genérico (`"Namespace.Type\`1[[Arg]]"`),
+    no solo el nombre TypeDef abierto plano — necesario para que cadenas de reflection al estilo
+    `Type.BaseType.GetGenericArguments()` (abajo) tengan algo real de dónde partir.
+  - `Type.BaseType` (la nueva `closedBaseTypeFullName` de `internal/interpreter/reflection.go`)
+    resolviendo los propios argumentos cerrados de una base genérica — capturados POR SEPARADO en el
+    momento de parseo del TypeDef como un nuevo campo `runtime.Type.BaseTypeGenericArgs` (la nueva
+    `baseTypeSpecGenericArgs` de assembly.go, usando el mismo centinela `"!N"` para una base cuyos
+    propios argumentos reenvían los parámetros todavía abiertos de la clase DERIVADA, ej. `class
+    DefaultClassMap<TClass> : ClassMap<TClass>`), resuelto contra el propio nombre cerrado del
+    receptor en el momento de la propia llamada de `Type.BaseType`. Encontrado vía el propio
+    `this.GetType().BaseType.GetGenericArguments()[0]` real de `CsvHelper.Configuration.ClassMap.
+    GetGenericType()` — índice fuera de rango en un array vacío sin esto.
+- **Una regresión real, detectada por el propio gate de verificación completo de esta Fase antes de
+  que llegara a un commit.** La primera versión del fix de `Type.BaseType` adjuntaba los propios
+  argumentos cerrados/centinela de la base DIRECTAMENTE sobre `runtime.Type.BaseTypeFullName` — que
+  cualquier OTRO consumidor de ese campo (el recorrido de ancestros de despacho virtual, la herencia
+  de campos, el matching de jerarquía de excepciones) resuelve directamente de vuelta a un TypeDef
+  vía su propio nombre simple, y se rompió apenas cargó un sufijo `"[[...]]"`: el propio subtest de
+  iterador yield-return de `TestInterfaceForeach` empezó a fallar. Arreglado haciendo que
+  `BaseTypeGenericArgs` sea su propio campo separado y aditivo — `BaseTypeFullName` en sí queda
+  intacto, exactamente como cada llamador preexistente ya espera.
+- **La propia brecha de `Dictionary` con clave con forma de array de CsvHelper (el propio hallazgo
+  postergado de la Fase 3.64, arreglado de verdad): el codificador de claves de Dictionary de
+  `internal/bcl/system_collections.go` ahora maneja `KindArray`,** codificando recursivamente cada
+  elemento de la misma forma que los propios campos de una clave struct ya lo hacen — la propia
+  caché interna de conversión de tipos de CsvHelper (con clave de un struct con un campo array) ya
+  no choca con `"Dictionary key kind 8 is not supported"`.
+- **Una ampliación del evaluador de árbol de expresión, junto al trabajo de genéricos de clase —
+  encontrada probando el propio AutoMapper real contra el nuevo evaluador de la Fase 3.65:**
+  `Expression.Throw`/`Coalesce`/`Catch`/`TryCatch`/`TryFinally`/`TryCatchFinally` (más el nodo
+  `CatchBlock` que el propio `Expression.Catch` devuelve, que tampoco es un subtipo de `Expression`
+  en el .NET real) — todos genuinamente EVALUADOS, no solo modelados en forma de árbol: `Throw`
+  lanza el valor evaluado como una excepción real (reutilizando el propio manejo de `ir.Throw` de
+  `eval.go` vía un nuevo helper compartido `valueAsThrowable`); `Coalesce` corta en corto sobre una
+  rama izquierda no nula; `TryCatch`/`TryFinally` corren un try/catch/finally real, comparando una
+  excepción atrapada contra el propio tipo de prueba de cada `CatchBlock` vía el MISMO chequeo real
+  de jerarquía de excepciones (`Machine.exceptionMatchesCatch`) que ya usa una cláusula `catch`
+  interpretada genuina. También: `Task.Factory`/`TaskFactory.StartNew`/`TaskScheduler.Default`
+  (encontrado vía la propia verificación de licencia en segundo plano, fire-and-forget, de
+  AutoMapper) y `Type.IsClass` (encontrado vía el propio código real de clasificación de parámetros
+  genéricos de `MappingExpressionBase\`3`).
+- **Un fix real y general de robustez para `Task.Run`/`TaskFactory.StartNew`: CUALQUIER error del
+  delegado se convierte en la propia excepción Faulted del Task devuelto, no solo un
+  `ManagedException` real de .NET.** Antes, una limitación interna del intérprete (un tipo para el
+  cual la propia metadata de este loop no tiene ningún `TypeDef`, sin relación con la semántica real
+  de excepciones de .NET) golpeada DENTRO de una tarea en segundo plano fire-and-forget solía
+  propagarse hasta el hilo LLAMADOR, chocando a un llamador real y sin modificar aunque nadie jamás
+  espera u observa ese Task — exactamente al revés de .NET real, donde el propio fallo de un Task en
+  segundo plano (de cualquier tipo) es invisible para un llamador que nunca lo revisa. Un nuevo
+  helper compartido `taskFaultOrPropagate` decide esto una vez para ambos nativos — excluyendo los
+  propios centinelas de seguridad de recursos de vmnet (`ErrInstructionLimitExceeded`/
+  `ErrStackOverflow`), que todavía deben abortar toda la corrida.
+- **Un límite de seguridad de profundidad de recursión para el propio evaluador de expresiones
+  (`maxExprEvalDepth`, `internal/interpreter/exprcompile.go`).** A diferencia del propio loop de CIL
+  de un método interpretado ordinario (que hace crecer `Machine.Limits.MaxInstructions` sin hacer
+  crecer la pila de Go en absoluto), el propio recorrido recursivo de árbol de `evalExprNode` agrega
+  un frame de pila de Go real por nodo — encontrado vía el propio árbol de plan de mapeo real de
+  AutoMapper golpeando un genuino **crash de proceso** `runtime: goroutine stack exceeds
+  1000000000-byte limit`, no un error atrapable, mucho antes de que cualquiera de los límites de
+  recursos existentes del intérprete jamás dispararan. Ahora se convierte en un `ErrStackOverflow`
+  gracioso en su lugar — un fix de robustez real sin importar qué esté realmente causando que el
+  propio árbol de AutoMapper recurra tan profundo (ver "Encontrado, no arreglado" abajo).
+
+### Encontrado, no arreglado (esta Fase)
+
+- **El propio `Mapper.Map<Dest>(source)` real de AutoMapper — incluso para un mapeo plano trivial de
+  dos propiedades — todavía no completa.** Superados los bugs de `ValueTuple\`2`/registro de
+  `TypeMap` de arriba (ambos ya arreglados), choca con el nuevo guardián `maxExprEvalDepth` propio de
+  `evalExprNode`: un árbol de expresión de plan de mapeo compilado real recurriendo miles de niveles
+  de `Block`/`Try` de profundidad, o genuinamente sin límite. Causa raíz NO encontrada — se sabe que
+  el propio `TypeMapPlanBuilder` real de AutoMapper construye andamiaje genérico de seguridad para
+  referencias circulares (una plantilla perezosa/auto-referencial) incluso para tipos planos, no
+  circulares, la explicación más probable, pero esto no se confirmó rastreando la forma real del
+  árbol (sin herramientas en este loop para visualizar/volcar un árbol `Expression` compilado más
+  allá de arqueología manual de IL, que no fue concluyente acá). No es una regresión de nada en esta
+  Fase — cada problema real HASTA este punto (inicialización estática, reflection, `
+  ExpressionVisitor`, el bug de genéricos de clase) ahora está arreglado y confirmado funcionando;
+  esto es un muro nuevo, más profundo y distinto.
+- **La construcción de `ClassMap` basada en `AutoMap()` propia de CsvHelper pierde la identidad
+  genérica cerrada en la frontera de reflection de `Type.GetConstructor()` — una simplificación
+  SEPARADA, deliberada y preexistente, no un bug del propio trabajo de genéricos de clase de esta
+  Fase.** `CsvHelper.CsvContext.AutoMap(Type)` construye su propio `DefaultClassMap<T>` interno vía
+  `typeof(DefaultClassMap\`1).MakeGenericType(new[]{recordType})` + reflection (`IObjectResolver.
+  Resolve` → `Activator.CreateInstance` → en la práctica, un patrón `Expression.New(ctor).Compile()`
+  y cacheo) — cada uno de los cuales el propio trabajo de `ClassGenericArgs` de esta Fase ahora
+  encadena correctamente. Pero el valor `ConstructorInfo` que maneja `Expression.New` en sí vino de
+  `Type.GetConstructor()` (la propia `typeFullNameOfOpen` de `internal/interpreter/reflection.go` —
+  deliberadamente pela el `"[[...]]"` antes de resolver la existencia del miembro, ya que `Machine.
+  ResolveMember`/`ResolveType` solo funcionan con nombres TypeDef ABIERTOS, una postura de todo el
+  proyecto usada por cada nativo `Type.GetMethod`/`GetField`/`GetProperty`/..., no solo
+  `GetConstructor`), así que la identidad cerrada ya se perdió para cuando `Expression.New` la ve.
+  Preservar la identidad genérica cerrada a través de TODA la superficie de nativos de reflection
+  (no solo construcción) sería un cambio mucho más amplio y riesgoso que el propio alcance de esta
+  Fase — el % del checker no se ve afectado de ninguna manera (`CsvHelper` 1.393 métodos, 88
+  marcados, sin cambios desde la Fase 3.65), ya que nada de esto toca la resolubilidad estática de
+  objetivos de llamada, solo la corrección en tiempo de ejecución.
+- **Los propios validadores de rango numérico de FluentValidation (`GreaterThanOrEqualTo`, etc.) —
+  diagnosticados con precisión, todavía no arreglados, y la teoría de la Fase 3.64 corregida.** La
+  Fase 3.64 conjeturó que esto era el propio bug de instancia cacheada compartida entre
+  instanciaciones de `Comparer<T>.Default`; una reproducción real y reproducida (una regla real
+  `GreaterThanOrEqualTo(18)`) muestra que `Comparer<T>.Default` en sí (`comparerDefault` de
+  `internal/bcl/system_comparer.go`) es un centinela sin estado, recién asignado en cada llamada —
+  no hay ninguna caché para compartir en absoluto. El desajuste REAL: `GreaterThanOrEqualValidator\`2.
+  IsValid(TProperty value, TProperty valueToCompare)` (una comparación real, con restricción
+  genérica `IComparable<T>`, confirmada correcta en el propio IL real de FluentValidation) recibe
+  una instancia real de `FluentValidation.ValidationContext\`1` donde debería estar `value`, y el
+  propio valor de propiedad real (25, o 10) donde debería estar `valueToCompare` (la constante 18) —
+  rastreado hasta el propio wrapper `AbstractComparisonValidator\`2.IsValid(ValidationContext<T>,
+  TProperty)` que llama, el cual comparte el MISMO nombre de método y aridad que la sobrescritura
+  realmente siendo invocada incorrectamente. Lo más probable es que la propia resolución de
+  overloads/despacho virtual de vmnet confunda las dos sobrescrituras `IsValid` de mismo nombre y
+  misma aridad en algún punto de la cadena de ancestros — no confirmado rastreando la decisión de
+  despacho real. Se intentó un fix de "degradar con gracia" (tratando el desajuste como una
+  respuesta arbitraria de "igual", la misma postura que el caso preexistente `KindObject`-vs-
+  `KindObject` ya usaba) y se REVIRTIÓ: hacía que `GreaterThanOrEqualTo(18)` aceptara silenciosamente
+  cualquier entrada sin importar su valor real (`Validate(10)` reportando `"valid"` cuando debe ser
+  `"invalid"`) — una librería de validación validando silenciosamente algo mal es un bug de
+  corrección real con consecuencias reales, estrictamente peor que el error honesto y ruidoso
+  original que reemplazaba. `examples/fluentvalidation-demo` sigue ejercitando deliberadamente solo
+  los validadores de string que ya funcionan correctamente.
+
+### Cómo verificar Fase 3.66
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+go run ./cmd/vmnet check package --profile=netstandard-lite automapper@16.2.0
+go run ./cmd/vmnet check package --profile=netstandard-lite csvhelper@33.1.0
+go run ./cmd/vmnet check package --profile=netstandard-lite fluentvalidation@11.9.2
+```
+
+---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
 

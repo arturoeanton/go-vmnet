@@ -16,6 +16,7 @@ func init() {
 	machineRegistry["System.Type::get_IsValueType"] = typeGetIsValueType
 	machineRegistry["System.Type::get_IsEnum"] = typeGetIsEnum
 	machineRegistry["System.Type::get_IsInterface"] = typeGetIsInterface
+	machineRegistry["System.Type::get_IsClass"] = typeGetIsClass
 	machineRegistry["System.Type::get_IsAbstract"] = typeGetIsAbstract
 	machineRegistry["System.Type::get_IsPrimitive"] = typeGetIsPrimitive
 	machineRegistry["System.Type::get_BaseType"] = typeGetBaseType
@@ -435,6 +436,23 @@ func typeGetIsInterface(m *Machine, args []runtime.Value, depth int, instrCount 
 	return runtime.Bool(isInterface), nil
 }
 
+// typeGetIsClass backs Type.IsClass (Fase 3.66, found via AutoMapper's
+// own MappingExpressionBase`3's real generic-parameter-checking code) —
+// real .NET's own definition: true for an ordinary reference type,
+// false for a value type OR an interface (arrays and delegates are
+// technically classes too in real .NET, but classifyTypeByName's own
+// "unresolvable name defaults to ordinary reference type" posture
+// already treats anything not specifically known as a value
+// type/interface as a class, so no special-casing is needed for them).
+func typeGetIsClass(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	fullName, ok := bcl.TypeFullNameOf(argsSelf(args))
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.IsClass receiver is not a Type")
+	}
+	isValueType, _, isInterface, _ := classifyTypeByName(m, fullName)
+	return runtime.Bool(!isValueType && !isInterface), nil
+}
+
 func typeGetIsAbstract(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
 	fullName, ok := bcl.TypeFullNameOf(argsSelf(args))
 	if !ok {
@@ -533,10 +551,61 @@ func typeGetBaseType(m *Machine, args []runtime.Value, depth int, instrCount *in
 	}
 	if m.ResolveType != nil {
 		if t, err := m.ResolveType(open); err == nil && t.BaseTypeFullName != "" {
-			return bcl.NewTypeValue(t.BaseTypeFullName), nil
+			return bcl.NewTypeValue(closedBaseTypeFullName(t, fullName)), nil
 		}
 	}
 	return bcl.NewTypeValue("System.Object"), nil
+}
+
+// closedBaseTypeFullName builds t's own real BaseType answer: t.
+// BaseTypeFullName (always the bare open name, see runtime.Type.
+// BaseTypeGenericArgs's own doc comment) plus, when the base is a
+// generic instantiation, its own closed argument names — substituting
+// any "!N" class-generic-parameter-forwarding sentinel (t.
+// BaseTypeGenericArgs, populated at TypeDef-parse time from the base's
+// own Extends TypeSpec — see assembly.go's baseTypeSpecGenericArgs) with
+// the REAL closed argument from receiverFullName's own generic
+// arguments (Fase 3.66) — receiverFullName is the receiver Type's own
+// FullName, already closed (bcl.closedTypeFullNameOf, populated from the
+// receiver OBJECT's own runtime.Object.ClassGenericArgs at GetType()
+// time), so no separate Object reference is needed here at all. A
+// sentinel with no corresponding closed arg (index out of range, or
+// receiverFullName itself has no closed args at all) falls back to the
+// bare open name, the same graceful degradation every other
+// unresolvable-generic-argument case in this project already accepts.
+func closedBaseTypeFullName(t *runtime.Type, receiverFullName string) string {
+	if len(t.BaseTypeGenericArgs) == 0 {
+		return t.BaseTypeFullName
+	}
+	receiverArgs := bcl.ClosedGenericArgs(receiverFullName)
+	if len(receiverArgs) == 0 {
+		return t.BaseTypeFullName
+	}
+	resolved := make([]string, len(t.BaseTypeGenericArgs))
+	for i, a := range t.BaseTypeGenericArgs {
+		if idx, ok := classGenericParamSentinelIndex(a); ok && idx >= 0 && idx < len(receiverArgs) {
+			resolved[i] = receiverArgs[idx]
+		} else {
+			resolved[i] = a
+		}
+	}
+	return t.BaseTypeFullName + "[[" + strings.Join(resolved, "],[") + "]]"
+}
+
+// classGenericParamSentinelIndex recognizes resolveTypeTokenName's own
+// "!N" sentinel (ECMA-335's own ILAsm notation for a class-level VAR
+// generic parameter, distinct from methodGenericParamSentinelIndex's own
+// "!!N" method-level MVAR one, eval.go).
+func classGenericParamSentinelIndex(s string) (int, bool) {
+	rest, ok := strings.CutPrefix(s, "!")
+	if !ok || strings.HasPrefix(rest, "!") {
+		return 0, false
+	}
+	n, err := strconv.Atoi(rest)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // typeGetInterfaces returns a plugin type's directly-implemented

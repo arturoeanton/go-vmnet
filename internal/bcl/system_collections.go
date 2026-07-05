@@ -911,6 +911,37 @@ func encodeDictKey(v runtime.Value) (string, error) {
 			sb.WriteString(enc)
 		}
 		return sb.String(), nil
+	case runtime.KindArray:
+		// A struct-shaped key containing an array field (Fase 3.66,
+		// found via CsvHelper's own internal type-conversion cache,
+		// keyed by a struct with an array component) — encoded the same
+		// way KindStruct's own fields are, recursively, in element
+		// order. Real .NET arrays don't override Equals/GetHashCode at
+		// all (plain reference identity by default), so a real struct
+		// containing one as a key component would ALSO only ever
+		// compare equal to itself by reference in actual .NET — but
+		// every real caller found so far treats an array-shaped key
+		// component as "the same logical key if its elements match" (a
+		// hand-written Equals override doing element-wise comparison,
+		// not the array's own default reference equality), so this
+		// matches that observed real intent rather than real .NET's own
+		// naive default.
+		if v.Arr == nil {
+			return "a:", nil
+		}
+		var sb strings.Builder
+		sb.WriteString("a:")
+		for i, e := range v.Arr.Elems {
+			if i > 0 {
+				sb.WriteByte(',')
+			}
+			enc, err := encodeDictKey(e)
+			if err != nil {
+				return "", fmt.Errorf("bcl: Dictionary key: array element %d: %w", i, err)
+			}
+			sb.WriteString(enc)
+		}
+		return sb.String(), nil
 	default:
 		return "", fmt.Errorf("bcl: Dictionary key kind %v is not supported", v.Kind)
 	}

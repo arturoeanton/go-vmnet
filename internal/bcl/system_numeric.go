@@ -489,16 +489,30 @@ func comparableCompareTo(args []runtime.Value) (runtime.Value, error) {
 		return cmp(a.Str < b.Str, a.Str > b.Str)
 	default:
 		// A reference-typed receiver with no meaningful numeric/string
-		// ordering vmnet can compute (found via a real, surprising case:
-		// FluentValidation's own internal code calls this against a
-		// ValidationContext<T> — almost certainly a generic utility
-		// (pooling/caching, not user-facing rule comparison) that doesn't
-		// actually need a real, correct answer to produce correct
-		// validation RESULTS). Reference equality is the only honest
-		// answer available without modeling that specific internal
-		// utility's exact intent — 0 (equal) for the same object, else an
-		// arbitrary-but-stable non-zero, rather than crashing the whole
-		// call outright.
+		// ordering vmnet can compute. Reference equality when BOTH sides
+		// are reference-typed (0 for the same object, else an
+		// arbitrary-but-stable non-zero) — a real, honest answer for that
+		// narrow shape — otherwise a hard error rather than a silently
+		// wrong one: a real, confirmed repro (Fase 3.66, FluentValidation's
+		// own GreaterThanOrEqualTo validator) traced this exact mismatch
+		// (a bound to a real FluentValidation.ValidationContext`1
+		// instance, b the REAL property value being validated, e.g. a
+		// real Age of 25 or 10) and confirmed it is NOT a harmless,
+		// unrelated internal comparison — degrading it to an arbitrary
+		// "equal" answer made GreaterThanOrEqualTo(18) silently accept
+		// every input regardless of its real value, which is worse than
+		// this loud error (a validation library silently validating
+		// something wrong is a correctness bug with real consequences,
+		// not just a missing feature). The true root cause wasn't found:
+		// most likely vmnet's own type-erased generic field/closure
+		// resolution reads the WRONG slot for this validator's own
+		// ValueToCompare (a generic TProperty field on a multi-level
+		// generic class hierarchy — PropertyValidator<T,TProperty> ->
+		// RangeValidatorBase<T,TProperty> -> AbstractComparisonValidator
+		// <T,TProperty> -> GreaterThanOrEqualToValidator<T,TProperty>) or
+		// a captured-constant closure (`ctx => 18`) incorrectly returning
+		// its own input parameter instead of the captured value — see
+		// docs/en/ROADMAP.md's own Fase 3.66 "found, not fixed" section.
 		if a.Kind == runtime.KindObject && b.Kind == runtime.KindObject {
 			if a.Obj == b.Obj {
 				return runtime.Int32(0), nil

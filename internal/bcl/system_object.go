@@ -227,6 +227,14 @@ func NativeTypeName(native any) (string, bool) {
 		return "System.Linq.Expressions.UnaryExpression", true
 	case *nativeBinaryCompareExpression:
 		return "System.Linq.Expressions.BinaryExpression", true
+	case *nativeThrowExpression:
+		return "System.Linq.Expressions.UnaryExpression", true
+	case *nativeCoalesceExpression:
+		return "System.Linq.Expressions.BinaryExpression", true
+	case *nativeTryExpression:
+		return "System.Linq.Expressions.TryExpression", true
+	case *nativeCatchBlock:
+		return "System.Linq.Expressions.CatchBlock", true
 	case *nativeMemberInfo:
 		return "System.Reflection.MemberInfo", true
 	case *nativeHashSet:

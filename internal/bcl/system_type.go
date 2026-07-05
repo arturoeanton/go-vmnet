@@ -249,6 +249,23 @@ func splitGenericArgs(bracketed string) []string {
 	return args
 }
 
+// ClosedGenericArgs returns fullName's own closed generic type argument
+// names — e.g. "List`1[[System.String]]" -> ["System.String"] — nil for
+// a non-generic or still-open name. Exported for
+// internal/interpreter/reflection.go's own typeGetBaseType (Fase 3.66),
+// which needs to resolve a "!N" class-generic-parameter-forwarding
+// sentinel in a base type's own BaseTypeFullName (see
+// resolveTypeTokenName's own doc comment, assembly.go) against the
+// RECEIVER type's own closed args — the same splitGenericArgs parsing
+// this package's own typeGetGenericArguments already uses internally.
+func ClosedGenericArgs(fullName string) []string {
+	idx := strings.Index(fullName, "[[")
+	if idx < 0 {
+		return nil
+	}
+	return splitGenericArgs(fullName[idx:])
+}
+
 func typeGetIsGenericType(args []runtime.Value) (runtime.Value, error) {
 	ti, err := asTypeInfo(args[0])
 	if err != nil {
@@ -548,7 +565,7 @@ func objectGetType(args []runtime.Value) (runtime.Value, error) {
 			return runtime.Value{}, &runtime.ManagedException{TypeName: "System.NullReferenceException", Message: "Object reference not set to an instance of an object (calling GetType)"}
 		}
 		if v.Obj.Type != nil {
-			return NewTypeValue(typeFullName(v.Obj.Type)), nil
+			return NewTypeValue(closedTypeFullNameOf(v.Obj)), nil
 		}
 		if ex, ok := v.Obj.Native.(*runtime.ManagedException); ok {
 			return NewTypeValue(ex.TypeName), nil
@@ -582,6 +599,37 @@ func typeFullName(t *runtime.Type) string {
 		return t.Name
 	}
 	return t.Namespace + "." + t.Name
+}
+
+// closedTypeFullNameOf reports obj's own FullName the way real
+// Object.GetType() would for a generic class instance: obj.Type's own
+// open name, PLUS its real closed generic type arguments when known
+// (obj.ClassGenericArgs, Fase 3.66 — populated at obj's own `newobj`
+// site, see runtime.Object.ClassGenericArgs's own doc comment), encoded
+// as "Open`N[[Arg1],[Arg2]]" — the same closed-generic-name convention
+// ir.SigTypeFullName already establishes everywhere else in this
+// project. Falls back to the bare open name when ClassGenericArgs is
+// nil (a non-generic class, or a generic one reached through a path
+// that doesn't thread it) — the same "best effort, not exhaustive"
+// posture every other generics gap in this project already accepts.
+// Found via CsvHelper's own ClassMap.GetGenericType(), which reads
+// `this.GetType().BaseType.GetGenericArguments()[0]` to recover its own
+// declared TClass — silently wrong (index out of range on an empty
+// array) without this, since GetGenericArguments() parses this exact
+// "[[...]]" suffix back out (see typeGetGenericArguments).
+func closedTypeFullNameOf(obj *runtime.Object) string {
+	open := typeFullName(obj.Type)
+	if len(obj.ClassGenericArgs) == 0 {
+		return open
+	}
+	names := make([]string, len(obj.ClassGenericArgs))
+	for i, a := range obj.ClassGenericArgs {
+		if a == "" {
+			return open
+		}
+		names[i] = a
+	}
+	return open + "[[" + strings.Join(names, "],[") + "]]"
 }
 
 // TypeFullNameOf returns a System.Type value's FullName — used by

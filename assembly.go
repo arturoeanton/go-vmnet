@@ -2034,6 +2034,7 @@ func (asm *Assembly) buildType(fullName string, depth int) (*runtime.Type, error
 	// TypeDef. Safe to recurse: resolveTypeByFullName doesn't hold cacheMu
 	// across a build (Fase 3.7's fix for the same shape of problem).
 	var baseName string
+	var baseGenericArgs []string
 	var fields []string
 	var fieldDefaults []runtime.Value
 	if !isValueType && !typeDef.Extends.IsNil() {
@@ -2043,6 +2044,19 @@ func (asm *Assembly) buildType(fullName string, depth int) (*runtime.Type, error
 			if base, err := asm.resolveTypeByFullName(baseName); err == nil {
 				fields = append(fields, base.Fields...)
 				fieldDefaults = append(fieldDefaults, base.FieldDefaults...)
+			}
+			// Captured separately from baseName itself (see
+			// resolveTypeTokenName's own doc comment for why) — real
+			// closed arguments a generic base is instantiated with,
+			// with a "!N" sentinel (ir.NewObj.ClassGenericArgs's own
+			// encoding) for any that forward the DERIVED class's own
+			// still-open generic parameter (e.g. `class DefaultClassMap
+			// <TClass> : ClassMap<TClass>`) — resolved against the
+			// receiver's own real ClassGenericArgs only at Type.
+			// BaseType's own call time (internal/interpreter/
+			// reflection.go's own typeGetBaseType), Fase 3.66.
+			if args, err := baseTypeSpecGenericArgs(asm.md, typeDef.Extends); err == nil {
+				baseGenericArgs = args
 			}
 		}
 	}
@@ -2132,6 +2146,7 @@ func (asm *Assembly) buildType(fullName string, depth int) (*runtime.Type, error
 	t.IsInterface = isInterface
 	t.IsAbstract = isAbstract
 	t.BaseTypeFullName = baseName
+	t.BaseTypeGenericArgs = baseGenericArgs
 	// fullName is already correctly "+"-qualified for a nested type (this
 	// function's own caller chain always resolves it via
 	// qualifyTypeDefName before calling resolveTypeByFullName) — t.Name
@@ -2331,10 +2346,68 @@ func resolveTypeTokenName(md *metadata.Metadata, tok metadata.Token) (string, er
 		if t.Kind != metadata.SigGenericInst {
 			return "", fmt.Errorf("vmnet: unsupported TypeSpec kind %d as a base/interface type", t.Kind)
 		}
+		// Deliberately the OPEN name only, args discarded — every
+		// existing consumer of this (m.baseTypeOf's own ancestor walk
+		// for virtual dispatch, field inheritance, exception-hierarchy
+		// matching) resolves this string straight back into a TypeDef
+		// via resolveTypeByFullName and would break if it suddenly
+		// carried a "[[...]]" suffix (confirmed the hard way, Fase 3.66:
+		// attaching real/forwarded args here directly regressed a real,
+		// previously-passing yield-return-iterator test). A generic
+		// base's own real closed arguments (needed only for Type.
+		// BaseType's own reflection answer, Fase 3.66) are captured
+		// SEPARATELY by baseTypeSpecGenericArgs below, stored on
+		// runtime.Type.BaseTypeGenericArgs — additive, not touching this
+		// return value at all.
 		return resolveTypeTokenName(md, t.Token)
 	default:
 		return "", fmt.Errorf("vmnet: unsupported base-type token table %#x", byte(tok.Table()))
 	}
+}
+
+// baseTypeSpecGenericArgs returns tok's own closed generic type argument
+// names when it names a generic base/interface instantiation (a
+// TypeSpec, e.g. `class DefaultClassMap<TClass> : ClassMap<TClass>`'s
+// own Extends token) — nil for anything else (a plain TypeRef/TypeDef
+// base, matching resolveTypeTokenName's own table switch). A real
+// argument (the base instantiated with a concrete type directly, not
+// forwarded) resolves via ir.SigTypeFullName; an argument that's itself
+// the DERIVED class's own still-open generic parameter (a VAR, never a
+// method-level MVAR — a TypeDef's own Extends can only reference its
+// enclosing class's own generic parameters) is retained as a "!N"
+// sentinel (ir.NewObj.ClassGenericArgs's own encoding), resolved later
+// against the receiver's own real ClassGenericArgs by internal/
+// interpreter/reflection.go's own typeGetBaseType. Fase 3.66, found via
+// CsvHelper's own ClassMap.GetGenericType() reading `this.GetType().
+// BaseType.GetGenericArguments()[0]` to recover its own declared TClass.
+func baseTypeSpecGenericArgs(md *metadata.Metadata, tok metadata.Token) ([]string, error) {
+	if tok.Table() != metadata.TableTypeSpec {
+		return nil, nil
+	}
+	sig, err := md.TypeSpecSignature(tok.RID())
+	if err != nil {
+		return nil, err
+	}
+	t, err := metadata.ParseTypeSpec(sig)
+	if err != nil {
+		return nil, err
+	}
+	if t.Kind != metadata.SigGenericInst || len(t.Args) == 0 {
+		return nil, nil
+	}
+	names := make([]string, len(t.Args))
+	for i, arg := range t.Args {
+		if arg.Kind == metadata.SigGenericParam && !arg.GenericParamIsMethod {
+			names[i] = fmt.Sprintf("!%d", arg.GenericParamIndex)
+			continue
+		}
+		name, err := ir.SigTypeFullName(md, arg)
+		if err != nil {
+			return nil, err
+		}
+		names[i] = name
+	}
+	return names, nil
 }
 
 // fieldAttrStatic is FieldAttributes.Static (ECMA-335 §II.23.1.5).

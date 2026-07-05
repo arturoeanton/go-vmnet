@@ -10,6 +10,32 @@ import (
 	"github.com/arturoeanton/go-vmnet/internal/runtime"
 )
 
+// valueAsThrowable converts a real exception object Value into the Go
+// error `throw`/`ir.Throw` propagates — nil if v isn't a recognized
+// exception instance at all. Factored out of ir.Throw's own handling
+// (Fase 3.66) so Expression.Throw's evaluator (internal/interpreter/
+// exprcompile.go) can reuse the identical real-exception-object logic
+// rather than duplicating it.
+func valueAsThrowable(v runtime.Value) error {
+	if v.Kind != runtime.KindObject || v.Obj == nil {
+		return nil
+	}
+	ex, ok := v.Obj.Native.(*runtime.ManagedException)
+	if !ok {
+		return nil
+	}
+	// Record the real thrown Object (see ManagedException.Object's own
+	// doc comment) — a plugin exception subclass's extra fields (or a
+	// base Exception's otherwise-untracked Data dictionary,
+	// system_exception.go's exceptionGetData) are only reachable through
+	// it, never through ManagedException's own flat TypeName/Message/
+	// Inner fields. `throw e;` re-throwing an already-caught local is the
+	// same v.Obj a previous catch already set this to, so this is
+	// idempotent — not just a first-throw special case.
+	ex.Object = v.Obj
+	return ex
+}
+
 // Machine executes runtime.Method IR. Resolve supplies methods and
 // ResolveType supplies field layouts for anything that isn't a BCL native
 // (bcl.Lookup / bcl.LookupCtor).
@@ -193,7 +219,19 @@ func (m *Machine) New(typeFullName string, args []runtime.Value) (result runtime
 		}
 	}()
 	instrCount := new(int64)
-	return m.newObj(newObjArgs{TypeFullName: typeFullName, CtorFullName: typeFullName + "::.ctor", Args: args}, 0, instrCount)
+	// Unlike an ordinary `newobj` IL instruction (whose own ClassGenericArgs
+	// may need forwarding-resolution against the CALLING frame's own
+	// MethodGenericArgs, see ir.NewObj.ClassGenericArgs's own doc
+	// comment), typeFullName here is ALREADY fully closed — this is the
+	// entry point real reflection-based construction goes through
+	// (Activator.CreateInstance(Type)/(Type,object[]), Assembly.New's own
+	// public API), where the caller already resolved every generic
+	// argument at runtime before ever reaching here. Parsed directly off
+	// the name's own "[[...]]" suffix, same as bcl's own
+	// typeGetGenericArguments (Fase 3.66, found via CsvHelper's own
+	// AutoMap machinery constructing its internal ClassMap via
+	// reflection rather than a literal `newobj Type\`N<Args>` site).
+	return m.newObj(newObjArgs{TypeFullName: typeFullName, CtorFullName: typeFullName + "::.ctor", Args: args, ClassGenericArgs: bcl.ClosedGenericArgs(typeFullName)}, 0, instrCount)
 }
 
 // CallInstance invokes fullName ("Namespace.Type::Method") as an
@@ -566,7 +604,16 @@ func (m *Machine) runFrame(frame *Frame, method *runtime.Method, depth int, inst
 			ctorArgs := append([]runtime.Value(nil), frame.Stack[len(frame.Stack)-in.ArgCount:]...)
 			frame.Stack = frame.Stack[:len(frame.Stack)-in.ArgCount]
 
-			v, err := m.newObj(newObjArgs{TypeFullName: in.TypeFullName, CtorFullName: in.CtorFullName, Args: ctorArgs, ParamTypeNames: in.ParamTypeNames}, depth, instrCount)
+			// A generic class's own closed type args may themselves be
+			// the ENCLOSING generic method's own still-open type
+			// parameter being forwarded (the "!!N" sentinel, Fase 3.66 —
+			// same resolveForwardedGenericArgs call ir.Call's own case
+			// above already makes for MethodGenericArgs), e.g.
+			// AutoMapper's own CreateMapCore<TSource,TDestination>
+			// forwarding into `newobj MappingExpression`2<!!TSource,
+			// !!TDestination>::.ctor(...)`.
+			classGenericArgs := resolveForwardedGenericArgs(in.ClassGenericArgs, frame.MethodGenericArgs)
+			v, err := m.newObj(newObjArgs{TypeFullName: in.TypeFullName, CtorFullName: in.CtorFullName, Args: ctorArgs, ParamTypeNames: in.ParamTypeNames, ClassGenericArgs: classGenericArgs}, depth, instrCount)
 			if err != nil {
 				return runtime.Value{}, err
 			}
@@ -632,22 +679,8 @@ func (m *Machine) runFrame(frame *Frame, method *runtime.Method, depth int, inst
 			t.SetStaticField(idx, val.Clone())
 
 		case ir.Throw:
-			v := frame.pop()
-			if v.Kind == runtime.KindObject && v.Obj != nil {
-				if ex, ok := v.Obj.Native.(*runtime.ManagedException); ok {
-					// Record the real thrown Object (see ManagedException.
-					// Object's own doc comment) — a plugin exception
-					// subclass's extra fields (or a base Exception's
-					// otherwise-untracked Data dictionary, system_exception.
-					// go's exceptionGetData) are only reachable through it,
-					// never through ManagedException's own flat TypeName/
-					// Message/Inner fields. `throw e;` re-throwing an
-					// already-caught local is the same v.Obj a previous
-					// catch already set this to, so this is idempotent —
-					// not just a first-throw special case.
-					ex.Object = v.Obj
-					return runtime.Value{}, ex
-				}
+			if err := valueAsThrowable(frame.pop()); err != nil {
+				return runtime.Value{}, err
 			}
 			return runtime.Value{}, fmt.Errorf("interpreter: thrown object is not a recognized exception type")
 
@@ -787,6 +820,28 @@ func (m *Machine) runFrame(frame *Frame, method *runtime.Method, depth int, inst
 					typeName = frame.MethodGenericArgs[in.MethodGenericParamIndex]
 				} else {
 					typeName = ""
+				}
+			}
+			if in.IsClassGenericParam {
+				// typeof(T) on the ENCLOSING CLASS's own generic parameter
+				// (Fase 3.66) — resolved from the CURRENT method's own
+				// receiver object (frame.Args[0], always true for an
+				// instance method/constructor — the only real shape a
+				// class-level generic parameter reference can appear in),
+				// whose own ClassGenericArgs were populated at its
+				// `newobj` site (see runtime.Object.ClassGenericArgs's own
+				// doc comment). Degrades to "" the same way the method-
+				// level case above does when unavailable — a static
+				// method can't reach here at all (a class-level generic
+				// parameter is only meaningful relative to `this`), and
+				// neither this project's own IR builder nor real C# ever
+				// emits one outside an instance context.
+				typeName = ""
+				if len(frame.Args) > 0 && frame.Args[0].Kind == runtime.KindObject && frame.Args[0].Obj != nil {
+					args := frame.Args[0].Obj.ClassGenericArgs
+					if in.ClassGenericParamIndex >= 0 && in.ClassGenericParamIndex < len(args) {
+						typeName = args[in.ClassGenericParamIndex]
+					}
 				}
 			}
 			frame.push(bcl.NewTypeValue(typeName))

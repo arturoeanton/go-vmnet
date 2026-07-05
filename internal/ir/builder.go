@@ -295,11 +295,11 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool, ehClaus
 
 		case "newobj":
 			token := instr.Operand.(uint32)
-			typeFullName, ctorFullName, argCount, paramTypeNames, err := resolveNewObjTarget(md, token)
+			typeFullName, ctorFullName, argCount, paramTypeNames, classGenericArgs, err := resolveNewObjTarget(md, token)
 			if err != nil {
 				return nil, nil, fmt.Errorf("ir: newobj at IL offset %d: %w", instr.Offset, err)
 			}
-			out = append(out, NewObj{TypeFullName: typeFullName, CtorFullName: ctorFullName, ArgCount: argCount, ParamTypeNames: paramTypeNames})
+			out = append(out, NewObj{TypeFullName: typeFullName, CtorFullName: ctorFullName, ArgCount: argCount, ParamTypeNames: paramTypeNames, ClassGenericArgs: classGenericArgs})
 
 		case "ldfld":
 			token := instr.Operand.(uint32)
@@ -496,6 +496,19 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool, ehClaus
 					// needs a different answer; see ir.Call.
 					// MethodGenericArgs's own doc comment).
 					out = append(out, LoadTypeToken{MethodGenericParamIndex: int(parsed.GenericParamIndex), IsMethodGenericParam: true})
+					break
+				}
+				if parsed.Kind == metadata.SigGenericParam && !parsed.GenericParamIsMethod {
+					// `typeof(TSource)` on the ENCLOSING CLASS's own generic
+					// parameter (Fase 3.66, a VAR/`!N` rather than the
+					// method-level MVAR/`!!N` case just above) — resolved
+					// at runtime from the current frame's own receiver
+					// object's ClassGenericArgs (populated at that
+					// object's own `newobj` site, see ir.NewObj.
+					// ClassGenericArgs's own doc comment), not here: the
+					// same method body runs for every closed instantiation
+					// of its own declaring generic class.
+					out = append(out, LoadTypeToken{ClassGenericParamIndex: int(parsed.GenericParamIndex), IsClassGenericParam: true})
 					break
 				}
 				// Unlike resolveTypeTokenOrGeneric (used by initobj/ldobj/
@@ -764,6 +777,18 @@ func methodSpecGenericArgNames(md *metadata.Metadata, instantiation []byte) ([]s
 	if err != nil {
 		return nil, err
 	}
+	return sigTypeListGenericArgNames(md, types)
+}
+
+// sigTypeListGenericArgNames resolves each SigType in types to its own
+// full name, with the same "!!N" sentinel escape methodSpecGenericArgNames
+// documented for a forwarded method-level generic parameter — shared by
+// methodSpecGenericArgNames (a MethodSpec's own Instantiation) and
+// typeSpecInstantiationArgNames below (a TypeSpec's own Args, Fase 3.66)
+// since both are just "a list of generic type arguments, some of which
+// might themselves be the enclosing generic METHOD's own still-open type
+// parameter being forwarded" — identical resolution logic either way.
+func sigTypeListGenericArgNames(md *metadata.Metadata, types []metadata.SigType) ([]string, error) {
 	names := make([]string, len(types))
 	for i, t := range types {
 		if t.Kind == metadata.SigGenericParam && t.GenericParamIsMethod {
@@ -777,6 +802,32 @@ func methodSpecGenericArgNames(md *metadata.Metadata, instantiation []byte) ([]s
 		names[i] = name
 	}
 	return names, nil
+}
+
+// typeSpecInstantiationArgNames resolves a closed generic CLASS
+// instantiation's own type arguments (e.g. the `<Source, Dest>` in
+// `MappingExpression`2<Source, Dest>`) — used at a `newobj` site to
+// populate the constructed object's own runtime.Object.ClassGenericArgs
+// (Fase 3.66), the one piece Object-level generics needed that
+// method-level generics (Fase 3.60, ir.Call.MethodGenericArgs) already
+// had. nil (not an error) for a non-generic TypeSpec kind — the
+// "unsupported TypeSpec kind" case is a real error at every other
+// TypeSpec consumer in this file (resolveTypeSpecName), but harmless
+// here: a newobj target that isn't a closed generic instantiation simply
+// has no class generic args to carry, same as a non-generic class.
+func typeSpecInstantiationArgNames(md *metadata.Metadata, rid uint32) ([]string, error) {
+	sig, err := md.TypeSpecSignature(rid)
+	if err != nil {
+		return nil, err
+	}
+	t, err := metadata.ParseTypeSpec(sig)
+	if err != nil {
+		return nil, err
+	}
+	if t.Kind != metadata.SigGenericInst {
+		return nil, nil
+	}
+	return sigTypeListGenericArgNames(md, t.Args)
 }
 
 // sigParamTypeNames resolves each of sig's declared parameter types to a
@@ -1094,49 +1145,61 @@ func resolveTypeToken(md *metadata.Metadata, tok metadata.Token) (string, error)
 	}
 }
 
-func resolveNewObjTarget(md *metadata.Metadata, token uint32) (typeFullName, ctorFullName string, argCount int, paramTypeNames []string, err error) {
+func resolveNewObjTarget(md *metadata.Metadata, token uint32) (typeFullName, ctorFullName string, argCount int, paramTypeNames []string, classGenericArgs []string, err error) {
 	t := metadata.Token(token)
 	switch t.Table() {
 	case metadata.TableMethodDef:
 		row, err := md.MethodDef(t.RID())
 		if err != nil {
-			return "", "", 0, nil, err
+			return "", "", 0, nil, nil, err
 		}
 		typeRID, err := md.MethodDefOwner(t.RID())
 		if err != nil {
-			return "", "", 0, nil, err
+			return "", "", 0, nil, nil, err
 		}
 		typeDef, err := md.TypeDef(typeRID)
 		if err != nil {
-			return "", "", 0, nil, err
+			return "", "", 0, nil, nil, err
 		}
 		sig, err := metadata.ParseMethodSig(row.Signature)
 		if err != nil {
-			return "", "", 0, nil, err
+			return "", "", 0, nil, nil, err
 		}
 		typeFullName, err = QualifyTypeDefName(md, typeRID, typeDef)
 		if err != nil {
-			return "", "", 0, nil, err
+			return "", "", 0, nil, nil, err
 		}
-		return typeFullName, typeFullName + "::" + row.Name, int(sig.ParamCount), sigParamTypeNames(md, sig), nil
+		return typeFullName, typeFullName + "::" + row.Name, int(sig.ParamCount), sigParamTypeNames(md, sig), nil, nil
 
 	case metadata.TableMemberRef:
 		row, err := md.MemberRef(t.RID())
 		if err != nil {
-			return "", "", 0, nil, err
+			return "", "", 0, nil, nil, err
 		}
 		sig, err := metadata.ParseMethodSig(row.Signature)
 		if err != nil {
-			return "", "", 0, nil, err
+			return "", "", 0, nil, nil, err
 		}
 		typeFullName, err = ResolveMemberRefClassName(md, row.Class)
 		if err != nil {
-			return "", "", 0, nil, err
+			return "", "", 0, nil, nil, err
 		}
-		return typeFullName, typeFullName + "::" + row.Name, int(sig.ParamCount), sigParamTypeNames(md, sig), nil
+		// row.Class names a TypeSpec exactly when the constructed type is
+		// a generic class instantiation (e.g. `newobj MappingExpression`2
+		// <Source, Dest>::.ctor(...)`) — its own closed type arguments
+		// (Fase 3.66) aren't part of typeFullName above (ResolveMemberRefClassName
+		// ->resolveTypeSpecName deliberately keeps only the open name, see
+		// its own doc comment), so they're resolved separately here.
+		if row.Class.Table() == metadata.TableTypeSpec {
+			classGenericArgs, err = typeSpecInstantiationArgNames(md, row.Class.RID())
+			if err != nil {
+				return "", "", 0, nil, nil, err
+			}
+		}
+		return typeFullName, typeFullName + "::" + row.Name, int(sig.ParamCount), sigParamTypeNames(md, sig), classGenericArgs, nil
 
 	default:
-		return "", "", 0, nil, fmt.Errorf("unsupported newobj target table %#x", byte(t.Table()))
+		return "", "", 0, nil, nil, fmt.Errorf("unsupported newobj target table %#x", byte(t.Table()))
 	}
 }
 

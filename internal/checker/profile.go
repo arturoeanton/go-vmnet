@@ -146,6 +146,8 @@ func init() {
 		"System.Linq.Expressions.ConditionalExpression::",
 		"System.Linq.Expressions.InvocationExpression::",
 		"System.Linq.Expressions.ExpressionVisitor::",
+		"System.Linq.Expressions.TryExpression::",
+		"System.Linq.Expressions.CatchBlock::",
 		"System.Linq.Enumerable::",
 		// VmnetInternal.Ordered/VmnetInternal.Grouping are vmnet's own
 		// synthetic result types for a LINQ OrderBy/ThenBy chain

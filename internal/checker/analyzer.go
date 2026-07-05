@@ -334,6 +334,7 @@ var reflectionMachineTargets = map[string]bool{
 	"System.Type::get_IsValueType": true,
 	"System.Type::get_IsEnum":      true,
 	"System.Type::get_IsInterface": true,
+	"System.Type::get_IsClass":     true,
 	"System.Type::get_IsAbstract":  true,
 	"System.Type::get_IsPrimitive": true,
 	"System.Type::get_BaseType":    true,
@@ -505,6 +506,9 @@ var asyncMachineTargets = map[string]bool{
 	"System.Runtime.CompilerServices.AsyncTaskMethodBuilder::AwaitUnsafeOnCompleted":   true,
 	"System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1::AwaitUnsafeOnCompleted": true,
 	"System.Threading.Tasks.Task::Run":                                                 true,
+	"System.Threading.Tasks.Task::get_Factory":                                         true,
+	"System.Threading.Tasks.TaskFactory::StartNew":                                     true,
+	"System.Threading.Tasks.TaskScheduler::get_Default":                                true,
 }
 
 // linqTargets lists the System.Linq.Enumerable methods the interpreter
