@@ -169,66 +169,14 @@ func init() {
 	// the first place) — no Machine access needed, unlike Invoke/GetValue
 	// which actually have to run something.
 	register("System.Reflection.MemberInfo::get_DeclaringType", true, memberInfoGetDeclaringType)
-	// GetCustomAttributes/IsDefined (Fase 3.60) — a real, known limitation,
-	// not a full implementation: vmnet has no CustomAttributeData/attribute-
-	// blob-decoding subsystem yet (ECMA-335 §II.23.3 — a genuinely new,
-	// sizable piece of work, deliberately deferred), so every receiver here
-	// always answers "no custom attributes at all", regardless of what a
-	// real assembly's metadata actually declares. Correct for the
-	// overwhelming common case a defensive attribute check hits (there
-	// really is no such attribute on this specific member/parameter) —
-	// found via a real, load-bearing case: Microsoft.Extensions.
-	// DependencyInjection's own real constructor-injection call-site
-	// builder (CallSiteFactory.CreateArgumentCallSites) calls
-	// ParameterInfo.GetCustomAttributes() on every constructor parameter
-	// while resolving a service's real dependencies, and gracefully
-	// proceeds when none are found — exactly like real code would for a
-	// plain, unannotated constructor parameter. Would give a wrong answer
-	// only for a caller that specifically depends on reading a real
-	// attribute's data (e.g. FluentValidation's [Flags] checks, CsvHelper's
-	// [Name]) — those need the full subsystem this isn't, and remain a
-	// documented gap (docs/en/ROADMAP.md).
-	for _, recv := range []string{
-		"System.Reflection.ParameterInfo",
-		"System.Reflection.MemberInfo",
-		"System.Reflection.MethodInfo",
-		"System.Reflection.ConstructorInfo",
-		"System.Reflection.MethodBase",
-		"System.Reflection.PropertyInfo",
-		"System.Reflection.FieldInfo",
-		"System.Type",
-	} {
-		register(recv+"::GetCustomAttributes", true, reflectionEmptyObjectArray)
-		register(recv+"::IsDefined", true, reflectionFalse)
-	}
-	// Attribute.GetCustomAttribute(MemberInfo/ParameterInfo, Type[, bool])
-	// — same "no attribute ever found" posture as GetCustomAttributes
-	// above, just the singular real static-method shape.
-	register("System.Attribute::GetCustomAttribute", true, reflectionNullValue)
-	// CustomAttributeExtensions.GetCustomAttribute<T>(this MemberInfo) —
-	// the generic extension-method spelling of the same real API
-	// (found via Markdig's own Markdown.Version property reading its
-	// containing assembly's AssemblyFileVersionAttribute). Same "no
-	// attribute ever found" posture as System.Attribute::GetCustomAttribute
-	// above — a plain bcl.Native despite being a generic method call site,
-	// since vmnet's type-erased Value model means the answer (always
-	// null) doesn't depend on what T actually closes over, so no
-	// genericMachineRegistry entry is needed at all.
-	register("System.Reflection.CustomAttributeExtensions::GetCustomAttribute", true, reflectionNullValue)
-	register("System.Reflection.CustomAttributeExtensions::GetCustomAttributes", true, reflectionEmptyObjectArray)
-	register("System.Reflection.CustomAttributeExtensions::IsDefined", true, reflectionFalse)
-}
-
-func reflectionEmptyObjectArray(args []runtime.Value) (runtime.Value, error) {
-	return runtime.ArrRef(runtime.NewArray(0)), nil
-}
-
-func reflectionFalse(args []runtime.Value) (runtime.Value, error) {
-	return runtime.Bool(false), nil
-}
-
-func reflectionNullValue(args []runtime.Value) (runtime.Value, error) {
-	return runtime.Null(), nil
+	// GetCustomAttributes/IsDefined/GetCustomAttribute/GetCustomAttributesData
+	// (Fase 3.60 stub, Fase 3.63 real for Type/PropertyInfo receivers) all
+	// moved to internal/interpreter/customattributes.go — every one of
+	// them needs Machine access now (Machine.ResolveCustomAttributes, plus
+	// Machine.New to actually construct a real attribute instance for the
+	// GetCustomAttribute(<T>)/GetCustomAttributes shapes), which a plain
+	// bcl.Native never has. See that file's own doc comment for the
+	// current real-vs-still-a-documented-stub split by receiver kind.
 }
 
 func fieldInfoGetFieldType(args []runtime.Value) (runtime.Value, error) {

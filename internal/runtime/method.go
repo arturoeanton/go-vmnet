@@ -167,4 +167,22 @@ type Resolvers struct {
 	// at all, matching every other resolver's own "no data available"
 	// contract.
 	ResolveMemberFlags func(typeFullName, memberName string) (flags []uint16, ok bool)
+	// ResolveCustomAttributes reads every real custom attribute applied to
+	// typeFullName's own member named memberName of kind memberKind ("type"
+	// for the type itself, memberName ignored; "property" for one of its
+	// declared properties — Fase 3.63: System.Reflection.
+	// CustomAttributeData/CustomAttributeExtensions.GetCustomAttribute<T>,
+	// real attribute reading). ok=false for a type with no TypeDef at all
+	// or an unrecognized memberKind, matching every other resolver's own
+	// "no data available" contract; ok=true with zero attributes is real
+	// too.
+	ResolveCustomAttributes func(typeFullName, memberKind, memberName string) (attrs []ResolvedAttribute, ok bool)
+}
+
+// ResolvedAttribute is one real custom attribute applied to a member,
+// decoded enough to actually construct a real instance of it. CtorArgs is
+// ready to pass directly to Machine.New/newObj as constructor arguments.
+type ResolvedAttribute struct {
+	TypeFullName string
+	CtorArgs     []Value
 }

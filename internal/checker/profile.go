@@ -291,6 +291,12 @@ func init() {
 		"System.Reflection.Assembly::",
 		"System.Reflection.IntrospectionExtensions::",
 		"System.Reflection.CustomAttributeExtensions::",
+		// Real System.Reflection.CustomAttributeData/
+		// CustomAttributeTypedArgument (Fase 3.63) — see
+		// internal/bcl/system_customattributedata.go.
+		"System.Reflection.CustomAttributeData::",
+		"System.Reflection.CustomAttributeTypedArgument::",
+		"System.Attribute::GetCustomAttribute",
 		"System.Runtime.CompilerServices.Unsafe::",
 		"System.Resources.ResourceManager::",
 		"System.Enum::GetValues",

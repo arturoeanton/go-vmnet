@@ -691,7 +691,7 @@ func resolveCallTarget(md *metadata.Metadata, token uint32) (fullName string, ha
 		if err != nil {
 			return "", false, 0, false, nil, nil, err
 		}
-		typeName, err := resolveMemberRefClassName(md, row.Class)
+		typeName, err := ResolveMemberRefClassName(md, row.Class)
 		if err != nil {
 			return "", false, 0, false, nil, nil, err
 		}
@@ -903,7 +903,7 @@ func QualifyTypeDefName(md *metadata.Metadata, typeRID uint32, row metadata.Type
 	return enclosingName + "+" + row.Name, nil
 }
 
-func resolveMemberRefClassName(md *metadata.Metadata, class metadata.Token) (string, error) {
+func ResolveMemberRefClassName(md *metadata.Metadata, class metadata.Token) (string, error) {
 	switch class.Table() {
 	case metadata.TableTypeRef:
 		row, err := md.TypeRef(class.RID())
@@ -1129,7 +1129,7 @@ func resolveNewObjTarget(md *metadata.Metadata, token uint32) (typeFullName, cto
 		if err != nil {
 			return "", "", 0, nil, err
 		}
-		typeFullName, err = resolveMemberRefClassName(md, row.Class)
+		typeFullName, err = ResolveMemberRefClassName(md, row.Class)
 		if err != nil {
 			return "", "", 0, nil, err
 		}
@@ -1172,7 +1172,7 @@ func resolveFieldTarget(md *metadata.Metadata, token uint32) (typeFullName, fiel
 		if err != nil {
 			return "", "", err
 		}
-		typeName, err := resolveMemberRefClassName(md, row.Class)
+		typeName, err := ResolveMemberRefClassName(md, row.Class)
 		if err != nil {
 			return "", "", err
 		}

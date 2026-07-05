@@ -109,6 +109,12 @@ type MethodsResolver func(typeFullName string) (names []string, ok bool)
 // re-resolves parameters, rather than needing its own new field.
 type MemberFlagsResolver func(typeFullName, memberName string) (flags []uint16, ok bool)
 
+// CustomAttributesResolver reads every real custom attribute applied to a
+// member (Fase 3.63, System.Reflection.CustomAttributeData/
+// CustomAttributeExtensions.GetCustomAttribute<T>) — see
+// runtime.Resolvers.ResolveCustomAttributes.
+type CustomAttributesResolver func(typeFullName, memberKind, memberName string) (attrs []runtime.ResolvedAttribute, ok bool)
+
 // genericMachineNative is a Machine-aware native (like machineNative,
 // linq.go) that additionally needs the call site's own resolved generic
 // method type arguments (Fase 3.40, ir.Call.MethodGenericArgs) — e.g.

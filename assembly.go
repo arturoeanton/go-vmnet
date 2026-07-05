@@ -1251,6 +1251,7 @@ func (asm *Assembly) resolvers() *runtime.Resolvers {
 		ResolveFields:           asm.resolveFields,
 		ResolveMethods:          asm.resolveMethods,
 		ResolveMemberFlags:      asm.resolveMemberFlags,
+		ResolveCustomAttributes: asm.resolveCustomAttributes,
 	}
 }
 
@@ -1711,6 +1712,178 @@ func (asm *Assembly) resolveMethods(typeFullName string) (names []string, ok boo
 		names = append(names, r.Name)
 	}
 	return names, true
+}
+
+// resolveCustomAttributes backs the interpreter's CustomAttributesResolver
+// (Fase 3.63) — every real custom attribute applied to typeFullName's own
+// member named memberName of kind memberKind ("type" for the type itself,
+// memberName ignored; "property" for one of its declared properties).
+// Only these two member kinds are implemented so far — field/method/
+// parameter-level attributes remain a documented gap (docs/en/
+// ROADMAP.md), extensible the same way once a real corpus caller needs
+// one (adding a case here plus the matching owning-token lookup is the
+// whole shape, see the "property" case below). ok=false for a type with
+// no TypeDef at all, or an unrecognized memberKind — matching every other
+// resolver's own "no data available" contract; ok=true with zero
+// attributes is real too (a member simply has none, or every one applied
+// used an argument shape this subsystem doesn't decode yet — see
+// decodeCustomAttribute's own doc comment).
+func (asm *Assembly) resolveCustomAttributes(typeFullName, memberKind, memberName string) ([]runtime.ResolvedAttribute, bool) {
+	namespace, typeName := splitTypeName(typeFullName)
+	typeRID, _, err := asm.md.FindTypeDef(namespace, typeName)
+	if err != nil {
+		for _, dep := range asm.deps {
+			if attrs, ok := dep.resolveCustomAttributes(typeFullName, memberKind, memberName); ok {
+				return attrs, true
+			}
+		}
+		if owner, ok := asm.globalTypeIndex[typeFullName]; ok && owner != asm {
+			return owner.resolveCustomAttributes(typeFullName, memberKind, memberName)
+		}
+		return nil, false
+	}
+
+	var parent metadata.Token
+	switch memberKind {
+	case "type":
+		parent = metadata.NewToken(metadata.TableTypeDef, typeRID)
+	case "property":
+		start, end, err := asm.md.TypeDefPropertyRange(typeRID)
+		if err != nil {
+			return nil, true
+		}
+		found := false
+		for rid := start; rid < end; rid++ {
+			row, err := asm.md.Property(rid)
+			if err != nil {
+				continue
+			}
+			if row.Name == memberName {
+				parent = metadata.NewToken(metadata.TableProperty, rid)
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, true
+		}
+	default:
+		return nil, false
+	}
+
+	rows, err := asm.md.CustomAttributesForParent(parent)
+	if err != nil {
+		return nil, false
+	}
+	var out []runtime.ResolvedAttribute
+	for _, row := range rows {
+		attr, ok := asm.decodeCustomAttribute(row)
+		if !ok {
+			// A real attribute this subsystem can't decode yet (an
+			// array/boxed-object constructor argument — see
+			// metadata.DecodeCustomAttributeArgs's own doc comment) —
+			// skipped rather than failing every other, decodable
+			// attribute on the same member.
+			continue
+		}
+		out = append(out, attr)
+	}
+	return out, true
+}
+
+// decodeCustomAttribute resolves row's own constructor (always a
+// MethodDef, for an attribute type declared in THIS assembly, or a
+// MemberRef, for one declared in a dependency) to its owning type's real
+// full name and its own parsed parameter signature, then decodes the
+// blob against that signature.
+func (asm *Assembly) decodeCustomAttribute(row metadata.CustomAttributeRow) (runtime.ResolvedAttribute, bool) {
+	var sig metadata.MethodSig
+	var typeFullName string
+	switch row.Ctor.Table() {
+	case metadata.TableMethodDef:
+		mrow, err := asm.md.MethodDef(row.Ctor.RID())
+		if err != nil {
+			return runtime.ResolvedAttribute{}, false
+		}
+		parsedSig, err := metadata.ParseMethodSig(mrow.Signature)
+		if err != nil {
+			return runtime.ResolvedAttribute{}, false
+		}
+		sig = parsedSig
+		ownerRID, err := asm.md.MethodDefOwner(row.Ctor.RID())
+		if err != nil {
+			return runtime.ResolvedAttribute{}, false
+		}
+		ownerRow, err := asm.md.TypeDef(ownerRID)
+		if err != nil {
+			return runtime.ResolvedAttribute{}, false
+		}
+		name, err := ir.QualifyTypeDefName(asm.md, ownerRID, ownerRow)
+		if err != nil {
+			return runtime.ResolvedAttribute{}, false
+		}
+		typeFullName = name
+	case metadata.TableMemberRef:
+		mrow, err := asm.md.MemberRef(row.Ctor.RID())
+		if err != nil {
+			return runtime.ResolvedAttribute{}, false
+		}
+		parsedSig, err := metadata.ParseMethodSig(mrow.Signature)
+		if err != nil {
+			return runtime.ResolvedAttribute{}, false
+		}
+		sig = parsedSig
+		name, err := ir.ResolveMemberRefClassName(asm.md, mrow.Class)
+		if err != nil {
+			return runtime.ResolvedAttribute{}, false
+		}
+		typeFullName = name
+	default:
+		return runtime.ResolvedAttribute{}, false
+	}
+
+	args, err := metadata.DecodeCustomAttributeArgs(sig.Params, row.Value)
+	if err != nil {
+		return runtime.ResolvedAttribute{}, false
+	}
+	ctorArgs := make([]runtime.Value, len(args))
+	for i, a := range args {
+		ctorArgs[i] = decodedAttrArgToValue(a)
+	}
+	return runtime.ResolvedAttribute{TypeFullName: typeFullName, CtorArgs: ctorArgs}, true
+}
+
+// decodedAttrArgToValue converts one metadata.DecodedAttrArg to the
+// runtime.Value shape a real newobj call/native getter expects — every
+// integral kind (bool/char/i1/u1/i2/u2/i4/u4, all narrower than int32 on
+// the real CIL stack) collapses to a plain KindI4, the same "no separate
+// Kind for these" posture every other BCL native in this project already
+// takes (see isAssignableTo's own KindI4 case, internal/interpreter/
+// typecheck.go).
+func decodedAttrArgToValue(a metadata.DecodedAttrArg) runtime.Value {
+	switch a.Kind {
+	case metadata.AttrArgBool, metadata.AttrArgChar, metadata.AttrArgI1, metadata.AttrArgU1,
+		metadata.AttrArgI2, metadata.AttrArgU2, metadata.AttrArgI4, metadata.AttrArgU4:
+		return runtime.Int32(int32(a.I8))
+	case metadata.AttrArgI8, metadata.AttrArgU8:
+		return runtime.Int64(a.I8)
+	case metadata.AttrArgR4:
+		return runtime.Float32(float32(a.R8))
+	case metadata.AttrArgR8:
+		return runtime.Float64(a.R8)
+	case metadata.AttrArgString:
+		if a.IsNull {
+			return runtime.Null()
+		}
+		return runtime.String(a.Str)
+	case metadata.AttrArgType:
+		if a.IsNull {
+			return runtime.Null()
+		}
+		return bcl.NewTypeValue(a.Str)
+	default:
+		return runtime.Null()
+	}
 }
 
 // resolveTypeByFullName implements interpreter.TypeResolver: it builds a

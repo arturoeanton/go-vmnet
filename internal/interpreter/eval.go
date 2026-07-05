@@ -26,6 +26,7 @@ type Machine struct {
 	ResolveFields           FieldsResolver
 	ResolveMethods          MethodsResolver
 	ResolveMemberFlags      MemberFlagsResolver
+	ResolveCustomAttributes CustomAttributesResolver
 	Limits                  Limits
 
 	// Permissions is the deny-by-default capability gate (Fase 3.59,
@@ -140,6 +141,15 @@ func (m *Machine) WithMemberFlagsResolver(r MemberFlagsResolver) *Machine {
 	return m
 }
 
+// WithCustomAttributesResolver attaches a CustomAttributesResolver (Fase
+// 3.63, System.Reflection.CustomAttributeData/CustomAttributeExtensions.
+// GetCustomAttribute<T>) — same rationale as WithFieldBytesResolver/
+// WithMemberResolver.
+func (m *Machine) WithCustomAttributesResolver(r CustomAttributesResolver) *Machine {
+	m.ResolveCustomAttributes = r
+	return m
+}
+
 // WithPermissions attaches the deny-by-default capability gate (Fase
 // 3.59) — same rationale as WithFieldBytesResolver/WithMemberResolver: a
 // separate setter so every existing caller (tests especially) keeps
@@ -236,6 +246,7 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 		prevResolveFields := m.ResolveFields
 		prevResolveMethods := m.ResolveMethods
 		prevResolveMemberFlags := m.ResolveMemberFlags
+		prevResolveCustomAttributes := m.ResolveCustomAttributes
 		if method.Resolvers.Resolve != nil {
 			m.Resolve = method.Resolvers.Resolve
 		}
@@ -272,6 +283,9 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 		if method.Resolvers.ResolveMemberFlags != nil {
 			m.ResolveMemberFlags = method.Resolvers.ResolveMemberFlags
 		}
+		if method.Resolvers.ResolveCustomAttributes != nil {
+			m.ResolveCustomAttributes = method.Resolvers.ResolveCustomAttributes
+		}
 		defer func() {
 			m.Resolve, m.ResolveType = prevResolve, prevResolveType
 			m.ResolveExplicitImpl, m.ResolveEnum = prevResolveExplicitImpl, prevResolveEnum
@@ -283,6 +297,7 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 			m.ResolveFields = prevResolveFields
 			m.ResolveMethods = prevResolveMethods
 			m.ResolveMemberFlags = prevResolveMemberFlags
+			m.ResolveCustomAttributes = prevResolveCustomAttributes
 		}()
 	}
 

@@ -2030,3 +2030,70 @@ func TestOverloadTieBreak_NullArgumentAgainstObjectVsClassParam(t *testing.T) {
 		t.Errorf("OverloadTieBreak(\"x\").Tag = %q, want %q (picked the wrong constructor overload)", got, "core:x:0")
 	}
 }
+
+// TestCustomAttributes covers Fase 3.63's new real System.Reflection.
+// CustomAttributeData/CustomAttributeExtensions.GetCustomAttribute<T>
+// subsystem — see tests/fixtures/csharp/CustomAttributeTest.cs's own doc
+// comment for the real Microsoft.Extensions.Configuration.Binder pattern
+// this mirrors.
+func TestCustomAttributes(t *testing.T) {
+	asm := loadFixture(t)
+
+	t.Run("low-level CustomAttributeData", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CustomAttributeTest", "ReadPropertyAttributeViaData")
+		if err != nil {
+			t.Fatalf("ReadPropertyAttributeViaData() error = %v", err)
+		}
+		if got := out.Native().(string); got != "SimpleNameAttribute:PropLevel" {
+			t.Errorf("ReadPropertyAttributeViaData() = %q, want %q", got, "SimpleNameAttribute:PropLevel")
+		}
+	})
+
+	t.Run("high-level GetCustomAttribute<T> constructs a real instance", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CustomAttributeTest", "ReadPropertyAttributeViaGeneric")
+		if err != nil {
+			t.Fatalf("ReadPropertyAttributeViaGeneric() error = %v", err)
+		}
+		if got := out.Native().(string); got != "PropLevel" {
+			t.Errorf("ReadPropertyAttributeViaGeneric() = %q, want %q", got, "PropLevel")
+		}
+	})
+
+	t.Run("type-level attribute", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CustomAttributeTest", "ReadTypeAttribute")
+		if err != nil {
+			t.Fatalf("ReadTypeAttribute() error = %v", err)
+		}
+		if got := out.Native().(string); got != "ClassLevel" {
+			t.Errorf("ReadTypeAttribute() = %q, want %q", got, "ClassLevel")
+		}
+	})
+
+	t.Run("an untagged property has no attributes", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CustomAttributeTest", "UntaggedPropertyHasNoAttribute")
+		if err != nil {
+			t.Fatalf("UntaggedPropertyHasNoAttribute() error = %v", err)
+		}
+		if got := out.Native().(int32); got == 0 {
+			t.Error("UntaggedPropertyHasNoAttribute() = false, want true")
+		}
+	})
+
+	t.Run("IsDefined", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CustomAttributeTest", "UntaggedPropertyIsDefinedIsFalse")
+		if err != nil {
+			t.Fatalf("UntaggedPropertyIsDefinedIsFalse() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 0 {
+			t.Error("UntaggedPropertyIsDefinedIsFalse() = true, want false")
+		}
+
+		out2, err := asm.Call("Vmnet.Fixtures.CustomAttributeTest", "TaggedPropertyIsDefinedIsTrue")
+		if err != nil {
+			t.Fatalf("TaggedPropertyIsDefinedIsTrue() error = %v", err)
+		}
+		if got := out2.Native().(int32); got == 0 {
+			t.Error("TaggedPropertyIsDefinedIsTrue() = false, want true")
+		}
+	})
+}

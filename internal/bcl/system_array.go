@@ -17,6 +17,22 @@ func init() {
 	register("System.Array::Clone", true, arrayClone)
 	register("System.Array::get_Length", true, arrayGetLength)
 	register("System.Array::GetLength", true, arrayGetLengthDim)
+	// A real CIL array implicitly implements ICollection<T>/IList<T>
+	// (SZArray covariance, ECMA-335 §II.9.9 — same rationale
+	// receiverTypeName's own "System.Array" fallback, internal/
+	// interpreter/typecheck.go, already documents for foreach/LINQ) —
+	// get_Count is that interface pair's own real member name for what
+	// Array itself calls get_Length; a real array's Count always equals
+	// its Length. Found via a real, load-bearing case (Fase 3.63):
+	// MemberInfo.GetCustomAttributesData() declares IList<CustomAttributeData>,
+	// not a bare array, so a caller checking `.Count` reaches this
+	// callvirt, not get_Length.
+	register("System.Array::get_Count", true, arrayGetLength)
+	// IList<T>'s own indexer (get_Item(int)) — same real-array-implicitly-
+	// implements-the-interface reasoning as get_Count above; a real
+	// array's IList<T>[i] is exactly Array.GetValue(i), just reached
+	// through a different declared name at the call site.
+	register("System.Array::get_Item", true, arrayGetValue)
 	// Non-generic Array reflection (Fase 3.52) — SetValue/GetValue/
 	// CreateInstance are the shape a reflection-driven caller (working
 	// against a bare System.Array, no compile-time element type at all)

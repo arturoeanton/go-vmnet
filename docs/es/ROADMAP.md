@@ -5346,6 +5346,106 @@ go test ./...
 ```
 
 ---
+## Fase 3.63 — `System.Reflection.CustomAttributeData` real: el subsistema de lectura de atributos ya diferido
+
+**Objetivo:** cerrar la única brecha que este proyecto había diferido deliberadamente a través de
+tres Fases anteriores (3.57, 3.60, 3.61 la mencionan todas) en vez de seguir construyendo a su
+alrededor pieza por pieza: decodificación real de blob de atributo (ECMA-335 §II.23.3), confirmada
+como necesaria por nombre en la familia `Microsoft.Extensions.*` que preguntó el usuario (el propio
+atributo de propiedad `[ConfigurationKeyName]` de `Configuration.Binder`, el más directo) y por
+varios otros paquetes rastreados (`[Name]`/`[Index]` de `CsvHelper`, los chequeos `[Flags]` de
+`FluentValidation`, `[ValueConverter]` de `AutoMapper`, el propio `Markdown.Version` de `Markdig`
+leyendo un atributo a nivel de ensamblado).
+
+- **`internal/metadata/customattribute.go`** (nuevo): la capa real de metadata.
+  `CustomAttributesForParent` lee la tabla CustomAttribute (§II.22.10), matcheando un coded index
+  Parent por escaneo lineal — la misma postura que ya toma `MethodImpls` por la misma razón (la
+  tabla no es contigua por parent como sí lo son los propios rangos de método/campo de TypeDef).
+  `DecodeCustomAttributeArgs` decodifica los argumentos de constructor FIJOS (posicionales) reales
+  de un blob de atributo dado el propio parámetro de firma ya parseado del constructor — el blob en
+  sí no lleva tags de tipo para argumentos fijos en absoluto; los tipos de parámetro declarados del
+  constructor son la única fuente de verdad, igualando exactamente cómo un CLR real decodifica los
+  mismos bytes. Cubre cada primitivo, `string`, y enum (codificado como su propio int32 subyacente —
+  el compilador de C# solo permite una constante de tiempo de compilación como argumento de
+  atributo, así que cualquiera de tipo valor siempre es un enum) y `System.Type` (un `SerString` de
+  su nombre calificado por ensamblado); los argumentos nombrados (`[Foo(1, Bar = "x")]`) se leen y
+  se saltan correctamente (así los propios bytes finales del blob nunca se decodifican mal como más
+  argumentos fijos) pero todavía no se exponen como valores — no se encontró ningún llamador real
+  del corpus que necesite uno. Los argumentos fijos de array/`object` boxeado son una brecha
+  documentada y más angosta (devuelven "no soportado para esta posición" en vez de fallar todo el
+  blob).
+- **El nuevo `resolveCustomAttributes` de `assembly.go`** — resuelve las propias `CustomAttributeRow`
+  reales de un miembro a pares `(AttributeTypeFullName, []runtime.Value ctorArgs)`, listos para
+  pasar directo a `Machine.New`/`newObj` como argumentos de constructor. Con alcance a los tipos de
+  miembro `"type"` y `"property"` por ahora (igualando las dos necesidades reales y confirmadas del
+  corpus de arriba) — los atributos a nivel de campo/método/parámetro quedan como brecha
+  documentada, extensible de la misma forma una vez que un llamador real lo necesite.
+  `ir.ResolveMemberRefClassName` (antes no exportado) ahora está exportado para que esto lo reuse en
+  vez de duplicar la lógica de resolución del nombre del tipo propietario.
+- **`internal/interpreter/customattributes.go`** (nuevo): la capa de nativos Machine-aware — reales
+  `MemberInfo.GetCustomAttributesData()`/`GetCustomAttributes()`/`IsDefined()`,
+  `System.Attribute.GetCustomAttribute(MemberInfo, Type)`, y
+  `CustomAttributeExtensions.GetCustomAttribute<T>()` (una entrada de `genericMachineRegistry` —
+  necesita el propio `<T>` resuelto del call site, la propia maquinaria `Frame.MethodGenericArgs`
+  de la Fase 3.60). Cada uno de estos construye una instancia REAL del atributo vía el mismo camino
+  `newObj` exacto que ya usa un call site ordinario `new AlgunAtributo(args)` — los atributos son
+  tipos reales y construibles como cualquier otro, una vez que se conocen sus argumentos de
+  constructor. Registrado para los 8 receptores de reflection (`ParameterInfo`/`MemberInfo`/
+  `MethodInfo`/`ConstructorInfo`/`MethodBase`/`PropertyInfo`/`FieldInfo`/`Type`) — real para
+  `Type`/`PropertyInfo` (igualando el propio alcance de `resolveCustomAttributes`), un honesto "no
+  se encontraron atributos" para el resto, reemplazando los propios stubs `bcl.Native` siempre-vacíos
+  de la Fase 3.60 con una implementación centralizada y Machine-aware.
+- **`internal/bcl/system_customattributedata.go`** (nuevo): los wrappers de valor reales
+  `CustomAttributeData`/`CustomAttributeTypedArgument` que devuelve `GetCustomAttributesData()` —
+  `CustomAttributeTypedArgument` se modela como un struct de tipo valor genuino (igualando su propia
+  forma real en .NET), a diferencia de cualquier otro wrapper de reflection en este proyecto
+  (`ConstructorInfo`/`MethodInfo`/etc., todos clases).
+- **Dos brechas chicas y reales encontradas y arregladas mientras se construía el test de
+  regresión**: un array CIL real implementa implícitamente `ICollection<T>`/`IList<T>` (covarianza
+  SZArray, ECMA-335 §II.9.9) — un llamador que declara `IList<CustomAttributeData> datas =
+  member.GetCustomAttributesData()` (el propio tipo de retorno real declarado) y después lee
+  `datas.Count`/`datas[0]` llega a `ICollection<T>.get_Count`/`IList<T>.get_Item`, no a
+  `Array.Length`/`ldelem` — ninguno de los dos estaba registrado en absoluto antes de esta Fase
+  (`System.Array::get_Count`/`get_Item`, aliasados trivialmente a los ya reales
+  `get_Length`/`GetValue`).
+- **Re-medido, profile `netstandard-lite`, métodos MARCADOS (no cuenta de hallazgos crudos) como la
+  comparación justa contra el propio número anterior de cada Fase**:
+  `Microsoft.Extensions.Configuration.Binder` 89.4% → **98.6%** (142 métodos, 2 marcados),
+  `Microsoft.Extensions.DependencyInjection` 89.5% → **96.1%** (437 métodos, 17 marcados),
+  `Markdig` → **99.2%** (2038 métodos, 17 marcados), `Microsoft.Extensions.Logging` 98.1% →
+  **99.6%** (269 métodos, 1 marcado).
+- Nuevo fixture dorado `tests/fixtures/csharp/CustomAttributeTest.cs`/`TestCustomAttributes` cubre
+  la API de bajo nivel `CustomAttributeData`, la construcción de instancia real de alto nivel
+  `GetCustomAttribute<T>`, atributos a nivel de tipo vs. de propiedad, un miembro sin etiquetar
+  reportando correctamente ninguno, e `IsDefined` de las dos formas.
+
+### Encontrado, no arreglado (esta Fase)
+
+- **Atributos personalizados a nivel de campo/método/parámetro/constructor** —
+  `resolveCustomAttributes` solo resuelve los tipos de miembro `"type"`/`"property"`; extenderlo a
+  los demás es la misma forma (agregar un caso, encontrar el token propietario) pero todavía no
+  hecho, ya que no se confirmó ningún llamador real del corpus que lo necesitara esta Fase.
+- **Atributos personalizados a nivel de ensamblado** — el propio `Markdown.Version` de Markdig lee
+  `AssemblyFileVersionAttribute` del PROPIO ENSAMBLADO CONTENEDOR, una forma de `Parent` distinta
+  (la propia fila de la tabla Assembly/Module, no una relativa a TypeDef) todavía no conectada a
+  `resolveCustomAttributes` en absoluto; el propio `Markdown.Version` sigue sin verificar contra una
+  corrida real.
+- **Argumentos de constructor fijos de array/`object` boxeado, y todos los argumentos nombrados** —
+  decodificados y saltados correctamente (así nunca corrompen los argumentos fijos posteriores de un
+  blob) pero no expuestos como valores reales; todavía no se confirmó ningún llamador real que
+  necesite uno.
+
+### Cómo verificar Fase 3.63
+
+```bash
+dotnet build tests/fixtures/csharp/Fixtures.csproj -c Release
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+```
+
+---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
 

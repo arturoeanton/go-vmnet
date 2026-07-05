@@ -21,6 +21,7 @@ func (asm *Assembly) machine() *interpreter.Machine {
 		WithFieldsResolver(r.ResolveFields).
 		WithMethodsResolver(r.ResolveMethods).
 		WithMemberFlagsResolver(r.ResolveMemberFlags).
+		WithCustomAttributesResolver(r.ResolveCustomAttributes).
 		WithPermissions(asm.permissions)
 }
 

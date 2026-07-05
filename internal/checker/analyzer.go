@@ -227,6 +227,9 @@ func resolvableMethod(md *metadata.Metadata, fullName string) bool {
 	if reflectionMachineTargets[fullName] {
 		return true
 	}
+	if customAttributeGenericTargets[fullName] {
+		return true
+	}
 	if arrayMachineTargets[fullName] {
 		return true
 	}
@@ -409,6 +412,50 @@ var reflectionMachineTargets = map[string]bool{
 	// for their own plural reflection methods.
 	"System.Type::GetFields":  true,
 	"System.Type::GetMethods": true,
+	// Real System.Reflection.CustomAttributeData/Attribute.
+	// GetCustomAttribute/CustomAttributeExtensions support (Fase 3.63) —
+	// see internal/interpreter/customattributes.go. Registered under all
+	// 8 receivers that file's own init() loop covers, plus the two
+	// CustomAttributeExtensions entries and System.Attribute::
+	// GetCustomAttribute (System.Reflection.CustomAttributeExtensions::
+	// GetCustomAttribute<T> is generic — genericMachineTargets below,
+	// not here).
+	"System.Reflection.ParameterInfo::GetCustomAttributesData":         true,
+	"System.Reflection.MemberInfo::GetCustomAttributesData":            true,
+	"System.Reflection.MethodInfo::GetCustomAttributesData":            true,
+	"System.Reflection.ConstructorInfo::GetCustomAttributesData":       true,
+	"System.Reflection.MethodBase::GetCustomAttributesData":            true,
+	"System.Reflection.PropertyInfo::GetCustomAttributesData":          true,
+	"System.Reflection.FieldInfo::GetCustomAttributesData":             true,
+	"System.Type::GetCustomAttributesData":                             true,
+	"System.Reflection.ParameterInfo::GetCustomAttributes":             true,
+	"System.Reflection.MemberInfo::GetCustomAttributes":                true,
+	"System.Reflection.MethodInfo::GetCustomAttributes":                true,
+	"System.Reflection.ConstructorInfo::GetCustomAttributes":           true,
+	"System.Reflection.MethodBase::GetCustomAttributes":                true,
+	"System.Reflection.PropertyInfo::GetCustomAttributes":              true,
+	"System.Reflection.FieldInfo::GetCustomAttributes":                 true,
+	"System.Type::GetCustomAttributes":                                 true,
+	"System.Reflection.ParameterInfo::IsDefined":                       true,
+	"System.Reflection.MemberInfo::IsDefined":                          true,
+	"System.Reflection.MethodInfo::IsDefined":                          true,
+	"System.Reflection.ConstructorInfo::IsDefined":                     true,
+	"System.Reflection.MethodBase::IsDefined":                          true,
+	"System.Reflection.PropertyInfo::IsDefined":                        true,
+	"System.Reflection.FieldInfo::IsDefined":                           true,
+	"System.Type::IsDefined":                                           true,
+	"System.Attribute::GetCustomAttribute":                             true,
+	"System.Reflection.CustomAttributeExtensions::GetCustomAttributes": true,
+	"System.Reflection.CustomAttributeExtensions::IsDefined":           true,
+}
+
+// customAttributeGenericTargets lists the one generic-method-shaped
+// custom-attribute API (Fase 3.63) — genericMachineRegistry, not
+// machineRegistry, since it needs the call site's own resolved <T>
+// (internal/interpreter/customattributes.go's own
+// customAttributeExtensionsGetCustomAttribute).
+var customAttributeGenericTargets = map[string]bool{
+	"System.Reflection.CustomAttributeExtensions::GetCustomAttribute": true,
 }
 
 // asyncMachineTargets lists the async-related methods resolved through
