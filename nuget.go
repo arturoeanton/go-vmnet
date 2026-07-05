@@ -44,7 +44,7 @@ func (n *NuGetManager) Add(id, version string) error {
 	if version == "" {
 		v, err := n.client.LatestVersion(id)
 		if err != nil {
-			return fmt.Errorf("vmnet: %w", err)
+			return classify(err)
 		}
 		version = v
 	}
@@ -70,7 +70,7 @@ func (n *NuGetManager) Restore() error {
 	resolver := nuget.NewResolver(n.client, n.cache, nuget.SelectOptions{})
 	resolved, err := resolver.Resolve(m.Packages)
 	if err != nil {
-		return fmt.Errorf("vmnet: %w", err)
+		return classify(err)
 	}
 	lf := nuget.BuildLockFile("netstandard2.0", resolved)
 	if err := nuget.WriteLockFile(n.lockfile, lf); err != nil {
@@ -128,7 +128,7 @@ func (vm *VM) LoadPackage(id string) (*Assembly, error) {
 		return nil, err
 	}
 	if asm == nil {
-		return nil, fmt.Errorf("vmnet: package %q has no usable assembly (check NuGet().Packages() for the reason)", id)
+		return nil, classify(fmt.Errorf("package %q has no usable assembly (check NuGet().Packages() for the reason)", id))
 	}
 	// Build the shared cross-package type index (Fase 3.40) — see
 	// Assembly.globalTypeIndex's own doc comment for why this exists at
@@ -170,7 +170,7 @@ func (vm *VM) loadLockedPackage(n *NuGetManager, lf *nuget.LockFile, id string, 
 		}
 	}
 	if found == nil {
-		return nil, fmt.Errorf("vmnet: package %q is not in %s (add + restore it first)", id, n.lockfile)
+		return nil, classify(fmt.Errorf("package %q is not in %s (add + restore it first)", id, n.lockfile))
 	}
 	if found.SelectedAsset == "" {
 		loaded[id] = nil
@@ -179,17 +179,17 @@ func (vm *VM) loadLockedPackage(n *NuGetManager, lf *nuget.LockFile, id string, 
 
 	data, err := n.cache.Load(found.ID, found.Version)
 	if err != nil {
-		return nil, fmt.Errorf("vmnet: %s@%s not in local cache (run NuGet().Restore() again): %w", found.ID, found.Version, err)
+		return nil, classify(fmt.Errorf("%s@%s not in local cache (run NuGet().Restore() again): %w", found.ID, found.Version, err))
 	}
 	pkg, err := nuget.OpenPackage(data)
 	if err != nil {
-		return nil, fmt.Errorf("vmnet: %w", err)
+		return nil, classify(err)
 	}
 	// Load the exact asset Restore locked, not a freshly re-selected one —
 	// what runs should always match what was inspected/promised.
 	assetData, ok := pkg.Entry(found.SelectedAsset)
 	if !ok {
-		return nil, fmt.Errorf("vmnet: %s@%s: locked asset %q is missing from the cached .nupkg (re-run Restore)", found.ID, found.Version, found.SelectedAsset)
+		return nil, classify(fmt.Errorf("%s@%s: locked asset %q is missing from the cached .nupkg (re-run Restore)", found.ID, found.Version, found.SelectedAsset))
 	}
 	asm, err := vm.LoadBytes(found.ID+"@"+found.Version, assetData)
 	if err != nil {

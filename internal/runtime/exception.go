@@ -67,6 +67,49 @@ type ManagedException struct {
 	// AggregateException's own documented behavior of exposing its first
 	// fault through the singular property as well.
 	InnerExceptions []*Object
+
+	// Stack records each interpreted method this exception propagated
+	// THROUGH (spec §18.3's own "at Type.Method()" lines), innermost
+	// frame first — appended one entry per level by
+	// internal/interpreter/eval.go's own Machine.invoke, exactly once,
+	// the instant this exception is about to leave that frame's own
+	// call to its caller (not while a try/catch inside that same frame
+	// still has a chance to handle it — see invoke's own doc comment).
+	// nil for an exception a BCL native raised directly as a Go error
+	// with no `throw`/interpreted call chain around it at all (rare: by
+	// the time ANY exception reaches a real caller it has unwound
+	// through at least the method that raised it). Read-only outside
+	// this package; String() below is the only real consumer.
+	Stack []string
+}
+
+// PushFrame records methodFullName as one more level this exception
+// propagated through, innermost-first (spec §18.3) — called by
+// Machine.invoke exactly once per frame, right before an unhandled
+// exception actually leaves that frame. Idempotent-safe to call on an
+// exception with an existing Stack (e.g. rethrown across many frames);
+// never mutates in a way that could corrupt a Stack shared with another
+// in-flight ManagedException (Data/InnerExceptions do share pointers
+// across a rethrow, Stack itself does not: append-only, and copy-on-
+// grow is what Go's own append already guarantees here since nothing
+// else ever re-slices this field).
+func (e *ManagedException) PushFrame(methodFullName string) {
+	e.Stack = append(e.Stack, methodFullName)
+}
+
+// String is spec §18.3's own full multi-line rendering — TypeName:
+// Message (chaining through Inner the same way Error() does), followed
+// by one "   at Type::Method()" line per recorded stack frame. Error()
+// itself deliberately stays a short, single-line summary (many existing
+// callers already match/log/wrap it as such); String() is for a
+// developer-facing full report — the CLI and the top-level Error type
+// (errors.go, root package) use this, not Error().
+func (e *ManagedException) String() string {
+	s := e.Error()
+	for _, frame := range e.Stack {
+		s += "\n   at " + frame + "()"
+	}
+	return s
 }
 
 func (e *ManagedException) Error() string {

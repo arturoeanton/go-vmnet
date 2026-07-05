@@ -49,7 +49,7 @@ func (asm *Assembly) New(typeName string, args ...Value) (*Instance, error) {
 	}
 	v, err := asm.machine().New(typeName, rtArgs)
 	if err != nil {
-		return nil, fmt.Errorf("vmnet: new %s: %w", typeName, err)
+		return nil, classify(fmt.Errorf("new %s: %w", typeName, err))
 	}
 	return &Instance{asm: asm, typeName: typeName, value: v}, nil
 }
@@ -70,7 +70,7 @@ func (in *Instance) Call(methodName string, args ...Value) (Value, error) {
 	}
 	result, hasReturn, err := in.asm.machine().CallInstance(in.typeName+"::"+methodName, rtArgs)
 	if err != nil {
-		return nil, fmt.Errorf("vmnet: %s.%s: %w", in.typeName, methodName, err)
+		return nil, classify(fmt.Errorf("%s.%s: %w", in.typeName, methodName, err))
 	}
 	if !hasReturn {
 		return nil, nil

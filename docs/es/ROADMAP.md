@@ -5887,6 +5887,86 @@ go run ./cmd/vmnet check package --profile=netstandard-lite fluentvalidation@11.
 ```
 
 ---
+## Fase 3.67 — el modelo de errores real: códigos `VMNET_*` y stack traces de la spec §18.3
+
+**Objetivo:** el primer ítem del empuje de "listo para producción" de la Fase 4 — el propio modelo
+de errores de la spec §30 (códigos `VMNET_*`, `Error{Code, Message, Details, Cause}` estructurado)
+nunca se había implementado en realidad; cada falla de la API pública era un error de Go plano y
+sin estructura que un llamador solo podía matchear por string. Lo mismo para el propio formato de
+stack trace "at Type.Method()" de la spec §18.3.
+
+**Resultado: un tipo `vmnet.Error` real y testeado con los 14 códigos de la spec (más un agregado
+honesto), conectado en cada punto de entrada público que puede fallar, clasificando la propia falla
+subyacente real por TIPO de error de Go donde ya existe uno y por contenido de mensaje bien
+establecido solo donde no existe — y stack traces multi-frame reales y funcionando en cada
+excepción manejada.**
+
+- **`vmnet.Error`** (`errors.go`) — `Code`/`Message`/`Details`/`Cause`, implementando
+  `Unwrap() error` así `errors.Is`/`errors.As` todavía alcanzan el propio centinela subyacente real
+  (`pe.ErrInvalidPE`, `metadata.ErrOutOfRange`, un `*ManagedException`, ...) a través de él. `Code`
+  es una de 14 constantes estables que coinciden uno a uno con la propia lista de la spec §30.2
+  (`CodeInvalidPE`, `CodeMissingCLIHeader`, `CodeInvalidMetadata`, `CodeUnsupportedOpcode`,
+  `CodeUnsupportedBCLMethod`, `CodeTypeNotFound`, `CodeMethodNotFound`, `CodeFieldNotFound`,
+  `CodeStackOverflow`, `CodeCallDepthExceeded`, `CodeManagedException`, `CodeNuGetResolveFailed`,
+  `CodeUnsupportedPackage`, `CodePermissionDenied`), más un agregado honesto más allá de la propia
+  lista de la spec: `CodeInternal`, un catch-all para que `Code` nunca quede vacío para una falla
+  real que el clasificador no pueda ubicar de otra forma.
+- **Una función `classify()` en capas**, llamada una vez en cada frontera pública
+  (`Assembly.Call`/`CallBytes`/`New`, `Instance.Call`, `VM.LoadBytes`, `NuGetManager.Add`/`Restore`,
+  `VM.LoadPackage`) — nunca internamente, así ningún sitio de `fmt.Errorf` interno en todo el
+  intérprete necesitó cambiar:
+  - Matches exactos de TIPO/centinela de error de Go primero, siempre confiables:
+    `*ManagedException` (dividido además en `CodePermissionDenied` cuando `TypeName ==
+    "System.UnauthorizedAccessException"` — el único tipo de excepción real de .NET que el gate de
+    `Permissions` siempre lanza — vs. `CodeManagedException` para cualquier otra excepción real
+    lanzada y no atrapada), el nuevo `*ir.UnsupportedOpcodeError`, un nuevo
+    `*interpreter.UnsupportedBCLMethodError` (reemplazando un string formateado plano en el único
+    sitio real de llamada "sin nativo registrado", `internal/interpreter/calls.go`, así es
+    detectable con `errors.As` por primera vez), `interpreter.ErrStackOverflow`,
+    `interpreter.ErrCallDepthExceeded`/`ErrInstructionLimitExceeded`/`ErrArrayTooLarge` (los tres:
+    "se excedió un límite de recursos de ejecución configurado" — la spec §30.2 tiene un código
+    para toda la familia, no uno por límite específico), `pe.ErrMissingCLIHeader`/`ErrInvalidPE`/
+    `ErrInvalidRVA`, `pe.ErrInvalidMetadataRoot`/`metadata.ErrInvalidMetadataRoot`/`ErrMissingStream`/
+    `ErrUnsupportedTable` — cada uno de estos ya existía como un centinela real de Go desde tan
+    atrás como la Fase 1; esta Fase es lo primero que realmente clasifica por ellos.
+  - Matching de contenido de mensaje solo para las pocas expresiones reales y bien establecidas sin
+    centinela dedicado hoy: `runtime.ErrMethodNotFound` (la propia frontera `resolveMethod` de
+    assembly.go, que envuelve YA SEA una falla de TypeDef faltante O de ningún overload que matchee
+    bajo un centinela vía `%v` — no `%w`, así el más específico `metadata.ErrOutOfRange` no es
+    alcanzable a través de él en absoluto — desambiguado por la propia frase "type X.Y not found"
+    del mensaje, siempre presente cuando esa es la causa real), `metadata.ErrOutOfRange` alcanzado
+    a través de un camino que SÍ preserva `%w`, y los propios fallos de acceso a campo de
+    `internal/interpreter` ("... has no field ..."/"... has no static field ..."), más los propios
+    strings planos "nuget: ..." de `internal/nuget` (sin centinelas ahí en absoluto).
+- **Stack traces multi-frame reales** (spec §18.3) — `runtime.ManagedException.Stack []string` y
+  `PushFrame`, agregado exactamente una vez por frame de método interpretado, por el propio
+  `Machine.invoke` central de `internal/interpreter/eval.go`, en el instante en que una excepción
+  está por dejar ese frame sin manejar (no en el propio sitio del `throw` original — un
+  `catch`-y-relanzamiento real obtiene su propio frame registrado una vez que ÉL, a su vez, falla en
+  manejar lo que relanza). `ManagedException.String()` renderiza el propio formato exacto de la
+  spec §18.3 (`TypeName: Message`, luego una línea `   at Type::Method()` por frame, la más interna
+  primero) — `Error()` en sí deliberadamente se queda como el resumen corto de una sola línea que
+  siempre fue (muchos llamadores existentes ya lo loguean/matchean/envuelven así); `String()` es de
+  donde se puebla `vmnet.Error.Details` para un `*ManagedException`.
+- **`TestErrorClassification`/`TestManagedExceptionStackTraceFormat`** (`errors_test.go`, nuevo) —
+  diecisiete subtests, uno por `Code`, cada uno contra un disparador real y reproducido de punta a
+  punta (el propio `Rules.Eval`/`Loops.Runaway`/`FileIO.WriteThenReadText` del fixture compartido de
+  C#, un nombre de tipo/método desconocido, bytes de PE basura) donde ya existía uno barato, o un
+  chequeo unitario directo de `classify()` contra el propio centinela/tipo real para el puñado de
+  códigos que de otra forma necesitarían un fixture de C# completamente nuevo, acceso real a red, o
+  un PE artificialmente corrompido solo para alcanzarlos.
+
+### Cómo verificar Fase 3.67
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+go test -run "TestErrorClassification|TestManagedExceptionStackTraceFormat" -v .
+```
+
+---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
 
@@ -5919,8 +5999,10 @@ con benchmarks — el paquete completo para que un equipo de ingeniería apruebe
       preexistentes sin puerta en la Fase 3.59.
 
 **Modelo de errores**
-- [ ] Catálogo completo de códigos `VMNET_*` (spec §30.2) implementado consistentemente
-- [ ] Stack traces de excepciones managed pulidos (formato spec §18.3)
+- [x] Catálogo completo de códigos `VMNET_*` (spec §30.2) implementado consistentemente — llegó en
+      la Fase 3.67 (`Error`/`Code`/`classify` propios de `errors.go`)
+- [x] Stack traces de excepciones managed pulidos (formato spec §18.3) — llegó en la Fase 3.67
+      (`runtime.ManagedException.Stack`/`PushFrame`/`String`)
 
 **Performance / benchmarks**
 - [ ] Suite de benchmarks (spec §32): loop aritmético, concat de strings, JSON in/out,

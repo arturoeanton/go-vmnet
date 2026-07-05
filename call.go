@@ -38,7 +38,7 @@ func (asm *Assembly) Call(typeName, methodName string, args ...Value) (Value, er
 
 	method, err := asm.resolveMethod(typeName, methodName, rtArgs)
 	if err != nil {
-		return nil, fmt.Errorf("vmnet: %w", err)
+		return nil, classify(err)
 	}
 	if method.HasThis {
 		return nil, fmt.Errorf("vmnet: %s.%s is an instance method; Call only invokes static methods", typeName, methodName)
@@ -49,7 +49,7 @@ func (asm *Assembly) Call(typeName, methodName string, args ...Value) (Value, er
 
 	result, err := asm.machine().Invoke(method, rtArgs)
 	if err != nil {
-		return nil, fmt.Errorf("vmnet: %s.%s: %w", typeName, methodName, err)
+		return nil, classify(fmt.Errorf("%s.%s: %w", typeName, methodName, err))
 	}
 	if !method.HasReturn {
 		return nil, nil
@@ -62,7 +62,7 @@ func (asm *Assembly) Call(typeName, methodName string, args ...Value) (Value, er
 func (asm *Assembly) CallBytes(typeName, methodName string, input []byte) ([]byte, error) {
 	method, err := asm.resolveMethod(typeName, methodName, []runtime.Value{runtime.Bytes(input)})
 	if err != nil {
-		return nil, fmt.Errorf("vmnet: %w", err)
+		return nil, classify(err)
 	}
 	if method.HasThis {
 		return nil, fmt.Errorf("vmnet: %s.%s is an instance method; CallBytes only invokes static methods", typeName, methodName)
@@ -73,7 +73,7 @@ func (asm *Assembly) CallBytes(typeName, methodName string, input []byte) ([]byt
 
 	result, err := asm.machine().Invoke(method, []runtime.Value{runtime.Bytes(input)})
 	if err != nil {
-		return nil, fmt.Errorf("vmnet: %s.%s: %w", typeName, methodName, err)
+		return nil, classify(fmt.Errorf("%s.%s: %w", typeName, methodName, err))
 	}
 	if !method.HasReturn {
 		return nil, nil

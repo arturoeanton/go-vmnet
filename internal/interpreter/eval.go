@@ -372,6 +372,13 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 			return runtime.Value{}, err
 		}
 		if !m.dispatchException(frame, ex, handlersContaining(method, frame.IP)) {
+			// Genuinely leaving this frame unhandled (spec §18.3's own
+			// stack trace) — recorded here, not at the `throw` site
+			// itself, so a `catch`-and-rethrow (a real, common pattern)
+			// still gets ITS OWN frame's entry once IT, in turn, fails
+			// to handle whatever it rethrows, rather than only ever
+			// recording the ORIGINAL throw site.
+			ex.PushFrame(method.FullName)
 			return runtime.Value{}, ex
 		}
 		// Handled: dispatchException already pointed frame.IP at the

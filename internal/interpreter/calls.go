@@ -307,10 +307,30 @@ func (m *Machine) call(fullName string, args []runtime.Value, virtual bool, dept
 	}
 
 	if lastResolveErr != nil {
-		return runtime.Value{}, false, fmt.Errorf("interpreter: unsupported BCL method %q: %w", fullName, lastResolveErr)
+		return runtime.Value{}, false, &UnsupportedBCLMethodError{Method: fullName, Cause: lastResolveErr}
 	}
-	return runtime.Value{}, false, fmt.Errorf("interpreter: unsupported BCL method %q (no native registered)", fullName)
+	return runtime.Value{}, false, &UnsupportedBCLMethodError{Method: fullName}
 }
+
+// UnsupportedBCLMethodError is a real, still-unimplemented BCL surface
+// call target (spec §30.2 VMNET_UNSUPPORTED_BCL_METHOD) — a distinct,
+// `errors.As`-detectable type rather than a plain formatted string, so
+// the root package's own error classifier (errors.go) can tell this
+// apart from every other kind of failure reliably instead of matching
+// on message text.
+type UnsupportedBCLMethodError struct {
+	Method string
+	Cause  error
+}
+
+func (e *UnsupportedBCLMethodError) Error() string {
+	if e.Cause != nil {
+		return fmt.Sprintf("interpreter: unsupported BCL method %q: %v", e.Method, e.Cause)
+	}
+	return fmt.Sprintf("interpreter: unsupported BCL method %q (no native registered)", e.Method)
+}
+
+func (e *UnsupportedBCLMethodError) Unwrap() error { return e.Cause }
 
 // charSensitiveNatives lists the handful of natives whose real behavior
 // genuinely differs between a `char` and a plain `int` argument that

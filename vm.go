@@ -39,11 +39,11 @@ func (vm *VM) LoadFile(path string) (*Assembly, error) {
 func (vm *VM) LoadBytes(name string, data []byte) (*Assembly, error) {
 	f, err := pe.Parse(data)
 	if err != nil {
-		return nil, fmt.Errorf("vmnet: %s: %w", name, err)
+		return nil, classify(fmt.Errorf("%s: %w", name, err))
 	}
 	md, err := metadata.Parse(f.Metadata)
 	if err != nil {
-		return nil, fmt.Errorf("vmnet: %s: %w", name, err)
+		return nil, classify(fmt.Errorf("%s: %w", name, err))
 	}
 	return &Assembly{
 		name:          name,
