@@ -32,6 +32,12 @@ go.work.sum
 tests/fixtures/csharp/bin/
 tests/fixtures/csharp/obj/
 
+# .NET build output for the separate P/Invoke checker fixture (Fase
+# 3.69) — see tests/fixtures/csharp-pinvoke/PInvokeFixture.cs's own doc
+# comment for why it's a distinct project from tests/fixtures/csharp.
+tests/fixtures/csharp-pinvoke/bin/
+tests/fixtures/csharp-pinvoke/obj/
+
 # .NET build output for the examples/jint-demo wrapper (JintWrapper.cs is
 # committed source; the compiled JintWrapper.dll it produces is not — see
 # examples/jint-demo/README.md)

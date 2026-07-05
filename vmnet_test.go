@@ -504,6 +504,167 @@ func TestInterfaceForeach(t *testing.T) {
 	})
 }
 
+// TestVirtualDispatch is the spec §28.4 "virtual call" golden test: real
+// `virtual`/`override` methods invoked through a base-typed reference,
+// resolved to the object's own real concrete type at runtime — the shared
+// fixture assembly (Fase 1-2) had no first-party regression test for this
+// at all before Fase 3.69, even though vmnet's real corpus (FluentValidation,
+// AutoMapper, ...) exercises it constantly.
+func TestVirtualDispatch(t *testing.T) {
+	asm := loadFixture(t)
+
+	newBeast := func(t *testing.T, typeName string) *Instance {
+		t.Helper()
+		in, err := asm.New(typeName)
+		if err != nil {
+			t.Fatalf("New(%s) error = %v", typeName, err)
+		}
+		return in
+	}
+
+	t.Run("override picks the concrete type's own implementation", func(t *testing.T) {
+		wolf := newBeast(t, "Vmnet.Fixtures.Wolf")
+		out, err := asm.Call("Vmnet.Fixtures.VirtualDispatchTest", "SpeakThroughBaseRef", wolf)
+		if err != nil {
+			t.Fatalf("SpeakThroughBaseRef(Wolf) error = %v", err)
+		}
+		if got := out.Native().(string); got != "Woof" {
+			t.Errorf("SpeakThroughBaseRef(Wolf) = %q, want %q", got, "Woof")
+		}
+	})
+
+	t.Run("non-overridden virtual method falls back to the base implementation", func(t *testing.T) {
+		lion := newBeast(t, "Vmnet.Fixtures.Lion")
+		out, err := asm.Call("Vmnet.Fixtures.VirtualDispatchTest", "DescribeThroughBaseRef", lion)
+		if err != nil {
+			t.Fatalf("DescribeThroughBaseRef(Lion) error = %v", err)
+		}
+		const want = "A animal says Meow"
+		if got := out.Native().(string); got != want {
+			t.Errorf("DescribeThroughBaseRef(Lion) = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("dispatch through an array of the base type", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.VirtualDispatchTest", "AllSpeak")
+		if err != nil {
+			t.Fatalf("AllSpeak() error = %v", err)
+		}
+		const want = "Woof,Meow,..."
+		if got := out.Native().(string); got != want {
+			t.Errorf("AllSpeak() = %q, want %q", got, want)
+		}
+	})
+}
+
+// TestBoxUnboxRoundTrip is the spec §28.4 "boxing/unboxing" golden test:
+// a value type stored through an `object`-typed local, then unboxed back
+// to its own real value — including the edge that a boxed *zero* value
+// still round-trips correctly through vmnet's own identity-passthrough
+// `box` (a different bytecode shape than the still-open, narrower
+// null-conditional gap documented in Fase 3.68).
+func TestBoxUnboxRoundTrip(t *testing.T) {
+	asm := loadFixture(t)
+
+	t.Run("box then unbox.any preserves the value", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.BoxingTest", "RoundTripInt", Int32(42))
+		if err != nil {
+			t.Fatalf("RoundTripInt(42) error = %v", err)
+		}
+		if got := out.Native().(int32); got != 42 {
+			t.Errorf("RoundTripInt(42) = %d, want 42", got)
+		}
+	})
+
+	t.Run("a boxed zero round-trips correctly", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.BoxingTest", "RoundTripZero")
+		if err != nil {
+			t.Fatalf("RoundTripZero() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 0 {
+			t.Errorf("RoundTripZero() = %d, want 0", got)
+		}
+	})
+
+	t.Run("a boxed value still compares equal to the original", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.BoxingTest", "BoxedIntEqualsUnboxed", Int32(7))
+		if err != nil {
+			t.Fatalf("BoxedIntEqualsUnboxed(7) error = %v", err)
+		}
+		if got := out.Native().(int32); got == 0 {
+			t.Errorf("BoxedIntEqualsUnboxed(7) = %d, want nonzero", got)
+		}
+	})
+
+	t.Run("round-trips through a List<object>", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.BoxingTest", "RoundTripThroughList", Int32(99))
+		if err != nil {
+			t.Fatalf("RoundTripThroughList(99) error = %v", err)
+		}
+		if got := out.Native().(int32); got != 99 {
+			t.Errorf("RoundTripThroughList(99) = %d, want 99", got)
+		}
+	})
+}
+
+// TestMathAbsAndGuid is the spec §28.5 "System.Math.Abs"/"System.Guid"
+// golden test — both natives already existed (internal/bcl/
+// system_math.go, internal/bcl/system_guid.go) but neither had a
+// fixture/test calling it before Fase 3.69.
+func TestMathAbsAndGuid(t *testing.T) {
+	asm := loadFixture(t)
+
+	t.Run("Math.Abs(int)", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.MathAndGuidTest", "AbsInt", Int32(-7))
+		if err != nil {
+			t.Fatalf("AbsInt(-7) error = %v", err)
+		}
+		if got := out.Native().(int32); got != 7 {
+			t.Errorf("AbsInt(-7) = %d, want 7", got)
+		}
+	})
+
+	t.Run("Math.Abs(double)", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.MathAndGuidTest", "AbsDouble", Float64(-2.5))
+		if err != nil {
+			t.Fatalf("AbsDouble(-2.5) error = %v", err)
+		}
+		if got := out.Native().(float64); got != 2.5 {
+			t.Errorf("AbsDouble(-2.5) = %v, want 2.5", got)
+		}
+	})
+
+	t.Run("two NewGuid() calls differ", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.MathAndGuidTest", "TwoNewGuidsDiffer")
+		if err != nil {
+			t.Fatalf("TwoNewGuidsDiffer() error = %v", err)
+		}
+		if got := out.Native().(int32); got == 0 {
+			t.Errorf("TwoNewGuidsDiffer() = %d, want nonzero", got)
+		}
+	})
+
+	t.Run("a Guid's ToString is stable", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.MathAndGuidTest", "GuidEqualsItself")
+		if err != nil {
+			t.Fatalf("GuidEqualsItself() error = %v", err)
+		}
+		if got := out.Native().(int32); got == 0 {
+			t.Errorf("GuidEqualsItself() = %d, want nonzero", got)
+		}
+	})
+
+	t.Run("Guid.ToString is the canonical 36-character format", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.MathAndGuidTest", "GuidStringLength")
+		if err != nil {
+			t.Fatalf("GuidStringLength() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 36 {
+			t.Errorf("GuidStringLength() = %d, want 36", got)
+		}
+	})
+}
+
 // TestCheapWins exercises the Fase 3.13 cheap-win BCL bundle: a set of
 // high-breadth, low-effort String/Char/List/Dictionary natives found by
 // the Fase 3.13 probe (same "measure, then bundle the cheap wins"

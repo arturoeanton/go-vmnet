@@ -49,3 +49,22 @@ Output: `tests/fixtures/csharp/bin/Release/netstandard2.0/Vmnet.Fixtures.dll`
 | `CheapWins5.cs` | `CheapWins5` | `ConcurrentDictionary<K,V>` (`GetOrAdd` con valor literal y con factory delegado, `TryGetValue`), `Regex.Replace`, `Delegate.Combine`/`Remove` (delegado multicast real), `foreach` sobre un array a través de `System.Array`/`IEnumerable` (enumerador de referencia real, no el struct inlineado de `List<T>`) | Fase 3.24 |
 | `Reflection2.cs` | `Reflection2` | `System.Type` introspección: `IsGenericType`/`GetGenericTypeDefinition`/`GetGenericArguments`/`MakeGenericType`, `Nullable.GetUnderlyingType`, `IsValueType`/`IsEnum`/`IsInterface`/`BaseType`/`GetInterfaces` (contra BCL primitivos y contra la jerarquía real `Animal`/`Dog`/`IShape` de `TypeChecks.cs` y el struct `Point` de `Structs.cs`), `Type.GetType(string)`, `Type.Assembly` — primer `enum` declarado por un plugin en todo el proyecto (`TrafficLight`), que expuso una recursión infinita real en `buildType` (campos literales de enum autorreferenciados) | Fase 3.25 |
 | `Reflection3.cs` | `Reflection3` | `System.Enum.GetValues`/`GetNames`/`IsDefined` (por valor y por nombre)/`ToObject` sobre `TrafficLight` (reusa el `enum` de `Reflection2.cs`), respaldado por un lector nuevo de la tabla `Constant` (`internal/metadata/constant.go`) | Fase 3.26 |
+| `VirtualDispatch.cs` | `VirtualDispatchTest`, `Beast`/`Wolf`/`Lion` | real `virtual`/`override` dispatch through a base-typed reference (an override, an inherited non-overridden virtual method, an array of the base type); `BoxingTest`: `box`/`unbox.any` round-trip, including a boxed zero | Fase 3.69 |
+| `MathAndGuid.cs` | `MathAndGuidTest` | `System.Math.Abs` (int/double), `System.Guid` (`NewGuid`/`ToString`/`Equals`) | Fase 3.69 |
+
+This directory's own table above hasn't been kept current since Fase 3.26 — many fixture files
+added since then (`GenericTypeOf.cs`, `OverloadTieBreak.cs`, `CustomAttributeTest.cs`, `FileIO.cs`,
+...) are missing rows. Not backfilled here (out of scope for Fase 3.69's own golden-suite-gap work);
+see each file's own doc comment for what it exercises in the meantime.
+
+A separate, deliberately independent fixture project lives at `tests/fixtures/csharp-pinvoke/`
+(Fase 3.69) — a real `[DllImport]` declaration, used only by
+`internal/checker/analyzer_test.go:TestAnalyze_PInvokeIsReported`. It's NOT part of this
+`Fixtures.csproj`: a real P/Invoke declaration is an assembly-wide checker finding that would
+otherwise break `TestAnalyze_OwnAssemblyIsCompatible`'s own "only `Unsupported.
+FunctionPointerCall` is expected to be flagged" invariant for the main fixture. Build it the same
+way:
+
+```bash
+dotnet build tests/fixtures/csharp-pinvoke/PInvokeFixture.csproj -c Release
+```

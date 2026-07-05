@@ -87,6 +87,48 @@ func TestDecode_StringsHello(t *testing.T) {
 	}
 }
 
+// TestDecode_StringsHello_UserString is the spec §28.2 "user strings"
+// golden test — resolves the real `ldstr` operand through the #US heap
+// (metadata.Metadata.UserString), one layer deeper than
+// TestDecode_StringsHello above (which only confirms the opcode itself
+// decodes, never reads the literal it actually points at).
+func TestDecode_StringsHello_UserString(t *testing.T) {
+	path := filepath.FromSlash(fixtureRelPath)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Skipf("fixture assembly not built: %v (run `dotnet build tests/fixtures/csharp/Fixtures.csproj -c Release`)", err)
+	}
+	f, err := pe.Parse(data)
+	if err != nil {
+		t.Fatalf("pe.Parse() error = %v", err)
+	}
+	md, err := metadata.Parse(f.Metadata)
+	if err != nil {
+		t.Fatalf("metadata.Parse() error = %v", err)
+	}
+
+	_, instrs := loadFixtureMethod(t, "Strings", "Hello")
+	var tok uint32
+	var found bool
+	for _, i := range instrs {
+		if i.OpCode.Name() == "ldstr" {
+			tok = i.Operand.(uint32)
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("Strings.Hello: no ldstr instruction found")
+	}
+	s, err := md.UserString(tok & 0x00FFFFFF)
+	if err != nil {
+		t.Fatalf("UserString(%#x) error = %v", tok&0x00FFFFFF, err)
+	}
+	if s != "Hello " {
+		t.Errorf("UserString = %q, want %q", s, "Hello ")
+	}
+}
+
 func TestDecode_LoopsSum(t *testing.T) {
 	header, instrs := loadFixtureMethod(t, "Loops", "Sum")
 

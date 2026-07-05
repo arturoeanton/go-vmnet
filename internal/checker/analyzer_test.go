@@ -146,3 +146,63 @@ func TestAnalyze_SomeMethodsFailingIsPartial(t *testing.T) {
 		t.Errorf("Status = %s, want %s", r.Status, StatusPartial)
 	}
 }
+
+// TestCategorize is the spec §28.6 "reflection detection"/"async
+// detection" golden test: categorize (analyzer.go) turns an unresolved
+// call target's full name into the right human-meaningful reason bucket,
+// mirroring spec §23.3's grouped output.
+func TestCategorize(t *testing.T) {
+	tests := []struct {
+		name string
+		want FindingKind
+	}{
+		{"System.Reflection.Emit.DynamicMethod::CreateDelegate", KindReflection},
+		{"System.Reflection.Assembly::GetExecutingAssembly", KindReflection},
+		{"System.Threading.Tasks.TaskCompletionSource`1::SetResult", KindAsync},
+		{"System.Threading.Tasks.Parallel::For", KindAsync},
+		{"Some.Totally.Unknown::Method", KindUnsupportedMethod},
+		{"System.IO.Ports.SerialPort::Open", KindUnsupportedMethod},
+	}
+	for _, tt := range tests {
+		if got := categorize(tt.name); got != tt.want {
+			t.Errorf("categorize(%q) = %s, want %s", tt.name, got, tt.want)
+		}
+	}
+}
+
+// TestAnalyze_PInvokeIsReported is the spec §28.6 "P/Invoke detection"
+// golden test: a real [DllImport] extern method compiles to a real
+// ImplMap table row — the checker must flag the whole assembly as
+// unsupported (P/Invoke has no pure-Go equivalent), not silently accept
+// or crash on it. Deliberately a separate fixture assembly (tests/
+// fixtures/csharp-pinvoke) — see that fixture's own doc comment for why.
+func TestAnalyze_PInvokeIsReported(t *testing.T) {
+	const pinvokeFixtureRelPath = "../../tests/fixtures/csharp-pinvoke/bin/Release/netstandard2.0/Vmnet.Fixtures.PInvoke.dll"
+	data, err := os.ReadFile(filepath.FromSlash(pinvokeFixtureRelPath))
+	if err != nil {
+		t.Skipf("fixture assembly not built: %v (run `dotnet build tests/fixtures/csharp-pinvoke/PInvokeFixture.csproj -c Release`)", err)
+	}
+	f, err := pe.Parse(data)
+	if err != nil {
+		t.Fatalf("pe.Parse() error = %v", err)
+	}
+	md, err := metadata.Parse(f.Metadata)
+	if err != nil {
+		t.Fatalf("metadata.Parse() error = %v", err)
+	}
+	r := Analyze(f, md, ProfileNetStandardLite)
+
+	if r.Status != StatusUnsupported {
+		t.Errorf("Status = %s, want %s", r.Status, StatusUnsupported)
+	}
+	var found bool
+	for _, finding := range r.Findings {
+		if finding.Kind == KindPInvoke {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected a KindPInvoke finding, got: %+v", r.Findings)
+	}
+}

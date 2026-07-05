@@ -123,6 +123,102 @@ func TestParse_RealAssembly_Loops(t *testing.T) {
 	}
 }
 
+// TestParse_RealAssembly_TypeRef is the spec §28.2 "TypeRef parsing"
+// golden test — every real assembly that touches the BCL at all (which
+// this fixture does constantly) references System.Object as a TypeRef,
+// but no test asserted TypeRef(rid) directly before Fase 3.69 (only
+// exercised incidentally through end-to-end BCL calls).
+func TestParse_RealAssembly_TypeRef(t *testing.T) {
+	md := parseFixture(t)
+
+	count := md.RowCount(TableTypeRef)
+	if count == 0 {
+		t.Fatal("RowCount(TypeRef) = 0, want > 0")
+	}
+	var foundObject bool
+	for rid := uint32(1); rid <= count; rid++ {
+		row, err := md.TypeRef(rid)
+		if err != nil {
+			t.Fatalf("TypeRef(%d) error = %v", rid, err)
+		}
+		if row.Namespace == "System" && row.Name == "Object" {
+			foundObject = true
+		}
+	}
+	if !foundObject {
+		t.Error("expected a TypeRef for System.Object, not found")
+	}
+}
+
+// TestParse_RealAssembly_MemberRef is the spec §28.2 "MemberRef parsing"
+// golden test — SimpleMath.Add's own signature is entirely self-
+// contained, but Strings.Hello calls the real System.String::Concat via
+// a MemberRef; no test asserted MemberRef(rid) directly before Fase
+// 3.69.
+func TestParse_RealAssembly_MemberRef(t *testing.T) {
+	md := parseFixture(t)
+
+	count := md.RowCount(TableMemberRef)
+	if count == 0 {
+		t.Fatal("RowCount(MemberRef) = 0, want > 0")
+	}
+	var found *MemberRefRow
+	for rid := uint32(1); rid <= count; rid++ {
+		row, err := md.MemberRef(rid)
+		if err != nil {
+			t.Fatalf("MemberRef(%d) error = %v", rid, err)
+		}
+		if row.Name == "Concat" {
+			found = &row
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("expected a MemberRef named Concat (String.Concat), not found")
+	}
+	if len(found.Signature) == 0 {
+		t.Error("MemberRef(Concat).Signature is empty, want a signature blob")
+	}
+}
+
+// TestParse_RealAssembly_GenericSignature is the spec §28.2 "generic
+// signatures" golden test: a real TypeSpec's own GENERICINST blob
+// (ECMA-335 §II.23.2.15) — the shape List<int>/Dictionary<K,V> compile
+// to wherever a closed generic instantiation is named directly (e.g. a
+// `newobj`/`call` operand's Class token) — decodes into SigGenericInst
+// with the right open type and argument count.
+func TestParse_RealAssembly_GenericSignature(t *testing.T) {
+	md := parseFixture(t)
+
+	count := md.RowCount(TableTypeSpec)
+	if count == 0 {
+		t.Skip("fixture assembly has no TypeSpec rows to test against")
+	}
+	var foundGenericInst bool
+	for rid := uint32(1); rid <= count; rid++ {
+		blob, err := md.TypeSpecSignature(rid)
+		if err != nil {
+			t.Fatalf("TypeSpecSignature(%d) error = %v", rid, err)
+		}
+		sig, err := ParseTypeSpec(blob)
+		if err != nil {
+			// Not every TypeSpec is a GENERICINST (e.g. SZARRAY) — only
+			// fail on a genuine parse error, which ParseTypeSpec doesn't
+			// return for a recognized non-generic shape.
+			t.Fatalf("ParseTypeSpec(%d) error = %v", rid, err)
+		}
+		if sig.Kind == SigGenericInst {
+			foundGenericInst = true
+			if len(sig.Args) == 0 {
+				t.Errorf("TypeSpec(%d): SigGenericInst with 0 Args, want >= 1", rid)
+			}
+		}
+	}
+	if !foundGenericInst {
+		t.Error("expected at least one TypeSpec row to decode as SigGenericInst (e.g. List<int>), found none")
+	}
+}
+
 func TestParse_InvalidMetadataRoot(t *testing.T) {
 	_, err := Parse([]byte{0, 0, 0, 0})
 	if err != ErrInvalidMetadataRoot {
