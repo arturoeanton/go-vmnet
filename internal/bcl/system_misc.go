@@ -51,7 +51,25 @@ func init() {
 	register("System.Double::TryParse", true, doubleTryParse)
 	register("System.Double::Equals", true, doubleEquals)
 	register("System.Globalization.CultureInfo::get_CurrentCulture", true, cultureInfoInvariant)
+	// CurrentUICulture (Fase 3.68, found via FluentValidation's own
+	// localized error-message building — MessageFormatter/Localized
+	// reads it to pick which resource satellite to use) — same "vmnet
+	// has no real locale data at all" posture get_CurrentCulture already
+	// established: always the invariant culture.
+	register("System.Globalization.CultureInfo::get_CurrentUICulture", true, cultureInfoInvariant)
+	// Parent (Fase 3.68, same real caller as CurrentUICulture — resource
+	// satellite fallback walks up a culture's own parent chain until it
+	// finds one with a matching resource, e.g. "en-US" -> "en" ->
+	// invariant): the invariant culture is real .NET's own fixed point
+	// (InvariantCulture.Parent == InvariantCulture itself), so this never
+	// needs to model an actual parent chain at all.
+	register("System.Globalization.CultureInfo::get_Parent", true, cultureInfoInvariant)
 	register("System.Globalization.CultureInfo::get_Name", true, cultureInfoName)
+	// IsNeutralCulture (Fase 3.68, found via FluentValidation's own
+	// LanguageManager resource fallback): real .NET's InvariantCulture
+	// reports false here (it is the ROOT, not a "neutral" culture like
+	// "en" sitting above a specific one like "en-US").
+	register("System.Globalization.CultureInfo::get_IsNeutralCulture", true, cultureInfoIsNeutralCulture)
 	// CultureInfo.TextInfo (Fase 3.64) — found via CsvHelper's own header
 	// name matching. Real .NET's TextInfo is culture-specific (Turkish
 	// "i" casing being the classic gotcha); vmnet has no real locale data
@@ -70,9 +88,13 @@ func init() {
 	// "no locale/culture data anywhere" limitation as CultureInfo above)
 	// — both return the same stub object, offset-less, matching the
 	// existing UTC-identity treatment DateTime.ToUniversalTime/
-	// ToLocalTime already has (Fase 3.23).
-	register("System.TimeZoneInfo::get_Local", true, cultureInfoInvariant)
-	register("System.TimeZoneInfo::get_Utc", true, cultureInfoInvariant)
+	// ToLocalTime already has (Fase 3.23). Deliberately its OWN singleton
+	// (Fase 3.68), not cultureInfoInvariant's — a TimeZoneInfo and a
+	// CultureInfo are unrelated real .NET types, so they must never
+	// compare reference-equal to each other even though both are
+	// "no real data" stand-ins internally.
+	register("System.TimeZoneInfo::get_Local", true, timeZoneInfoStub)
+	register("System.TimeZoneInfo::get_Utc", true, timeZoneInfoStub)
 	register("System.Double::CompareTo", true, doubleCompareTo)
 	register("System.Double::Parse", true, doubleParse)
 	register("System.Boolean::ToString", true, boolToString)
@@ -225,6 +247,10 @@ func cultureInfoName(args []runtime.Value) (runtime.Value, error) {
 	return runtime.String(""), nil
 }
 
+func cultureInfoIsNeutralCulture(args []runtime.Value) (runtime.Value, error) {
+	return runtime.Bool(false), nil
+}
+
 func convertToInt64(args []runtime.Value) (runtime.Value, error) {
 	if len(args) < 1 {
 		return runtime.Value{}, fmt.Errorf("bcl: System.Convert.ToInt64 expects an argument")
@@ -310,8 +336,30 @@ func doubleEquals(args []runtime.Value) (runtime.Value, error) {
 	return runtime.Bool(a.R8 == b.R8), nil
 }
 
+// invariantCultureObj is the one, shared "invariant culture" instance —
+// constructed ONCE (Fase 3.68), not fresh per call. Real .NET code
+// routinely compares cultures by reference identity (e.g. walking
+// CultureInfo.Parent up to the invariant culture, `while (c != Culture
+// Info.InvariantCulture) c = c.Parent;`) — a fresh &runtime.Object{}
+// every call made every such comparison false forever, since two
+// distinct Go pointers are never ==, turning a real, finite parent-chain
+// walk into an infinite loop (found via FluentValidation's own
+// MessageFormatter/Localized resource-satellite fallback, which does
+// exactly this).
+var invariantCultureObj = &runtime.Object{}
+
 func cultureInfoInvariant(args []runtime.Value) (runtime.Value, error) {
-	return runtime.ObjRef(&runtime.Object{}), nil
+	return runtime.ObjRef(invariantCultureObj), nil
+}
+
+// timeZoneInfoStubObj mirrors invariantCultureObj's own singleton
+// reasoning (Fase 3.68) but kept as a distinct object/pointer, since a
+// TimeZoneInfo stand-in must never be reference-equal to a CultureInfo
+// stand-in.
+var timeZoneInfoStubObj = &runtime.Object{}
+
+func timeZoneInfoStub(args []runtime.Value) (runtime.Value, error) {
+	return runtime.ObjRef(timeZoneInfoStubObj), nil
 }
 
 func textInfoGetListSeparator(args []runtime.Value) (runtime.Value, error) {

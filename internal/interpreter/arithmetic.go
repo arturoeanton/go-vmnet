@@ -19,6 +19,43 @@ func evalBinOp(in ir.BinOp, a, b runtime.Value) (runtime.Value, error) {
 			return runtime.Bool(refGreater(b, a)), nil
 		}
 	}
+	// `box !T` followed immediately by a null check (`cgt.un x, null` /
+	// `ceq x, null`) is real C#'s own compiler-emitted idiom for "is this
+	// generic-parameter-typed value non-null" inside a method whose T
+	// isn't known to be a reference or value type at compile time — real
+	// .NET's own box on a genuine value type (int, double, a struct)
+	// NEVER produces null, so the check always has one fixed answer
+	// regardless of the actual value. vmnet's own `box` on a primitive
+	// Kind (I4/I8/R4/R8) is a pure identity passthrough (it never becomes
+	// a KindObject wrapper at all — same "boxing a primitive doesn't
+	// change its Kind" posture ir/builder.go's own box/unbox.any handling
+	// already documents), so by the time this binary op runs, one side is
+	// still a bare primitive Kind and the other is a real KindNull —
+	// exactly the shape isReferenceShaped's own "both reference-shaped"
+	// check above can never satisfy. Found via FluentValidation's own
+	// AbstractComparisonValidator<T,TProperty>.GetComparisonValue,
+	// checking `box(valueToCompare) > null` (real IL: `box !TProperty` /
+	// `ldnull` / `cgt.un`) to build its own HasValue-style ValueTuple.
+	if aPrim, bNull := isPrimitiveValueKind(a.Kind), b.Kind == runtime.KindNull; aPrim && bNull {
+		switch in.Op {
+		case ir.OpCeq:
+			return runtime.Bool(false), nil
+		case ir.OpCgt:
+			return runtime.Bool(true), nil
+		case ir.OpClt:
+			return runtime.Bool(false), nil
+		}
+	}
+	if bPrim, aNull := isPrimitiveValueKind(b.Kind), a.Kind == runtime.KindNull; bPrim && aNull {
+		switch in.Op {
+		case ir.OpCeq:
+			return runtime.Bool(false), nil
+		case ir.OpCgt:
+			return runtime.Bool(false), nil
+		case ir.OpClt:
+			return runtime.Bool(true), nil
+		}
+	}
 	// Shift operations are the one binary numeric op ECMA-335 (III.1.5,
 	// Table 2 "Shift Operations") allows a genuine width mismatch for:
 	// the shift amount is always int32 regardless of the shifted
@@ -352,6 +389,21 @@ func toFloat64(v runtime.Value) (float64, error) {
 func isReferenceShaped(v runtime.Value) bool {
 	switch v.Kind {
 	case runtime.KindNull, runtime.KindObject, runtime.KindArray, runtime.KindRef, runtime.KindStruct, runtime.KindString:
+		return true
+	default:
+		return false
+	}
+}
+
+// isPrimitiveValueKind reports whether k is one of the bare numeric Kinds
+// `box` never actually wraps into a KindObject (see evalBinOp's own
+// "box then null check" case above) — every real CIL primitive value
+// type EXCEPT the ones vmnet already represents as KindStruct (DateTime,
+// TimeSpan, ...) or collapses to plain int32 (bool/byte/char/short, all
+// KindI4).
+func isPrimitiveValueKind(k runtime.Kind) bool {
+	switch k {
+	case runtime.KindI4, runtime.KindI8, runtime.KindR4, runtime.KindR8:
 		return true
 	default:
 		return false

@@ -13,6 +13,9 @@ import (
 // runnable version and docs/en/ROADMAP.md, Fase 3.64, for the
 // interpreter work this needed: walking AND compiling (not just
 // inspecting) a real System.Linq.Expressions property-access tree.
+// ValidateAge below additionally exercises GreaterThanOrEqualTo, a
+// numeric range validator fixed in Fase 3.68 (see that Fase's own
+// ROADMAP entry for the real overload-dispatch bug this needed).
 //
 // Needs network access to nuget.org (to restore the package) and the
 // wrapper DLL built ahead of time:
@@ -68,5 +71,25 @@ func TestFluentValidationDemoE2E(t *testing.T) {
 	const wantBad = "invalid: Name is required"
 	if got := bad.Native().(string); got != wantBad {
 		t.Errorf("Validate(\"\") = %q, want %q", got, wantBad)
+	}
+
+	// ValidateAge exercises GreaterThanOrEqualTo, a numeric range
+	// validator that used to crash (Fase 3.64/3.66's own "found, not
+	// fixed" overload-dispatch bug) — fixed for real in Fase 3.68.
+	goodAge, err := wrapperAsm.Call("VmnetFvDemo.Program", "ValidateAge", Int32(25))
+	if err != nil {
+		t.Fatalf("ValidateAge(25) error: %v", err)
+	}
+	if got := goodAge.Native().(string); got != "valid" {
+		t.Errorf("ValidateAge(25) = %q, want %q", got, "valid")
+	}
+
+	badAge, err := wrapperAsm.Call("VmnetFvDemo.Program", "ValidateAge", Int32(10))
+	if err != nil {
+		t.Fatalf("ValidateAge(10) error: %v", err)
+	}
+	const wantBadAge = "invalid: 'Age' must be greater than or equal to '18'."
+	if got := badAge.Native().(string); got != wantBadAge {
+		t.Errorf("ValidateAge(10) = %q, want %q", got, wantBadAge)
 	}
 }

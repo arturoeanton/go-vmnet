@@ -5967,6 +5967,105 @@ go test -run "TestErrorClassification|TestManagedExceptionStackTraceFormat" -v .
 ```
 
 ---
+## Fase 3.68 — el bug de despacho de los validadores numéricos de FluentValidation, arreglado de verdad
+
+**Objetivo:** cerrar el hueco que la Fase 3.66 diagnosticó con precisión pero dejó sin arreglar —
+las reglas numéricas propias de FluentValidation (`GreaterThanOrEqualTo`/`LessThanOrEqualTo`/
+`InclusiveBetween`) crasheaban o, en un intento anterior revertido, validaban silenciosamente algo
+incorrecto.
+
+**Resultado: la causa raíz real era la propia caminata de ancestros de vmnet por solo-nombre para
+métodos virtuales, que confundía dos overrides `IsValid` distintos, de mismo nombre y misma
+aridad, a través de un par de clases base/derivada genéricas — arreglado con una regla general de
+resolución de sobrecarga, y luego endurecido a través de una cadena corta de huecos más chicos y
+genuinamente separados que el arreglo dejó recién alcanzables.**
+
+- **El bug de despacho real.** Los propios `AbstractComparisonValidator<T,TProperty>.IsValid
+  (ValidationContext<T>, TProperty)` y `GreaterThanOrEqualValidator<T,TProperty>.IsValid(TProperty,
+  TProperty)` de FluentValidation 11.9.2 real y sin modificar son dos métodos virtuales
+  genuinamente distintos que casualmente comparten nombre y aridad — .NET real los distingue por
+  firma completa (un slot de vtable distinto cada uno), pero la propia caminata de ancestros de
+  vmnet (`retryName := t + "::" + method` en `assembly.go`) solo busca por nombre, así que podía
+  resolver a cualquiera de los dos. Arreglado con una nueva regla en `hasHardShapeMismatch`
+  (`assembly.go`): si un candidato declara el MISMO índice de parámetro genérico todavía abierto
+  (coincidiendo también nivel clase-vs-método) en dos o más posiciones de parámetro, los
+  argumentos reales en tiempo de ejecución enlazados a esas posiciones deben compartir el mismo
+  `Kind` — los genéricos reales nunca pueden producir dos tipos concretos distintos para un
+  parámetro de tipo compartido en un único sitio de llamada, así que un mismatch de `Kind` ahí es
+  prueba concluyente de que se eligió el override equivocado de mismo nombre, no solo "clase
+  concreta distinta." Verificado contra el ensamblado real: `Validate(25)` (una edad válida) ahora
+  reporta correctamente `"valid"` en vez de crashear con `IComparable.CompareTo: unsupported
+  receiver kind 7`.
+- **Tres huecos más chicos y genuinamente separados que el arreglo de despacho dejó recién
+  alcanzables** (antes nunca se llegaba a ellos porque la ejecución crasheaba antes):
+  - **`box` seguido de chequeo de null sobre un primitivo** (`internal/interpreter/
+    arithmetic.go`) — el C# real compila `box !TProperty` seguido de una comparación `ldnull`/
+    `cgt.un` como una forma genérica de chequear "¿este valor tipado T es no-null?", sin saber en
+    tiempo de compilación si `T` es tipo valor o tipo referencia. Boxear un tipo valor genuino en
+    .NET real nunca produce null, así que este chequeo siempre tiene una única respuesta fija y
+    determinística. El propio `box` de vmnet sobre un `Kind` primitivo es un passthrough de
+    identidad puro (nunca se vuelve un wrapper `KindObject`), así que la comparación pegaba antes
+    en un error sin manejar de "mismatched value kinds". Arreglado con un nuevo helper
+    `isPrimitiveValueKind` y un caso dedicado en `evalBinOp` que responde el resultado fijo
+    correcto para `ceq`/`cgt`/`clt` entre cualquier `Kind` primitivo y `KindNull`.
+  - **`CultureInfo.CurrentUICulture`/`.Parent`/`.IsNeutralCulture`** (`internal/bcl/
+    system_misc.go`) — tres propiedades reales que la propia búsqueda de mensajes de recurso
+    satélite de FluentValidation llama y que no tenían nativo todavía; registradas sobre el propio
+    stand-in de cultura invariante ya existente (`IsNeutralCulture` respondiendo `false`,
+    coincidiendo con el propio `InvariantCulture.IsNeutralCulture` de .NET real).
+  - **Un bug de objeto-fresco-vs-singleton en el propio `cultureInfoInvariant`** — devolvía un
+    `&runtime.Object{}` nuevo en cada llamada, así que dos llamadas a (digamos)
+    `CultureInfo.CurrentCulture` nunca eran iguales por referencia. Código de .NET real que camina
+    la propia cadena de padres de una cultura hasta llegar a la cultura invariante (genuinamente
+    singleton) — `while (c != CultureInfo.InvariantCulture) c = c.Parent;`, exactamente el propio
+    patrón de fallback de recursos de FluentValidation — nunca terminaba: `VMNET_CALL_DEPTH_
+    EXCEEDED`. Arreglado haciendo que `cultureInfoInvariant` devuelva el MISMO `*runtime.Object`
+    compartido en cada llamada. `TimeZoneInfo.Local`/`.Utc` (que reutilizaban la misma función para
+    un stub de "sin datos reales" no relacionado) se separaron deliberadamente a su PROPIO
+    singleton separado (`timeZoneInfoStub`) — compartir un singleton entre dos tipos de .NET real
+    no relacionados haría que un stand-in de `TimeZoneInfo` fuera incorrectamente igual por
+    referencia a un stand-in de `CultureInfo`.
+- **Una limitación restante, más angosta, y ahora acotada con precisión.** El propio
+  `MessageFormatter.BuildMessage` (código fuente real de FluentValidation) formatea cada
+  `{Placeholder}` vía `value2?.ToString()` — un operador condicional-nulo de C# real, que compila a
+  `dup; brtrue.s ...` directamente sobre el valor boxeado, no una comparación `ldnull`/`ceq` (una
+  forma de bytecode distinta a la recién arreglada arriba). Para un valor boxeado que resulta ser
+  igual al cero propio de su tipo (p. ej. un `int` boxeado con valor `0`, que es exactamente lo que
+  el propio placeholder `{From}` de `InclusiveBetween(0, ...)` produce), el `box` de identidad-
+  passthrough de vmnet no deja forma de distinguir "una referencia null real" de "un valor
+  boxeado, real, legítimamente cero" en esta instrucción — `brtrue` ve un `I4` cero de cualquier
+  forma. Esta es una instancia más angosta de la misma simplificación arquitectónica subyacente
+  ("`box` no boxea de verdad"), no una falla de diseño nueva y separada; arreglarla en general
+  significaría darle a `box` una representación de wrapper real a través de cada opcode y nativo
+  numérico, algo desproporcionado para el alcance propio de esta Fase. Confirmado con una
+  reproducción real (`InclusiveBetween(0, 130)` sobre la edad `131`) y acotado en vez de arreglado
+  en profundidad; tanto `examples/fluentvalidation-demo` como el corpus del checker evitan este
+  borde angosto (cualquier límite distinto de exactamente `0` formatea correctamente, verificado
+  con `InclusiveBetween(1, 130)`).
+- **`examples/fluentvalidation-demo` extendido** — ahora también ejercita `GreaterThanOrEqualTo(18)`
+  sobre una propiedad `int` real (`ValidateAge`), demostrando el arreglo, no solo los validadores
+  de string usados antes.
+- **Checker remedido con la metodología correcta** (`vmnet check package`, que resuelve el propio
+  grafo de dependencias transitivas del paquete de la misma forma que `LoadPackage` en tiempo de
+  ejecución — la forma simple `vmnet check <dll>` usada para un chequeo rápido de cordura antes en
+  esta Fase da un número distinto y no relacionado porque no puede resolver la superficie de BCL
+  reenviada a través de las dependencias faltantes): `FluentValidation@11.9.2` pasa de 26 a 25
+  métodos marcados (98.1%, de 98.0%) — el nuevo nativo (`get_IsNeutralCulture`) explica la
+  diferencia; los arreglos de despacho/box/singleton de arriba son arreglos de corrección en
+  tiempo de ejecución, no visibles para el checker.
+
+### Cómo verificar la Fase 3.68
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+go run ./cmd/vmnet check package fluentvalidation@11.9.2
+cd examples/fluentvalidation-demo && dotnet build FvDemoWrapper.csproj -c Release && go run .
+```
+
+---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
 

@@ -58,4 +58,16 @@ func main() {
 		log.Fatalf("Validate(\"\"): %v", err)
 	}
 	fmt.Println("Validate(\"\") =", bad.Native())
+
+	goodAge, err := wrapperAsm.Call("VmnetFvDemo.Program", "ValidateAge", vmnet.Int32(25))
+	if err != nil {
+		log.Fatalf("ValidateAge(25): %v", err)
+	}
+	fmt.Println("ValidateAge(25) =", goodAge.Native())
+
+	badAge, err := wrapperAsm.Call("VmnetFvDemo.Program", "ValidateAge", vmnet.Int32(10))
+	if err != nil {
+		log.Fatalf("ValidateAge(10): %v", err)
+	}
+	fmt.Println("ValidateAge(10) =", badAge.Native())
 }

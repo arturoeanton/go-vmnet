@@ -440,6 +440,41 @@ func (asm *Assembly) hasHardShapeMismatch(params []metadata.SigType, args []runt
 			}
 		}
 	}
+	// Two parameters declared as the SAME still-open generic type
+	// parameter (identical SigGenericParam index AND identical
+	// class-vs-method level) must always bind to values of the SAME real
+	// closed type at any one real call site — a coarse runtime Kind
+	// mismatch between them (KindObject vs KindI4, not just "different
+	// concrete class") is never legitimate, since real C# generics would
+	// need the identical T at both positions. Found via FluentValidation's
+	// own GreaterThanOrEqualValidator<T,TProperty>.IsValid(TProperty
+	// value, TProperty valueToCompare) — Machine.call's own ancestor walk
+	// (calls.go) conflates this real, single-candidate method with an
+	// UNRELATED, same-named IsValid(ValidationContext<T>, TProperty)
+	// declared elsewhere in the same hierarchy (a real, separate virtual
+	// slot in actual .NET, invisible to vmnet's own by-name-only ancestor
+	// search — there is no other way to tell these two apart without
+	// this), silently accepting a real ValidationContext instance and a
+	// real int as if they were "the same TProperty" and corrupting the
+	// numeric comparison it went on to do. This check is safe for the
+	// overwhelmingly common single-occurrence-of-T shape (e.g. `List<T>.
+	// Add(T)`, `Dictionary<TKey,TValue>` indexers): it only ever fires
+	// when the SAME generic parameter index repeats across more than one
+	// position in one candidate's own signature, which a genuinely
+	// correct call always satisfies with equal Kinds anyway.
+	for i := range params {
+		if params[i].Kind != metadata.SigGenericParam {
+			continue
+		}
+		for j := i + 1; j < len(params); j++ {
+			if params[j].Kind == metadata.SigGenericParam &&
+				params[j].GenericParamIndex == params[i].GenericParamIndex &&
+				params[j].GenericParamIsMethod == params[i].GenericParamIsMethod &&
+				args[i].Kind != args[j].Kind {
+				return true
+			}
+		}
+	}
 	return false
 }
 

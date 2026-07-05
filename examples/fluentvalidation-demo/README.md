@@ -22,12 +22,17 @@ Expected output:
 ```txt
 Validate("Ada") = valid
 Validate("") = invalid: Name is required
+ValidateAge(25) = valid
+ValidateAge(10) = invalid: 'Age' must be greater than or equal to '18'.
 ```
 
-See `docs/en/ROADMAP.md`, Fase 3.64, for the interpreter work this needed
-(walking and compiling a narrow class of real expression trees) and for a
-known, real, separate limitation: FluentValidation's own numeric range
-validators (`GreaterThanOrEqualTo`, etc.) hit a distinct, deeper generics
-limitation (`Comparer<T>.Default`'s cached instance not being kept separate
-per closed generic instantiation) not fixed by this Fase — this demo only
-exercises the string validators that already work correctly.
+See `docs/en/ROADMAP.md`, Fase 3.64, for the interpreter work the string
+validators needed (walking and compiling a narrow class of real expression
+trees). The `ValidateAge` calls exercise `GreaterThanOrEqualTo`, a numeric
+range validator that used to fail: FluentValidation dispatches it through
+`AbstractComparisonValidator<T,TProperty>`, a generic base class with two
+same-named, same-arity `IsValid` overrides down its own hierarchy that only
+differ by full signature — real .NET tells them apart by vtable slot, which
+vmnet's own by-name ancestor walk used to conflate. Fixed in Fase 3.68 (see
+`docs/en/ROADMAP.md`); Fase 3.64's original guess (a `Comparer<T>.Default`
+caching issue) turned out to be wrong.

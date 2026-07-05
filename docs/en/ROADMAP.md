@@ -5709,6 +5709,94 @@ go test -run "TestErrorClassification|TestManagedExceptionStackTraceFormat" -v .
 ```
 
 ---
+## Fase 3.68 — FluentValidation's numeric-validator dispatch bug, actually fixed
+
+**Goal:** close the gap Fase 3.66 precisely diagnosed but left unfixed — FluentValidation's own
+`GreaterThanOrEqualTo`/`LessThanOrEqualTo`/`InclusiveBetween` numeric rules crashing or, in an
+earlier reverted attempt, silently validating the wrong thing.
+
+**Result: the real root cause was vmnet's own by-name-only virtual-method ancestor walk conflating
+two distinct, same-named, same-arity `IsValid` overrides across a generic base/derived class pair
+— fixed with a general overload-resolution rule, then hardened through a short chain of smaller,
+genuinely separate gaps the fix newly made reachable.**
+
+- **The actual dispatch bug.** Real, unmodified FluentValidation 11.9.2's `AbstractComparisonValidator
+  <T,TProperty>.IsValid(ValidationContext<T>, TProperty)` and `GreaterThanOrEqualValidator<T,
+  TProperty>.IsValid(TProperty, TProperty)` are two genuinely different virtual methods that happen
+  to share a name and arity — real .NET distinguishes them by full signature (a distinct vtable
+  slot each), but vmnet's own ancestor walk (`retryName := t + "::" + method` in `assembly.go`)
+  only ever looks up by name, so it could resolve to either one. Fixed with a new rule in
+  `hasHardShapeMismatch` (`assembly.go`): if a candidate declares the SAME still-open generic type
+  parameter index (matching class-vs-method level too) in two or more parameter positions, the
+  actual runtime arguments bound to those positions must share the same `Kind` — real generics can
+  never produce two different concrete types for one shared type parameter at a single call site,
+  so a `Kind` mismatch there is conclusive proof the wrong same-named overload was picked, not just
+  "different concrete class." Verified against the real assembly: `Validate(25)` (a valid age)
+  now correctly reports `"valid"` instead of crashing with `IComparable.CompareTo: unsupported
+  receiver kind 7`.
+- **Three smaller, genuinely separate gaps the dispatch fix made newly reachable** (previously
+  unreached because execution crashed before getting this far):
+  - **`box`-then-null-check on a primitive** (`internal/interpreter/arithmetic.go`) — real C#
+    compiles `box !TProperty` followed by a `ldnull`/`cgt.un` comparison as a generic "is this
+    T-typed value non-null" check, without knowing at compile time whether `T` is a value or
+    reference type. Boxing a genuine value type in real .NET never produces null, so this check
+    always has one fixed, deterministic answer. vmnet's own `box` on a primitive `Kind` is a pure
+    identity passthrough (never becomes a `KindObject` wrapper), so the comparison used to hit an
+    unhandled "mismatched value kinds" error. Fixed with a new `isPrimitiveValueKind` helper and a
+    dedicated `evalBinOp` case answering the fixed-correct result for `ceq`/`cgt`/`clt` between any
+    primitive `Kind` and `KindNull`.
+  - **`CultureInfo.CurrentUICulture`/`.Parent`/`.IsNeutralCulture`** (`internal/bcl/
+    system_misc.go`) — three real properties FluentValidation's own resource-satellite message
+    lookup calls that had no native yet; registered onto the existing invariant-culture stand-in
+    (`IsNeutralCulture` answering `false`, matching real .NET's own `InvariantCulture.
+    IsNeutralCulture`).
+  - **A fresh-object-vs-singleton bug in `cultureInfoInvariant` itself** — it returned a brand new
+    `&runtime.Object{}` on every call, so two calls to (say) `CultureInfo.CurrentCulture` were never
+    reference-equal. Real .NET code that walks a culture's own parent chain until it reaches the
+    (genuinely singleton) invariant culture — `while (c != CultureInfo.InvariantCulture) c = c.
+    Parent;`, exactly FluentValidation's own resource-fallback pattern — never terminated:
+    `VMNET_CALL_DEPTH_EXCEEDED`. Fixed by making `cultureInfoInvariant` return the SAME shared
+    `*runtime.Object` every call. `TimeZoneInfo.Local`/`.Utc` (which reused the same function for
+    an unrelated "no real data" stub) were deliberately split onto their OWN, separate singleton
+    (`timeZoneInfoStub`) — sharing one singleton across two unrelated real .NET types would make a
+    `TimeZoneInfo` stand-in incorrectly reference-equal to a `CultureInfo` stand-in.
+- **One remaining, narrower, and now precisely bounded limitation.** `MessageFormatter.BuildMessage`
+  (real FluentValidation source) formats each `{Placeholder}` via `value2?.ToString()` — a real C#
+  null-conditional, which compiles to `dup; brtrue.s ...` directly on the boxed value, not a
+  `ldnull`/`ceq` comparison (a different bytecode shape than the one just fixed above). For a boxed
+  value that happens to equal its type's own zero (e.g. a boxed `int` holding `0`, which
+  `InclusiveBetween(0, ...)`'s own `{From}` placeholder is), vmnet's identity-passthrough `box`
+  leaves no way to distinguish "a real null reference" from "a real, boxed, legitimately-zero
+  value" at this instruction — `brtrue` sees a zero `I4` either way. This is a narrower instance of
+  the same underlying "`box` doesn't really box" architectural simplification, not a new, separate
+  design flaw; fixing it in general would mean giving `box` a real wrapper representation across
+  every numeric opcode and native, which is out of proportion to this Fase's own scope. Confirmed
+  via a real repro (`InclusiveBetween(0, 130)` on age `131`) and bounded rather than deep-fixed;
+  `examples/fluentvalidation-demo` and the checker corpus both avoid this narrow edge (any bound
+  other than exactly `0` formats correctly, as verified for `InclusiveBetween(1, 130)`).
+- **`examples/fluentvalidation-demo` extended** — now also exercises `GreaterThanOrEqualTo(18)` on
+  a real `int` property (`ValidateAge`), proving the fix, not just the string validators used
+  before.
+- **Checker re-measured with the correct methodology** (`vmnet check package`, which resolves the
+  package's transitive dependency graph the way `LoadPackage` does at runtime — the plain `vmnet
+  check <dll>` form used for a quick sanity check earlier in this Fase gives a different, unrelated
+  number because it can't resolve forwarded BCL surface through the missing dependencies):
+  `FluentValidation@11.9.2` moves from 26 to 25 flagged methods (98.1%, up from 98.0%) — the one
+  new native (`get_IsNeutralCulture`) accounts for the difference; the dispatch/box/singleton fixes
+  above are runtime-correctness fixes, not checker-visible ones.
+
+### How to verify Fase 3.68
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+go run ./cmd/vmnet check package fluentvalidation@11.9.2
+cd examples/fluentvalidation-demo && dotnet build FvDemoWrapper.csproj -c Release && go run .
+```
+
+---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 
 **Goal:** turn the functional engine into an adoptable product — reliable, documented, and
