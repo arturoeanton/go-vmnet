@@ -1,0 +1,8 @@
+{
+  "packages": [
+    {
+      "ID": "System.Text.Json",
+      "Version": "8.0.5"
+    }
+  ]
+}

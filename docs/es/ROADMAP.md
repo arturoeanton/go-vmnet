@@ -6157,6 +6157,88 @@ go tool cover -func=/tmp/cover.out | tail -1
 ```
 
 ---
+## Fase 3.70 — los cuatro docs faltantes, y una suite de benchmarks real
+
+**Objetivo:** dos ítems de la Prioridad 2 de la planificación de este empuje — los cuatro docs que
+la spec §33.2 exige y que este proyecto nunca había escrito (`supported-il.md`, `supported-bcl.md`,
+`nuget-support.md`, `compatibility-profile.md`), y una suite de benchmarks real (spec §32) más allá
+de la propia semilla "arithmetic loop" de `examples/calculator`.
+
+**Resultado: los cuatro docs escritos de forma bilingüe, basados enteramente en el código real (no
+en conocimiento genérico de CIL/.NET/NuGet); una suite de benchmarks real y ejecutable que cubre
+los siete workloads de la spec §32.2 más cada métrica de la spec §32.3 medible hoy a través de la
+API pública; y un bug nuevo y genuino encontrado por la propia suite de benchmarks.**
+
+- **Los cuatro docs** (`docs/en/` y `docs/es/`, ~2.400 líneas en total): `supported-il.md` (basado
+  en `internal/il/opcode.go`, el propio switch statement de `internal/ir/builder.go` — la verdad
+  de fondo real de "qué CIL ejecuta vmnet" — y `internal/interpreter/eval.go`; documenta los
+  opcodes identity-no-op, el límite permanentemente fuera de alcance de `calli`, y cada opcode sin
+  ningún `case` en absoluto: `jmp`, `cpobj`, `unbox` puro, `sizeof`/`cpblk`/`initblk`,
+  `arglist`/`refanyval`/`refanytype`/`mkrefany`, `ckfinite`, los prefijos `tail.`/`no.` —
+  encontrados diffeando la tabla de opcodes contra el switch, no por suposición); `supported-bcl.md`
+  (basado en cada llamada `register()` a través de `internal/bcl/*.go` más las entradas de
+  `machineRegistry`/`genericMachineRegistry` en `internal/interpreter`, organizado por namespace,
+  citando solo los huecos reales ya documentados en `docs/en/COMPATIBILITY.md`); `nuget-support.md`
+  (basado en el propio parsing real de nupkg/nuspec de `internal/nuget/`, la prioridad de tiers de
+  TFM, la resolución de dependencias transitivas, la forma JSON real del lockfile, y el manejo de
+  assets solo-nativos/solo-referencia); `compatibility-profile.md` (basado en los tres perfiles
+  reales de `internal/checker/profile.go`, la lógica exacta de `finalize()` de `analyzer.go`, y un
+  ejemplo trabajado de `fluentvalidation@11.9.2` usando las propias cifras reales y publicadas de
+  este proyecto, 98.1%/25 marcados — deliberadamente sin fabricar líneas de Finding individuales
+  que COMPATIBILITY.md mismo no publica). Un desliz factual atrapado y arreglado durante la
+  revisión: una cita que atribuía el hueco del condicional-nulo con cero boxeado a la "Fase 3.66"
+  en ambas versiones de idioma de `supported-il.md` — en realidad se encontró y se le halló la
+  causa raíz en la Fase 3.68; corregido en ambos archivos.
+- **`benchmarks/`** (directorio nuevo) — `Bench.cs`/`Bench.csproj` implementa los siete workloads
+  de la spec §32.2 (loop aritmético, concatenación de strings, asignación de objetos,
+  `List<T>.Add`, búsqueda en `Dictionary`, JSON de entrada/salida vía el propio paquete real
+  `System.Text.Json`, y un método de motor de reglas llamado 10.000 veces desde el lado Go
+  específicamente para estresar el overhead de ida y vuelta por llamada a volumen realista) como
+  métodos C# que iteran internamente y devuelven un resultado final, así que el harness de Go mide
+  UNA `Assembly.Call` por workload — el overhead de despacho nunca contamina la medición de "n
+  iteraciones de trabajo real". `main.go` corre cada uno a través de vmnet Y un equivalente Go
+  nativo línea por línea, falla ruidosamente ante cualquier discrepancia, y reporta cada métrica de
+  la spec §32.3 medible hoy a través de la API pública: tiempo de carga en frío, overhead de
+  invocación de método (5.000 llamadas triviales ya calentadas), asignaciones/op y bytes lógicos de
+  heap (`testing.AllocsPerRun`/`runtime.MemStats`, ambos del lado host — el propio costo del lado Go
+  de vmnet de manejar una llamada interpretada), y tiempo de restauración de paquete. **Hueco
+  honesto y documentado**: instructions/sec no se reporta — el propio contador real de
+  instrucciones por `Call` del intérprete (el mismo contra el que `VMNET_CALL_DEPTH_EXCEEDED`
+  presupuesta) todavía no está expuesto a través de la API pública; reportarlo necesitaría un gancho
+  de instrumentación nuevo, no una adivinanza. La comparación contra CoreCLR se mantiene acotada a
+  la configuración ya existente de `examples/calculator` (seis programas CoreCLR más para mantener
+  a mano se juzgó desproporcionado para esta Fase); un "equivalente goja" (spec §32.1) no aplica en
+  absoluto — goja es un motor de JavaScript, no un runtime de CIL/BCL.
+- **Un bug nuevo y genuino encontrado corriendo esta suite por primera vez**: `JsonRoundTrip`
+  (`System.Text.Json.JsonSerializer.Serialize`/`Deserialize`, una API distinta y más usada que el
+  propio parsing basado en `JsonDocument` de `examples/system-text-json-demo`, que ya funciona)
+  crashea con `binary op on mismatched value kinds (9, 1)`. Se le halló la causa raíz vía
+  instrumentación puntual en `eval.go` (agregada, usada, y luego limpiamente removida) más
+  disassembly de IL real de `System.Text.Encodings.Web.dll`: la propia inicialización estática de
+  `JsonSerializer` alcanza `DefaultJavaScriptEncoder`, que necesita el propio campo `unsafe fixed
+  uint Bitmap[2048]` de `AllowedBmpCodePointsBitmap` — un buffer de tamaño fijo `unsafe` de C# real
+  (aritmética de punteros direccionable por byte dentro de un array inline, respaldado por una
+  estructura anidada generada por el compilador `<Bitmap>e__FixedBuffer`). Un grep por todo el
+  código en busca de "fixed buffer"/"FixedBuffer" no encuentra nada en absoluto — vmnet no tiene
+  ningún soporte para esta característica, no es un intento parcial o con bugs. Implementar
+  semántica real de memoria unsafe direccionable por byte es un proyecto sustancial y separado,
+  desproporcionado para el alcance propio de esta Fase; acotado en vez de arreglado en profundidad
+  — el propio workload de JSON de entrada/salida de `benchmarks/main.go` atrapa esto con gracia y
+  lo reporta como un hueco conocido en vez de crashear toda la suite, y el parsing basado en
+  `JsonDocument` de `examples/system-text-json-demo` sigue siendo la historia verificada de este
+  proyecto con System.Text.Json.
+
+### Cómo verificar la Fase 3.70
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+cd benchmarks && dotnet build Bench.csproj -c Release && go run .
+```
+
+---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
 
@@ -6195,9 +6277,15 @@ con benchmarks — el paquete completo para que un equipo de ingeniería apruebe
       (`runtime.ManagedException.Stack`/`PushFrame`/`String`)
 
 **Performance / benchmarks**
-- [ ] Suite de benchmarks (spec §32): loop aritmético, concat de strings, JSON in/out,
-      allocación de objetos, `List.Add`, lookup de `Dictionary`, 10k llamadas a rule engine
-- [ ] Comparación vs Go nativo y, donde sea viable, vs ejecución nativa CoreCLR
+- [x] Suite de benchmarks (spec §32): loop aritmético, concat de strings, JSON in/out,
+      allocación de objetos, `List.Add`, lookup de `Dictionary`, 10k llamadas a rule engine —
+      lograda en la Fase 3.70 (`benchmarks/`); JSON in/out está actualmente bloqueado por un hueco
+      real y documentado (soporte de buffer de tamaño fijo unsafe), no medido como "lento" — ver la
+      propia entrada de esa Fase
+- [x] Comparación vs Go nativo y, donde sea viable, vs ejecución nativa CoreCLR — los siete
+      workloads vs Go nativo (Fase 3.70); la comparación contra CoreCLR se mantiene acotada al
+      workload de loop aritmético (`examples/calculator/coreclr/`, preexistente) — seis programas
+      CoreCLR más para mantener a mano se juzgó desproporcionado para esta Fase
 - [ ] Cache de resolución de métodos/tokens, pasada de optimización de hot paths
 
 **API/CLI estables**
@@ -6215,8 +6303,10 @@ con benchmarks — el paquete completo para que un equipo de ingeniería apruebe
 
 **Documentación (spec §33)**
 - [ ] README completo (qué es / qué no es, quickstart, perfiles, límites conocidos)
-- [ ] `docs/es/architecture.md`, `supported-il.md`, `supported-bcl.md`, `nuget-support.md`,
-      `compatibility-profile.md`, `security.md`, `roadmap.md`
+- [x] `docs/es/architecture.md`, `supported-il.md`, `supported-bcl.md`, `nuget-support.md`,
+      `compatibility-profile.md`, `security.md`, `roadmap.md` — los cuatro docs antes faltantes
+      (`supported-il.md`/`supported-bcl.md`/`nuget-support.md`/`compatibility-profile.md`)
+      lograron de forma bilingüe en la Fase 3.70; los otros tres ya existían
 - [x] `/examples`: hello, rules, calculator, nuget-basic — ejecutables y documentados
 
 ### Demo de cierre de Fase 4 — "Listo para producción" (~15 min, foco ejecutivo)

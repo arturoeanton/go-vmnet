@@ -5882,6 +5882,81 @@ go tool cover -func=/tmp/cover.out | tail -1
 ```
 
 ---
+## Fase 3.70 — the four missing docs, and a real benchmark suite
+
+**Goal:** two of Priority 2's items from this push's own planning pass — the four docs spec §33.2
+requires that this project had never written (`supported-il.md`, `supported-bcl.md`,
+`nuget-support.md`, `compatibility-profile.md`), and a real benchmark suite (spec §32) beyond
+`examples/calculator`'s own "arithmetic loop" seed.
+
+**Result: all four docs written bilingually, grounded entirely in the real code (not generic CIL/
+.NET/NuGet knowledge); a real, runnable benchmark suite covering all seven spec §32.2 workloads
+plus every spec §32.3 metric measurable through the public API today; and one new, genuine bug
+found by the benchmark suite itself.**
+
+- **The four docs** (`docs/en/` and `docs/es/`, ~2,400 lines total): `supported-il.md` (grounded in
+  `internal/il/opcode.go`, `internal/ir/builder.go`'s own switch statement — the real ground truth
+  for "what CIL does vmnet execute" — and `internal/interpreter/eval.go`; documents the identity-
+  no-op opcodes, the permanently-out-of-scope `calli` boundary, and every opcode with genuinely no
+  `case` at all: `jmp`, `cpobj`, plain `unbox`, `sizeof`/`cpblk`/`initblk`, `arglist`/`refanyval`/
+  `refanytype`/`mkrefany`, `ckfinite`, the `tail.`/`no.` prefixes — found by diffing the opcode
+  table against the switch, not by assumption); `supported-bcl.md` (grounded in every `register()`
+  call across `internal/bcl/*.go` plus `machineRegistry`/`genericMachineRegistry` entries in
+  `internal/interpreter`, organized by namespace, citing only the real, already-documented gaps
+  from `docs/en/COMPATIBILITY.md`); `nuget-support.md` (grounded in `internal/nuget/`'s real nupkg/
+  nuspec parsing, TFM tier priority, transitive dependency resolution, the lockfile's real JSON
+  shape, and native-only/reference-only asset handling); `compatibility-profile.md` (grounded in
+  `internal/checker/profile.go`'s three real profiles, `analyzer.go`'s exact `finalize()` status
+  logic, and a worked `fluentvalidation@11.9.2` example using this project's own real, published
+  98.1%/25-flagged figures — deliberately not fabricating individual Finding lines COMPATIBILITY.md
+  doesn't itself publish). One factual slip caught and fixed during review: a citation crediting
+  the boxed-zero null-conditional gap to "Fase 3.66" in both language versions of
+  `supported-il.md` — it was actually found and root-caused in Fase 3.68; corrected in both files.
+- **`benchmarks/`** (new directory) — `Bench.cs`/`Bench.csproj` implements all seven spec §32.2
+  workloads (arithmetic loop, string concat, object allocation, `List<T>.Add`, `Dictionary`
+  lookup, JSON in/out via the real `System.Text.Json` package, and a rule-engine method called
+  10,000 times from the Go side specifically to stress per-call round-trip overhead at realistic
+  volume) as C# methods that loop internally and return one final result, so the Go harness times
+  one `Assembly.Call` per workload — dispatch overhead never pollutes the "n iterations of real
+  work" measurement. `main.go` runs each through vmnet AND a line-for-line native Go equivalent,
+  fails loudly on any mismatch, and reports every spec §32.3 metric measurable through the public
+  API today: cold load time, method invoke overhead (5,000 warmed-up trivial calls), allocations/op
+  and heap logical bytes (`testing.AllocsPerRun`/`runtime.MemStats`, both host-side — vmnet's own
+  Go-side cost of driving one interpreted call), and package restore time. **Known, honestly-
+  documented gap**: instructions/sec isn't reported — the interpreter's own real per-`Call`
+  instruction counter (the same one `VMNET_CALL_DEPTH_EXCEEDED` budgets against) isn't exposed
+  through the public Go API yet; reporting it would need a new instrumentation hook, not a guess.
+  CoreCLR comparison stays scoped to `examples/calculator`'s own existing setup (six more
+  hand-maintained CoreCLR programs is out of proportion to this Fase); a "goja equivalent" (spec
+  §32.1) isn't applicable at all — goja is a JavaScript engine, not a CIL/BCL runtime.
+- **A new, genuine bug found by running this suite for the first time**: `JsonRoundTrip`
+  (`System.Text.Json.JsonSerializer.Serialize`/`Deserialize`, a different, more commonly-used API
+  than `examples/system-text-json-demo`'s own already-working `JsonDocument`-based parsing)
+  crashes with `binary op on mismatched value kinds (9, 1)`. Root-caused via targeted `eval.go`
+  instrumentation (added, used, then cleanly removed) plus real IL disassembly of `System.Text.
+  Encodings.Web.dll`: `JsonSerializer`'s own static initialization reaches `DefaultJavaScriptEncoder`,
+  which needs `AllowedBmpCodePointsBitmap`'s own `unsafe fixed uint Bitmap[2048]` field — a real C#
+  unsafe fixed-size buffer (byte-addressable pointer arithmetic into an inline array, backed by a
+  compiler-generated `<Bitmap>e__FixedBuffer` nested struct). A grep across the whole codebase for
+  "fixed buffer"/"FixedBuffer" turns up nothing at all — vmnet has zero support for this feature,
+  not a partially-working or buggy attempt at it. Implementing real byte-addressable unsafe memory
+  semantics is a substantial, separate undertaking, out of proportion to this Fase's own scope;
+  bounded rather than deep-fixed — `benchmarks/main.go`'s own JSON in/out workload catches this
+  gracefully and reports it as a known gap instead of crashing the whole suite, and
+  `examples/system-text-json-demo`'s `JsonDocument`-based parsing remains this project's verified
+  System.Text.Json story.
+
+### How to verify Fase 3.70
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+cd benchmarks && dotnet build Bench.csproj -c Release && go run .
+```
+
+---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 
 **Goal:** turn the functional engine into an adoptable product — reliable, documented, and
@@ -5917,9 +5992,14 @@ benchmarked — the complete package for an engineering team to approve a real p
       (`runtime.ManagedException.Stack`/`PushFrame`/`String`)
 
 **Performance / benchmarks**
-- [ ] Benchmark suite (spec §32): arithmetic loop, string concat, JSON in/out,
-      object allocation, `List.Add`, `Dictionary` lookup, 10k rule engine calls
-- [ ] Comparison vs native Go and, where feasible, vs native CoreCLR execution
+- [x] Benchmark suite (spec §32): arithmetic loop, string concat, JSON in/out,
+      object allocation, `List.Add`, `Dictionary` lookup, 10k rule engine calls — landed Fase 3.70
+      (`benchmarks/`); JSON in/out is currently blocked by a real, documented gap (unsafe
+      fixed-size buffer support), not measured as "slow" — see that Fase's own entry
+- [x] Comparison vs native Go and, where feasible, vs native CoreCLR execution — all seven
+      workloads vs native Go (Fase 3.70); CoreCLR comparison stays scoped to the arithmetic-loop
+      workload (`examples/calculator/coreclr/`, pre-existing) — six more hand-maintained CoreCLR
+      programs judged out of proportion to this Fase
 - [ ] Method/token resolution cache, hot-path optimization pass
 
 **Stable API/CLI**
@@ -5936,8 +6016,10 @@ benchmarked — the complete package for an engineering team to approve a real p
 
 **Documentation (spec §33)**
 - [ ] Complete README (what it is / what it isn't, quickstart, profiles, known limits)
-- [ ] `docs/en/architecture.md`, `supported-il.md`, `supported-bcl.md`, `nuget-support.md`,
-      `compatibility-profile.md`, `security.md`, `roadmap.md`
+- [x] `docs/en/architecture.md`, `supported-il.md`, `supported-bcl.md`, `nuget-support.md`,
+      `compatibility-profile.md`, `security.md`, `roadmap.md` — the four previously-missing docs
+      (`supported-il.md`/`supported-bcl.md`/`nuget-support.md`/`compatibility-profile.md`) landed
+      bilingually in Fase 3.70; the other three already existed
 - [x] `/examples`: hello, rules, calculator, nuget-basic — runnable and documented
 
 ### Fase 4 closing demo — "Production ready" (~15 min, executive focus)
