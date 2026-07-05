@@ -54,6 +54,40 @@ type Metadata struct {
 	// loads the same file, and nothing here guarantees one goroutine.
 	typeDefCacheMu sync.RWMutex
 	typeDefCache   map[string]typeDefCacheEntry
+
+	// methodCandidatesCacheMu/methodCandidatesCache memoize
+	// FindMethodDefCandidates (resolver.go) the same way typeDefCache
+	// memoizes FindTypeDef above, and for the same reason: a real call
+	// chain resolves the SAME (typeRID, methodName) pair over and over
+	// (every single repeat call to a method — a tight loop calling the
+	// same method thousands of times re-scans that type's own MethodDef
+	// row range, decoding every row's Name off the string heap, on
+	// EVERY iteration) — Fase 3.73, found profiling assembly.go's own
+	// pickMethodOverload, which had no cache at all between it and this
+	// table scan (unlike the type-lookup step just above it, already
+	// cached since Fase 3.49).
+	methodCandidatesCacheMu sync.RWMutex
+	methodCandidatesCache   map[methodCandidatesCacheKey]methodCandidatesCacheEntry
+
+	// methodSigCacheMu/methodSigCache memoize ParseMethodSig (signatures.go)
+	// via ParseMethodSigCached — the other half of the same real, repeat-
+	// call cost methodCandidatesCache closes (Fase 3.73): a signature blob
+	// is small, but re-decoding it (compressed-integer parsing, a fresh
+	// Params slice allocation) on every single call to the same method is
+	// exactly the same "redo pure, input-only-dependent work every time"
+	// waste, just smaller in absolute cost per call. Keyed by the blob's
+	// own bytes (as a string) rather than a method RID, since not every
+	// caller has one at hand (MemberRef/StandAloneSig signatures have no
+	// MethodDef RID at all) — a real method signature blob is a handful
+	// of bytes, cheap to use as a map key directly.
+	methodSigCacheMu sync.RWMutex
+	methodSigCache   map[string]methodSigCacheEntry
+}
+
+// methodSigCacheEntry caches one ParseMethodSig outcome, hit or miss.
+type methodSigCacheEntry struct {
+	sig   MethodSig
+	found bool
 }
 
 // typeDefCacheEntry caches one FindTypeDef outcome, hit or miss — a miss
@@ -63,6 +97,23 @@ type Metadata struct {
 type typeDefCacheEntry struct {
 	rid   uint32
 	row   TypeDefRow
+	found bool
+}
+
+// methodCandidatesCacheKey is (typeRID, methodName) — the two inputs
+// FindMethodDefCandidates' own result depends on and nothing else (a
+// TypeDef's own MethodDef row range never changes after Parse returns).
+type methodCandidatesCacheKey struct {
+	typeRID uint32
+	name    string
+}
+
+// methodCandidatesCacheEntry mirrors typeDefCacheEntry: caches a miss
+// (found=false) just as eagerly as a hit, since a miss scans exactly as
+// much of the table as a hit that happens to be the last candidate.
+type methodCandidatesCacheEntry struct {
+	rids  []uint32
+	rows  []MethodDefRow
 	found bool
 }
 

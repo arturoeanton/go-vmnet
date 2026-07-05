@@ -6351,6 +6351,68 @@ go test -run "TestInvoke_MaxStringBytes" -v ./internal/interpreter/...
 ```
 
 ---
+## Fase 3.73 — una caché real de resolución de métodos/tokens
+
+**Objetivo:** el segundo ítem de la Prioridad 3 — perfilar hacia dónde va realmente el overhead
+propio por `Call` de vmnet antes de optimizar a ciegas. Resultó que la construcción/caché de IR
+(por método, desde temprano) ya estaba bien; el costo real y evitable, repetido, estaba una capa
+más arriba.
+
+**Resultado: dos cachés nuevas que cierran un hueco real y medido — cada llamada repetida al mismo
+método volvía a correr un escaneo lineal completo de la tabla MethodDef Y volvía a parsear su blob
+de firma desde cero, sin nada que memoizara ninguno de los dos pasos, a diferencia del paso de
+búsqueda de tipo justo antes de ellos (cacheado desde la Fase 3.49). Arreglar esto bajó el overhead
+medido por llamada en aproximadamente un tercio.**
+
+- **`FindMethodDefCandidates` (`internal/metadata/resolver.go`)**, memoizada por `(typeRID,
+  methodName)` — el mismo patrón de mapa protegido por mutex que el propio `typeDefCache` de
+  `FindTypeDef` ya estableció (Fase 3.49), por la razón idéntica: una cadena de llamadas real
+  resuelve el mismo par exacto una y otra vez, y cada llamada repetida a un método — incluyendo
+  cada reintento que la propia caminata de ancestros de `callvirt` de `Machine.call` hace buscando
+  el override correcto — volvía a escanear todo el rango de filas MethodDef del tipo, decodificando
+  el nombre de cada fila desde el heap de strings, antes de esta Fase. Se cachean tanto un hit como
+  un miss genuino (un miss escanea exactamente tanto de la tabla como un hit que resulta ser el
+  último candidato, así que no hay nada más barato en volver a derivar "no encontrado" cada vez).
+- **`ParseMethodSigCached` (`internal/metadata/signatures.go`, nueva)** — `ParseMethodSig`,
+  memoizada por los propios bytes del blob de firma, conectada en los dos sitios de llamada más
+  calientes de `assembly.go` (`candidateMatchesArgs`, alcanzado en cada llamada de un solo
+  candidato — la abrumadora mayoría de las llamadas reales — y el propio loop de desempate de
+  múltiples candidatos de `pickMethodOverload`). Los otros 11 sitios de llamada a través de
+  `assembly.go`/`internal/checker`/`internal/ir` se dejaron deliberadamente en el `ParseMethodSig`
+  plano y sin cachear — no están en el camino caliente real por `Call` (helpers de reflexión,
+  resolución en tiempo de construcción de IR ya cubierta por la caché de IR por método), y auditar
+  los 11 para "nunca muta el slice `Params` devuelto in situ" no valía la pena hacerlo hasta que se
+  demostrara necesario.
+- **Mejora real y medida** (`benchmarks/`, la propia suite de la Fase 3.70, antes vs. después): el
+  workload de motor de reglas x10.000 bajó de 8.03ms a ~5.2ms (aproximadamente 35% más rápido), el
+  overhead de invocación de método de 0.86 a ~0.55 microsegundos/llamada, y las asignaciones del
+  lado host por llamada a `EvalRule` de 29.0 a 19.0 (consistente con remover las asignaciones de
+  decodificación del heap de strings por fila que hacía el escaneo lineal y la propia asignación
+  del slice `Params` fresco del parseo de firma). Los workloads de aritmética/strings/colecciones
+  no se ven afectados, como se esperaba — sus propios loops calientes se quedan enteramente dentro
+  de un cuerpo de método C# sin objetivos repetidos de `call`/`callvirt` con los que esta caché
+  pueda ayudar.
+- **Seis tests nuevos** (`internal/metadata/metadata_test.go`): consistencia de cache-hit a través
+  de llamadas repetidas, un miss genuino que sigue siendo miss en cada llamada repetida (no
+  cacheado incorrectamente como un falso hit), un test de carrera con 32 goroutines de acceso
+  concurrente (ambas cachés se alcanzan desde múltiples goroutines resolviendo las mismas y
+  distintas keys a la vez — el propio contrato ya existente de "seguro para uso concurrente" de
+  `Assembly.Call` tiene que seguir cumpliéndose), y `ParseMethodSigCached` produciendo resultados
+  idénticos al `ParseMethodSig` plano que envuelve. Todo verde bajo `go test -race ./...`.
+
+### Cómo verificar la Fase 3.73
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+go test -race ./...
+go test -run "TestFindMethodDefCandidates|TestParseMethodSigCached" -v -race ./internal/metadata/...
+cd benchmarks && go run .  # comparar los números de rule-engine/method-invoke-overhead/allocs contra la propia entrada de esta Fase arriba
+```
+
+---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
 
@@ -6401,7 +6463,9 @@ con benchmarks — el paquete completo para que un equipo de ingeniería apruebe
       workloads vs Go nativo (Fase 3.70); la comparación contra CoreCLR se mantiene acotada al
       workload de loop aritmético (`examples/calculator/coreclr/`, preexistente) — seis programas
       CoreCLR más para mantener a mano se juzgó desproporcionado para esta Fase
-- [ ] Cache de resolución de métodos/tokens, pasada de optimización de hot paths
+- [x] Cache de resolución de métodos/tokens, pasada de optimización de hot paths — lograda en la
+      Fase 3.73 (las nuevas cachés `FindMethodDefCandidates`/`ParseMethodSigCached` de
+      `internal/metadata`), ~35% menos overhead medido por llamada
 
 **API/CLI estables**
 - [x] Congelar API pública Go (spec §6) para v1.0, compromiso semver — lograda en la Fase 3.71

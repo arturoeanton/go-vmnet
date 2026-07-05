@@ -305,7 +305,7 @@ func (asm *Assembly) resolveByFullNameInDeps(fullName string, args []runtime.Val
 // pickMethodOverload trusts it — see that function's "len(rids) == 1"
 // comment for why this validation is needed at all.
 func (asm *Assembly) candidateMatchesArgs(row metadata.MethodDefRow, args []runtime.Value, genericArgCount int) (metadata.MethodDefRow, bool) {
-	sig, err := metadata.ParseMethodSig(row.Signature)
+	sig, err := asm.md.ParseMethodSigCached(row.Signature)
 	if err != nil {
 		return row, false
 	}
@@ -533,7 +533,7 @@ func (asm *Assembly) pickMethodOverload(typeRID uint32, methodName string, args 
 	bestIdx := -1
 	bestScore := math.MinInt // any candidate whose arity matches must win over "no candidate found" (bestIdx == -1) — a real match's total score can go negative (e.g. a confirmed type-name mismatch's -3 penalty with no compensating positive), which a 0-ish starting threshold would incorrectly treat as "worse than nothing" and silently fall through to the arity-mismatch fallback (rids[0]) instead (found the hard way: this exact bug re-triggered the same infinite-.ctor-recursion class as the original overload-resolution fix, on Jint's real PropertyDescriptor, which has both a 1-arg struct-typed ctor and a 1-arg self-typed copy ctor).
 	for i, row := range rows {
-		sig, err := metadata.ParseMethodSig(row.Signature)
+		sig, err := asm.md.ParseMethodSigCached(row.Signature)
 		if err != nil {
 			continue
 		}

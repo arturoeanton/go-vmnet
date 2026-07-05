@@ -1,6 +1,7 @@
 package metadata
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -105,6 +106,110 @@ func TestParse_RealAssembly_MethodDefsAndSignature(t *testing.T) {
 		t.Errorf("MethodDef(Add).Signature is empty, want a signature blob")
 	}
 	_ = methodRID
+}
+
+// TestFindMethodDefCandidates_Cached is the Fase 3.73 regression test:
+// repeat calls for the same (typeRID, name) must return consistent
+// results (a cache bug returning stale/wrong data would be far worse
+// than no cache at all), and a genuine miss must keep failing on every
+// repeat call too, not get incorrectly cached as a false hit.
+func TestFindMethodDefCandidates_Cached(t *testing.T) {
+	md := parseFixture(t)
+
+	rid, _, err := md.FindTypeDef("Vmnet.Fixtures", "SimpleMath")
+	if err != nil {
+		t.Fatalf("FindTypeDef(SimpleMath) error = %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		rids, rows, err := md.FindMethodDefCandidates(rid, "Add")
+		if err != nil {
+			t.Fatalf("FindMethodDefCandidates(Add) call %d error = %v", i, err)
+		}
+		if len(rids) != 1 || len(rows) != 1 {
+			t.Fatalf("FindMethodDefCandidates(Add) call %d = %d candidates, want 1", i, len(rids))
+		}
+		if rows[0].Name != "Add" {
+			t.Errorf("FindMethodDefCandidates(Add) call %d: rows[0].Name = %q, want Add", i, rows[0].Name)
+		}
+	}
+
+	for i := 0; i < 3; i++ {
+		if _, _, err := md.FindMethodDefCandidates(rid, "DoesNotExist"); err == nil {
+			t.Fatalf("FindMethodDefCandidates(DoesNotExist) call %d: error = nil, want a not-found error", i)
+		}
+	}
+}
+
+// TestFindMethodDefCandidates_ConcurrentAccess races many goroutines
+// resolving the same and different (typeRID, name) pairs — run with
+// -race, this must never report a data race, and every goroutine must
+// still get a correct result.
+func TestFindMethodDefCandidates_ConcurrentAccess(t *testing.T) {
+	md := parseFixture(t)
+
+	rid, _, err := md.FindTypeDef("Vmnet.Fixtures", "SimpleMath")
+	if err != nil {
+		t.Fatalf("FindTypeDef(SimpleMath) error = %v", err)
+	}
+
+	const goroutines = 32
+	errCh := make(chan error, goroutines)
+	for g := 0; g < goroutines; g++ {
+		go func() {
+			for i := 0; i < 50; i++ {
+				rids, rows, err := md.FindMethodDefCandidates(rid, "Add")
+				if err != nil {
+					errCh <- err
+					return
+				}
+				if len(rids) != 1 || rows[0].Name != "Add" {
+					errCh <- fmt.Errorf("FindMethodDefCandidates(Add) = %+v/%+v, want 1 candidate named Add", rids, rows)
+					return
+				}
+				if _, err := md.ParseMethodSigCached(rows[0].Signature); err != nil {
+					errCh <- err
+					return
+				}
+			}
+			errCh <- nil
+		}()
+	}
+	for g := 0; g < goroutines; g++ {
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestParseMethodSigCached_MatchesUncached proves the cached path
+// (Fase 3.73) parses identically to the uncached ParseMethodSig it
+// wraps — a cache is only a win if it never changes the answer.
+func TestParseMethodSigCached_MatchesUncached(t *testing.T) {
+	md := parseFixture(t)
+
+	rid, _, err := md.FindTypeDef("Vmnet.Fixtures", "SimpleMath")
+	if err != nil {
+		t.Fatalf("FindTypeDef(SimpleMath) error = %v", err)
+	}
+	_, method, err := md.FindMethodDef(rid, "Add")
+	if err != nil {
+		t.Fatalf("FindMethodDef(Add) error = %v", err)
+	}
+
+	want, err := ParseMethodSig(method.Signature)
+	if err != nil {
+		t.Fatalf("ParseMethodSig error = %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		got, err := md.ParseMethodSigCached(method.Signature)
+		if err != nil {
+			t.Fatalf("ParseMethodSigCached call %d error = %v", i, err)
+		}
+		if got.HasThis != want.HasThis || len(got.Params) != len(want.Params) {
+			t.Errorf("ParseMethodSigCached call %d = %+v, want %+v", i, got, want)
+		}
+	}
 }
 
 func TestParse_RealAssembly_Loops(t *testing.T) {

@@ -597,7 +597,49 @@ func (md *Metadata) FindMethodDef(typeRID uint32, name string) (rid uint32, row 
 // the metadata table. vmnet's overload resolution (assembly.go's
 // pickMethodOverload) scores these against the actual call-site
 // arguments.
+//
+// Memoized by (typeRID, name) since Fase 3.73 (methodCandidatesCache,
+// metadata.go) — a real call chain resolves the exact same pair over and
+// over (every repeat call to the same method re-ran this whole scan
+// before), the identical rationale FindTypeDef's own cache already
+// documents. Callers must treat the returned rids/rows as read-only: a
+// cache hit returns the very same backing slices handed out to every
+// other caller, not a fresh copy — true of every current caller
+// (assembly.go's pickMethodOverload/resolveMember/resolveMemberParams/
+// resolveMemberFlags all only ever read from them).
 func (md *Metadata) FindMethodDefCandidates(typeRID uint32, name string) (rids []uint32, rows []MethodDefRow, err error) {
+	key := methodCandidatesCacheKey{typeRID: typeRID, name: name}
+	md.methodCandidatesCacheMu.RLock()
+	if e, ok := md.methodCandidatesCache[key]; ok {
+		md.methodCandidatesCacheMu.RUnlock()
+		if !e.found {
+			return nil, nil, fmt.Errorf("%w: method %s not found", ErrOutOfRange, name)
+		}
+		return e.rids, e.rows, nil
+	}
+	md.methodCandidatesCacheMu.RUnlock()
+
+	rids, rows, err = md.findMethodDefCandidatesUncached(typeRID, name)
+
+	md.methodCandidatesCacheMu.Lock()
+	if md.methodCandidatesCache == nil {
+		md.methodCandidatesCache = make(map[methodCandidatesCacheKey]methodCandidatesCacheEntry)
+	}
+	// Same "only cache a confirmed not-found, not a scan failure" rule
+	// FindTypeDef's own cache follows — a malformed-heap-index error
+	// isn't "this method doesn't exist," it's "the scan itself broke,"
+	// which a transient/environmental read could plausibly not repeat.
+	if err == nil {
+		md.methodCandidatesCache[key] = methodCandidatesCacheEntry{rids: rids, rows: rows, found: true}
+	} else if errors.Is(err, ErrOutOfRange) {
+		md.methodCandidatesCache[key] = methodCandidatesCacheEntry{found: false}
+	}
+	md.methodCandidatesCacheMu.Unlock()
+
+	return rids, rows, err
+}
+
+func (md *Metadata) findMethodDefCandidatesUncached(typeRID uint32, name string) (rids []uint32, rows []MethodDefRow, err error) {
 	start, end, err := md.TypeDefMethodRange(typeRID)
 	if err != nil {
 		return nil, nil, err

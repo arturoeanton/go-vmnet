@@ -312,6 +312,37 @@ func ParseTypeSpec(blob []byte) (SigType, error) {
 	return t, err
 }
 
+// ParseMethodSigCached is ParseMethodSig, memoized by the blob's own
+// bytes (Fase 3.73) — see methodSigCache's own doc comment (metadata.go)
+// for why. A cache hit returns the same backing MethodSig.Params slice
+// handed to every other caller of the same signature; every current
+// caller only reads it, never mutates it in place.
+func (md *Metadata) ParseMethodSigCached(blob []byte) (MethodSig, error) {
+	key := string(blob)
+	md.methodSigCacheMu.RLock()
+	if e, ok := md.methodSigCache[key]; ok {
+		md.methodSigCacheMu.RUnlock()
+		if !e.found {
+			return MethodSig{}, fmt.Errorf("metadata: empty method signature")
+		}
+		return e.sig, nil
+	}
+	md.methodSigCacheMu.RUnlock()
+
+	sig, err := ParseMethodSig(blob)
+
+	md.methodSigCacheMu.Lock()
+	if md.methodSigCache == nil {
+		md.methodSigCache = make(map[string]methodSigCacheEntry)
+	}
+	if err == nil {
+		md.methodSigCache[key] = methodSigCacheEntry{sig: sig, found: true}
+	}
+	md.methodSigCacheMu.Unlock()
+
+	return sig, err
+}
+
 // ParseMethodSig parses a MethodDef or MemberRef method signature blob.
 func ParseMethodSig(blob []byte) (MethodSig, error) {
 	if len(blob) == 0 {
