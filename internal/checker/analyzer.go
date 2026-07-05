@@ -371,6 +371,13 @@ var reflectionMachineTargets = map[string]bool{
 	// comment block, found the same way (auditing the full 19-package
 	// corpus's aggregated checker findings).
 	"System.Activator::CreateInstance": true,
+	// Type.GetFields()/GetMethods() (plural, Fase 3.56) — real
+	// machineRegistry entries (internal/interpreter/reflection.go's
+	// typeGetFields/typeGetMethods) mirroring the exact same gap this
+	// map's own GetProperties/GetConstructors entries already fixed once
+	// for their own plural reflection methods.
+	"System.Type::GetFields":  true,
+	"System.Type::GetMethods": true,
 }
 
 // asyncMachineTargets lists the async-related methods resolved through

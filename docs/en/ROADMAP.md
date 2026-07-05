@@ -4752,6 +4752,44 @@ go test ./...
 ```
 
 ---
+### Fase 3.58 — closing the corpus-wide sweep: `Type.GetFields`/`GetMethods` checker parity, final numbers
+
+**Goal:** Fase 3.56 added real, working `Type.GetFields()`/`GetMethods()` (plural) natives but —
+matching the exact same class of gap this whole sweep (Fase 3.54-3.57) kept finding — never
+mirrored them into the checker's own `reflectionMachineTargets` allowlist. Of everything Fase
+3.55-3.57 added, this was the ONLY entry actually needing a checker-side fix: every other native
+those three passes registered is a plain `bcl.Native` (`register(...)`), which the checker already
+recognizes automatically via `bcl.Lookup` with no allowlist entry required at all — `GetFields`/
+`GetMethods` are the sole two resolved through the Machine-aware `machineRegistry` instead (the
+same reason `GetProperties`/`GetConstructors` needed their own entries in Fase 3.51/3.52).
+
+- [x] `System.Type::GetFields`/`GetMethods` added to `reflectionMachineTargets`.
+
+**Result — the full corpus-wide sweep (Fase 3.54-3.58), final numbers**: simple average across
+all 19 tracked packages moved from 93.9% to **94.45%**. `FluentValidation` crossed the 97%
+individual-package target during this sweep (97.0%, up from 96.4%) — the working target this
+project holds itself to is 97%+ per package, not a corpus average (an average can hide a
+badly-covered package that breaks the moment someone depends on it) — bringing the count of
+packages at or above that bar to 5 of 19 (`DocumentFormat.OpenXml` 100.0%, `Humanizer.Core` 97.9%,
+`NPOI` 97.9%, `Ardalis.GuardClauses` 97.5%, `FluentValidation` 97.0%). See
+`docs/en/COMPATIBILITY.md` for the complete, freshly re-measured per-package table.
+
+Notably, this entire sweep (five real fixing passes plus this closing checker-parity fix) started
+from one single artifact: aggregating the checker's own findings across the full 19-package corpus
+by real callee instead of per-package, so a callee flagged in many packages at once surfaced as
+the highest-leverage thing to fix next — the same methodology is reusable for whatever the next
+priority sweep turns out to be.
+
+### How to verify Fase 3.58
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+```
+
+---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 
 **Goal:** turn the functional engine into an adoptable product — reliable, documented, and

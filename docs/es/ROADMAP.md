@@ -4914,6 +4914,47 @@ go test ./...
 ```
 
 ---
+### Fase 3.58 — cerrando el barrido de todo el corpus: paridad de checker para `Type.GetFields`/`GetMethods`, números finales
+
+**Objetivo:** la Fase 3.56 agregó nativos reales y funcionales de `Type.GetFields()`/`GetMethods()`
+(plural) pero — igualando exactamente la misma clase de brecha que todo este barrido (Fases
+3.54-3.57) seguía encontrando — nunca los reflejó en el propio allowlist `reflectionMachineTargets`
+del checker. De todo lo que agregaron las Fases 3.55-3.57, esta fue la ÚNICA entrada que en
+realidad necesitaba un fix del lado del checker: cada otro nativo que esos tres pases registraron
+es un `bcl.Native` simple (`register(...)`), que el checker ya reconoce automáticamente vía
+`bcl.Lookup` sin necesitar ninguna entrada de allowlist — `GetFields`/`GetMethods` son las únicas
+dos resueltas a través del `machineRegistry` Machine-aware en su lugar (la misma razón por la que
+`GetProperties`/`GetConstructors` necesitaron sus propias entradas en las Fases 3.51/3.52).
+
+- [x] `System.Type::GetFields`/`GetMethods` agregados a `reflectionMachineTargets`.
+
+**Resultado — el barrido completo de todo el corpus (Fases 3.54-3.58), números finales**: el
+promedio simple entre los 19 paquetes rastreados pasó de 93.9% a **94.45%**. `FluentValidation`
+cruzó el objetivo individual del 97% durante este barrido (97.0%, subiendo de 96.4%) — el objetivo
+de trabajo que este proyecto se exige es 97%+ por paquete, no un promedio de todo el corpus (un
+promedio puede esconder un paquete mal cubierto que se rompe en el instante en que alguien
+realmente depende de él) — llevando la cuenta de paquetes en o por arriba de esa vara a 5 de 19
+(`DocumentFormat.OpenXml` 100.0%, `Humanizer.Core` 97.9%, `NPOI` 97.9%, `Ardalis.GuardClauses`
+97.5%, `FluentValidation` 97.0%). Ver `docs/en/COMPATIBILITY.md` para la tabla completa por
+paquete, re-medida de forma fresca.
+
+Vale la pena notar que todo este barrido (cinco pases reales de arreglos más este fix de cierre de
+paridad del checker) arrancó de un solo artefacto: agregar los propios hallazgos del checker en
+todo el corpus de 19 paquetes por callee real en vez de por paquete, así un callee marcado en
+muchos paquetes a la vez salía a la luz como lo de mayor apalancamiento para arreglar a
+continuación — la misma metodología es reusable para lo que resulte ser el próximo barrido de
+prioridad.
+
+### Cómo verificar Fase 3.58
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+```
+
+---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
 

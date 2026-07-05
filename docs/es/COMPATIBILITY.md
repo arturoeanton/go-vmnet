@@ -32,12 +32,12 @@ tres separadas, a propósito, para cada paquete contra el que se mide vmnet.
 | Paquete | % de checker | Demo | Confianza |
 |---|---|---|---|
 | `DocumentFormat.OpenXml@3.1.1` | 100.0% (67.234 métodos, 7 marcados) | [`examples/openxml-demo`](../../examples/openxml-demo) | **Verificado.** Genera un `.docx` real desde cero; la salida se verifica abriéndola de vuelta con el SDK de .NET real, sin modificar — no solo que vmnet produjo *algunos* bytes. |
-| `NPOI@2.8.0` | 97.8% (14.202 métodos, 311 marcados) | [`examples/npoi-demo`](../../examples/npoi-demo) | **Verificado.** Lee un archivo `.xls` legacy real de punta a punta (strings, números, una celda con fórmula `SUM`); queda una brecha cosmética conocida y documentada (el texto del rango de celdas de la fórmula renderiza puntos de código numéricos en vez de letras de columna — los *valores* de celda son correctos). |
-| `Dapper@2.1.79` | 93.7% (1.047 métodos, 66 marcados) | [`examples/dapper-demo`](../../examples/dapper-demo), [`examples/sqlite-demo`](../../examples/sqlite-demo) | **Verificado, de dos formas.** `dapper-demo` corre el propio `SqlMapper.Query`/`Execute` real de Dapper contra un proveedor ADO.NET fake en memoria; `sqlite-demo` corre el mismo código real de Dapper contra el propio proveedor `Microsoft.Data.Sqlite` real y nativo en Go de vmnet, y después reabre de forma independiente el archivo `.db` resultante con el CLI real `sqlite3` y corre `PRAGMA integrity_check`. Quedan dos brechas arquitectónicas reales, permanentes y documentadas (una limitación de `typeof(T)` en métodos genéricos, y una feature de regex de Dapper que el motor RE2 de Go nunca puede compilar) — ver `docs/en/ROADMAP.md` Fase 3.52/3.53. |
-| `ClosedXML@0.105.0` | 96.4% (10.444 métodos, 379 marcados) | [`examples/closedxml-demo`](../../examples/closedxml-demo) | **Verificado**, con una salvedad honesta: un pequeño wrapper de C# compilado provee un `IXLGraphicEngine` mínimo, porque el propio motor de métricas de fuente por defecto de ClosedXML choca contra una limitación arquitectónica real y profunda (sustitución de parámetro de tipo genérico dentro de los propios inicializadores de campo estático de una clase genérica) sin relación con leer datos de celda en sí. Lee un `.xlsx` real correctamente; también fue el sujeto de un cuelgue no determinista real y arreglado (Fase 3.44) — ahora estable a través de corridas repetidas. |
-| `System.Text.Json@8.0.5` | 96.1% (3.577 métodos, 140 marcados) | [`examples/system-text-json-demo`](../../examples/system-text-json-demo) | **Verificado.** Parsea JSON real a través de la propia API real de `JsonDocument`, confirmado contra la salida real de .NET. |
-| `Jint@3.1.3` | 95.4% (5.414 métodos, 249 marcados) | [`examples/jint-demo`](../../examples/jint-demo), [`examples/jint-nowrapper`](../../examples/jint-nowrapper) | **Verificado.** Corre un motor de JavaScript real de punta a punta — parsea código JS real, construye un AST real, lo evalúa, y devuelve un resultado real — tanto a través de un wrapper compilado como con cero pegamento de C#. La evidencia más fuerte de que vmnet maneja código real genuinamente no trivial y profundamente orientado a objetos, no solo bibliotecas pequeñas de métodos estáticos. |
-| `Newtonsoft.Json@13.0.3` | 85.3% (4.064 métodos, 597 marcados) | [`examples/newtonsoft-json-demo`](../../examples/newtonsoft-json-demo) | **Verificado para el camino demostrado** (parseo real del DOM "LINQ to JSON" y acceso por indexador), pero el % de checker más bajo de cualquier paquete con demo — su superficie de tipado dinámico basada en `Dynamic`/`ExpandoObject` (`JValue+JValueDynamicProxy`) es una brecha real y no implementada que el demo no ejercita. No leas que el demo pase como "todo este paquete funciona". |
+| `NPOI@2.8.0` | 97.9% (14.202 métodos, 292 marcados) | [`examples/npoi-demo`](../../examples/npoi-demo) | **Verificado.** Lee un archivo `.xls` legacy real de punta a punta (strings, números, una celda con fórmula `SUM`); queda una brecha cosmética conocida y documentada (el texto del rango de celdas de la fórmula renderiza puntos de código numéricos en vez de letras de columna — los *valores* de celda son correctos). |
+| `Dapper@2.1.79` | 94.5% (1.047 métodos, 58 marcados) | [`examples/dapper-demo`](../../examples/dapper-demo), [`examples/sqlite-demo`](../../examples/sqlite-demo) | **Verificado, de dos formas.** `dapper-demo` corre el propio `SqlMapper.Query`/`Execute` real de Dapper contra un proveedor ADO.NET fake en memoria; `sqlite-demo` corre el mismo código real de Dapper contra el propio proveedor `Microsoft.Data.Sqlite` real y nativo en Go de vmnet, y después reabre de forma independiente el archivo `.db` resultante con el CLI real `sqlite3` y corre `PRAGMA integrity_check`. Quedan dos brechas arquitectónicas reales, permanentes y documentadas (una limitación de `typeof(T)` en métodos genéricos, y una feature de regex de Dapper que el motor RE2 de Go nunca puede compilar) — ver `docs/en/ROADMAP.md` Fase 3.52/3.53. |
+| `ClosedXML@0.105.0` | 96.7% (10.444 métodos, 340 marcados) | [`examples/closedxml-demo`](../../examples/closedxml-demo) | **Verificado**, con una salvedad honesta: un pequeño wrapper de C# compilado provee un `IXLGraphicEngine` mínimo, porque el propio motor de métricas de fuente por defecto de ClosedXML choca contra una limitación arquitectónica real y profunda (sustitución de parámetro de tipo genérico dentro de los propios inicializadores de campo estático de una clase genérica) sin relación con leer datos de celda en sí. Lee un `.xlsx` real correctamente; también fue el sujeto de un cuelgue no determinista real y arreglado (Fase 3.44) — ahora estable a través de corridas repetidas. |
+| `System.Text.Json@8.0.5` | 96.5% (3.577 métodos, 124 marcados) | [`examples/system-text-json-demo`](../../examples/system-text-json-demo) | **Verificado.** Parsea JSON real a través de la propia API real de `JsonDocument`, confirmado contra la salida real de .NET. |
+| `Jint@3.1.3` | 95.8% (5.414 métodos, 228 marcados) | [`examples/jint-demo`](../../examples/jint-demo), [`examples/jint-nowrapper`](../../examples/jint-nowrapper) | **Verificado.** Corre un motor de JavaScript real de punta a punta — parsea código JS real, construye un AST real, lo evalúa, y devuelve un resultado real — tanto a través de un wrapper compilado como con cero pegamento de C#. La evidencia más fuerte de que vmnet maneja código real genuinamente no trivial y profundamente orientado a objetos, no solo bibliotecas pequeñas de métodos estáticos. |
+| `Newtonsoft.Json@13.0.3` | 85.6% (4.064 métodos, 585 marcados) | [`examples/newtonsoft-json-demo`](../../examples/newtonsoft-json-demo) | **Verificado para el camino demostrado** (parseo real del DOM "LINQ to JSON" y acceso por indexador), pero el % de checker más bajo de cualquier paquete con demo — su superficie de tipado dinámico basada en `Dynamic`/`ExpandoObject` (`JValue+JValueDynamicProxy`) es una brecha real y no implementada que el demo no ejercita. No leas que el demo pase como "todo este paquete funciona". |
 
 ## Paquetes medidos solo por el checker (todavía sin demo)
 
@@ -49,24 +49,28 @@ funciona.
 
 | Paquete | % de checker | Confianza |
 |---|---|---|
-| `Humanizer.Core@2.14.1` | 97.5% (1.597 métodos, 40 marcados) | Estimación de cobertura alta; no verificado por una corrida real. |
+| `Humanizer.Core@2.14.1` | 97.9% (1.597 métodos, 34 marcados) | Estimación de cobertura alta; no verificado por una corrida real. |
 | `Ardalis.GuardClauses@5.0.0` | 97.5% (285 métodos, 7 marcados) | Estimación de cobertura alta; no verificado por una corrida real. |
-| `FluentValidation@11.9.2` | 96.4% (1.289 métodos, 46 marcados) | Estimación de cobertura alta; no verificado por una corrida real. |
+| `FluentValidation@11.9.2` | 97.0% (1.289 métodos, 39 marcados) | Estimación de cobertura alta; no verificado por una corrida real. |
 | `Polly@8.7.0` | 95.5% (2.049 métodos, 92 marcados) | Estimación de cobertura alta; no verificado por una corrida real. |
-| `NodaTime@3.3.2` | 94.3% (3.098 métodos, 177 marcados) | Estimación de cobertura alta; no verificado por una corrida real. |
-| `YamlDotNet@18.1.0` | 93.9% (2.182 métodos, 133 marcados) | Buena estimación de cobertura; no verificado por una corrida real. |
+| `NodaTime@3.3.2` | 94.3% (3.098 métodos, 176 marcados) | Estimación de cobertura alta; no verificado por una corrida real. |
+| `YamlDotNet@18.1.0` | 94.9% (2.182 métodos, 112 marcados) | Buena estimación de cobertura; no verificado por una corrida real. |
 | `Semver@2.3.0` | 92.9% (423 métodos, 30 marcados) | Buena estimación de cobertura; no verificado por una corrida real. |
 | `SimpleBase@4.0.0` | 92.2% (258 métodos, 20 marcados) | Buena estimación de cobertura; no verificado por una corrida real. |
-| `Serilog@4.3.1` | 91.4% (1.115 métodos, 96 marcados) | Buena estimación de cobertura; no verificado por una corrida real. |
-| `CsvHelper@33.1.0` | 91.4% (1.393 métodos, 120 marcados) | Buena estimación de cobertura; no verificado por una corrida real. |
-| `MediatR@14.2.0` | 89.3% (441 métodos, 47 marcados) | Estimación de cobertura moderada; no verificado por una corrida real. |
-| `AutoMapper@16.2.0` | 87.0% (2.319 métodos, 301 marcados) | Su propia generación pesada de planes de mapeo basada en `System.Linq.Expressions`/`Expression.Compile()` es una fuente real y probable de la brecha restante — tratá este número como más optimista que los demás de esta tabla hasta que un demo real lo ejercite. |
+| `Serilog@4.3.1` | 92.1% (1.115 métodos, 88 marcados) | Buena estimación de cobertura; no verificado por una corrida real. |
+| `CsvHelper@33.1.0` | 91.8% (1.393 métodos, 114 marcados) | Buena estimación de cobertura; no verificado por una corrida real. |
+| `MediatR@14.2.0` | 93.0% (441 métodos, 31 marcados) | Estimación de cobertura moderada; no verificado por una corrida real. |
+| `AutoMapper@16.2.0` | 88.3% (2.319 métodos, 271 marcados) | Su propia generación pesada de planes de mapeo basada en `System.Linq.Expressions`/`Expression.Compile()` es una fuente real y probable de la brecha restante — tratá este número como más optimista que los demás de esta tabla hasta que un demo real lo ejercite. |
 
 ## Números agregados, y por qué el número por paquete importa más
 
-- **Promedio simple entre los 19 paquetes: 93.9%.**
-- **Promedio ponderado por métodos: ~98%** — pero está dominado por los propios 67.234 métodos
-  analizados de `DocumentFormat.OpenXml` (62% de cada método analizado entre los 19 paquetes
+- **Promedio simple entre los 19 paquetes: 94.45%** (subiendo del 93.9% antes del barrido de
+  prioridad de todo el corpus de la Fase 3.54-3.58 — ver `docs/en/ROADMAP.md` para la propia
+  metodología de ese barrido: agregar los hallazgos del checker en TODO el corpus por callee real,
+  no por paquete, así un callee marcado en muchos paquetes a la vez sale a la luz como lo de mayor
+  apalancamiento para arreglar a continuación).
+- **Promedio ponderado por métodos: ~97.8%** — pero está dominado por los propios 67.234 métodos
+  analizados de `DocumentFormat.OpenXml` (55% de cada método analizado entre los 19 paquetes
   combinados) sentados en 100%. Un promedio ponderado responde "qué fracción de todas las llamadas
   a métodos analizadas en todo este corpus resuelve", que es un número real pero no el que predice
   si *tu* paquete específico va a funcionar — el **número por paquete de arriba es el que
@@ -74,10 +78,10 @@ funciona.
 - El objetivo de trabajo para cada paquete acá es **97%+, individualmente** — no un promedio de
   todo el corpus. Un promedio puede esconder un paquete mal cubierto que se rompe en el instante en
   que alguien realmente depende de él, aunque otros paquetes lo compensen en la media. Al momento
-  de escribir esto, 4 de 19 paquetes están en o por arriba de esa vara (`DocumentFormat.OpenXml`,
-  `NPOI`, `Ardalis.GuardClauses`, `Humanizer.Core`); el resto son objetivos activos de
-  endurecimiento, priorizados por cuánto están por debajo del 97% y por cuánto uso real del mundo
-  representan.
+  de escribir esto, 5 de 19 paquetes están en o por arriba de esa vara (`DocumentFormat.OpenXml`
+  100.0%, `Humanizer.Core` 97.9%, `NPOI` 97.9%, `Ardalis.GuardClauses` 97.5%, `FluentValidation`
+  97.0%); el resto son objetivos activos de endurecimiento, priorizados por cuánto están por
+  debajo del 97% y por cuánto uso real del mundo representan.
 
 ## Metodología y reproducibilidad
 
