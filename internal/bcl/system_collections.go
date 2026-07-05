@@ -194,6 +194,7 @@ func init() {
 	register("System.Collections.Generic.List`1::Insert", false, listInsert)
 	register("System.Collections.Generic.List`1::Clear", false, listClear)
 	register("System.Collections.Generic.List`1::Remove", true, listRemove)
+	register("System.Collections.Generic.List`1::IndexOf", true, listIndexOf)
 	register("System.Collections.Generic.List`1::Reverse", false, listReverse)
 	register("System.Collections.Generic.List`1::GetEnumerator", true, listGetEnumerator)
 	register("System.Collections.Generic.List`1+Enumerator::MoveNext", true, listEnumeratorMoveNext)
@@ -292,6 +293,7 @@ func init() {
 	register("System.Collections.ArrayList::Insert", false, listInsert)
 	register("System.Collections.ArrayList::Clear", false, listClear)
 	register("System.Collections.ArrayList::Remove", true, listRemove)
+	register("System.Collections.ArrayList::IndexOf", true, listIndexOf)
 	register("System.Collections.ArrayList::GetEnumerator", true, listGetEnumerator)
 
 	// System.Collections.Hashtable is the legacy, non-generic
@@ -764,6 +766,33 @@ func listRemove(args []runtime.Value) (runtime.Value, error) {
 		}
 	}
 	return runtime.Bool(false), nil
+}
+
+// listIndexOf backs List<T>.IndexOf(T) (and ArrayList.IndexOf(object) —
+// same nativeList, same reasoning as every other method this pair
+// shares): the first index whose element is equal to args[1] under the
+// same notion of equality Contains/Remove already use (valuesEqual —
+// reference identity for object/array/struct-shaped values, value
+// equality for primitives/strings), or -1 on a miss, matching real
+// List<T>.IndexOf's documented return value exactly (found missing via a
+// real, load-bearing case: several packages look up an already-known
+// element's position — e.g. to compute a neighbor via `list[list.
+// IndexOf(x) + 1]` — rather than tracking the index alongside it
+// separately).
+func listIndexOf(args []runtime.Value) (runtime.Value, error) {
+	l, err := asList(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("bcl: List.IndexOf expects 1 argument")
+	}
+	for i, item := range l.items {
+		if valuesEqual(item, args[1]) {
+			return runtime.Int32(int32(i)), nil
+		}
+	}
+	return runtime.Int32(-1), nil
 }
 
 func asDict(args []runtime.Value) (*nativeDict, error) {

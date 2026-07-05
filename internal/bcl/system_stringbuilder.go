@@ -45,6 +45,23 @@ func init() {
 	register("System.Text.StringBuilder::Insert", true, sbInsert)
 	register("System.Text.StringBuilder::ToString", true, sbToString)
 	register("System.Text.StringBuilder::get_Length", true, sbLength)
+	// set_Length (Fase 3.53) is genuinely bidirectional in real
+	// StringBuilder, not just a truncation shortcut: assigning a value
+	// LARGER than the current length PADS with '\0' characters rather
+	// than throwing or leaving the tail uninitialized — confirmed against
+	// real `dotnet run` output (`sb.Length = 6` on a 3-char buffer, then
+	// reading each char back, prints three literal NUL characters,
+	// (int)'\0' == 0 — not an exception, not left as whatever garbage a
+	// naive append-only backing might have). Negative is the one real
+	// error case (ArgumentOutOfRangeException).
+	register("System.Text.StringBuilder::set_Length", false, sbSetLength)
+	// get_Chars (the `sb[i]` indexer getter, Fase 3.53) — same rune-position
+	// indexing as sbInsert's own index argument (get_Length's own rune-count
+	// semantics), not a byte offset. Real StringBuilder's indexer setter
+	// (set_Chars) has no known load-bearing call site in this loop's target
+	// packages, so only the getter is wired up here — same "cover what's
+	// actually used" posture listReverse's own doc comment already takes.
+	register("System.Text.StringBuilder::get_Chars", true, sbGetChars)
 	register("System.Text.StringBuilder::Clear", true, sbClear)
 	// Capacity: vmnet's StringBuilder auto-grows with no separate,
 	// meaningfully distinct notion of "allocated but unused" capacity to
@@ -168,4 +185,57 @@ func sbClear(args []runtime.Value) (runtime.Value, error) {
 	}
 	sb.buf = ""
 	return args[0], nil
+}
+
+// sbGetChars backs the `sb[i]` indexer getter — a rune position into buf,
+// same convention sbInsert's own index argument already uses. Real
+// StringBuilder[int] throws ArgumentOutOfRangeException (not String's own
+// IndexOutOfRangeException — stringGetChars, system_string.go) on a bad
+// index; the two BCL types simply disagree on which exception their
+// respective indexers raise.
+func sbGetChars(args []runtime.Value) (runtime.Value, error) {
+	sb, err := asStringBuilder(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	if len(args) != 2 || args[1].Kind != runtime.KindI4 {
+		return runtime.Value{}, fmt.Errorf("bcl: StringBuilder indexer expects an int32 index")
+	}
+	current := []rune(sb.buf)
+	idx := int(args[1].I4)
+	if idx < 0 || idx >= len(current) {
+		return runtime.Value{}, &runtime.ManagedException{TypeName: "System.ArgumentOutOfRangeException", Message: "Index was out of range. Must be non-negative and less than the size of the collection."}
+	}
+	return runtime.Int32(current[idx]), nil
+}
+
+// sbSetLength backs the Length property setter — see the register() call
+// site's own doc comment for why growing pads with '\0' rather than
+// erroring or leaving anything uninitialized (real, confirmed CLR
+// behavior, not assumed). Shrinking is a plain rune-slice truncation,
+// same rune-position convention every other index into buf already uses.
+func sbSetLength(args []runtime.Value) (runtime.Value, error) {
+	sb, err := asStringBuilder(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	if len(args) != 2 || args[1].Kind != runtime.KindI4 {
+		return runtime.Value{}, fmt.Errorf("bcl: StringBuilder.set_Length expects an int32 length")
+	}
+	n := int(args[1].I4)
+	if n < 0 {
+		return runtime.Value{}, &runtime.ManagedException{TypeName: "System.ArgumentOutOfRangeException", Message: "Length must be non-negative."}
+	}
+	current := []rune(sb.buf)
+	switch {
+	case n <= len(current):
+		sb.buf = string(current[:n])
+	default:
+		padded := make([]rune, n)
+		copy(padded, current)
+		// The zero value of `rune` is already 0 ('\0') — Go's make()
+		// zero-initializes the tail, so no explicit fill loop is needed.
+		sb.buf = string(padded)
+	}
+	return runtime.Value{}, nil
 }

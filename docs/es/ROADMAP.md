@@ -4727,6 +4727,57 @@ go test ./...
 ```
 
 ---
+### Fase 3.55 — cuatro brechas de BCL pequeñas y mecánicas del barrido de prioridad del corpus completo
+
+**Objetivo:** continuando el barrido de hallazgos agregados de todo el corpus (Fase 3.54), cuatro
+brechas reales más, verificadas de forma independiente — `List<T>.IndexOf`, el indexador/setter
+de `Length` de `StringBuilder`, `Regex.Matches`, y `Decimal.ToString` — cada una confirmada contra
+la salida real de `dotnet run` antes de implementarla.
+
+- [x] `List<T>.IndexOf(T)` (también conectado al `ArrayList.IndexOf` legacy) — un escaneo lineal
+      simple reusando el helper `valuesEqual` ya existente que comparten todos los demás métodos
+      de `List<T>` basados en igualdad.
+- [x] `StringBuilder[int]` (getter del indexador) y `StringBuilder.Length` (setter — el getter ya
+      existía) — ambos operan sobre el mismo backing store que ya usan `Append`/`ToString`/etc. El
+      comportamiento real de .NET del setter cuando CRECE (no solo trunca) es rellenar con
+      caracteres `'\0'`, no lanzar excepción ni dejar basura — confirmado contra la salida real de
+      `dotnet run` en vez de asumido.
+- [x] `Regex.Matches(string)` — el método plural, todas las coincidencias (`Match` ya era real).
+      Su tipo de retorno real, `MatchCollection`, no necesitó ningún struct nuevo: se reusó el
+      `*nativeList` ya existente (el mismo truco que ya usa `ArrayList` para reusar los propios
+      nativos de `List<T>`), exponiendo solo `get_Count`/`GetEnumerator` — el uso real del mundo
+      real que este corpus ejercita. Salió a la luz un bug real y separado verificando esto:
+      `foreach (Match m in regex.Matches(s))` castea cada `Current` (tipado `object`, ya que
+      `MatchCollection.GetEnumerator()` devuelve el `IEnumerator` no genérico) hacia `Match` — y
+      `*nativeMatchVal` (el wrapper de `Match`) no tenía ninguna entrada en `NativeTypeName`, así
+      que cada uno de esos casts lanzaba `InvalidCastException` incondicionalmente, sin importar
+      `Matches` en sí. Arreglado junto con esto.
+- [x] `Decimal.ToString()`/`ToString(format)` — más grande de lo que parecía: `System.Decimal` no
+      tenía **ningún constructor registrado en absoluto**, así que incluso `decimal d = 1234.5m;`
+      fallaba de inmediato en `System.Decimal::.ctor`, mucho antes de siquiera llegar a
+      `ToString`. Se agregó el constructor real de 5 enteros `(lo, mid, hi, isNegative, scale)`
+      (confirmado vía una sonda real: esto es exactamente lo que el compilador emite para un
+      literal `decimal`) más las sobrecargas `int`/`long`/`float`/`double`/sin parámetros, todas
+      plegándose a la representación `KindR8` ya existente según el alcance ya documentado de "sin
+      representación distinta de `Decimal`" de este código (el propio comentario de `system_data_
+      sqlite.go`, Fase 3.53). `ToString` después reusa `doubleToString` textualmente.
+
+**Encontrado, no arreglado** (genuinamente fuera del alcance angosto de esta ronda, no
+descuidos): los operadores aritméticos de `Decimal` (`op_Addition` etc.) y la sobrecarga de
+constructor con array de bits `int[]` siguen sin implementar — no se encontró ningún sitio de
+llamada real para la sobrecarga de array de bits en este corpus, y los operadores aritméticos no
+formaban parte de lo que pedían los hallazgos de esta ronda, limitados a `ToString`.
+
+### Cómo verificar Fase 3.55
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+```
+
+---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
 

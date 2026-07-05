@@ -252,6 +252,18 @@ func NativeTypeName(native any) (string, bool) {
 		return "Microsoft.Data.Sqlite.SqliteParameterCollection", true
 	case *nativeSqliteTransaction:
 		return "Microsoft.Data.Sqlite.SqliteTransaction", true
+	case *nativeMatchVal:
+		// Regex.Matches's real return type, MatchCollection, declares
+		// GetEnumerator() -> IEnumerator (the non-generic interface,
+		// Current: object — confirmed against real .NET metadata before
+		// assuming it), so `foreach (Match m in regex.Matches(s))`
+		// compiles a `castclass System.Text.RegularExpressions.Match`
+		// against every element Current yields, unlike the singular
+		// Match(string) call (already the declared static type, no cast
+		// at all). Missing this case made that cast throw
+		// InvalidCastException unconditionally — found via this exact
+		// hardening pass's own probe fixture, not assumed (Fase 3.53).
+		return "System.Text.RegularExpressions.Match", true
 	case *runtime.ManagedException:
 		// A bare exception object (no TypeDef — either a plain BCL
 		// exception type like ArgumentException, or ex.Object unset

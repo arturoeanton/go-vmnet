@@ -4580,6 +4580,54 @@ go test ./...
 ```
 
 ---
+### Fase 3.55 — four small, mechanical BCL gaps from the corpus-wide priority sweep
+
+**Goal:** continuing the corpus-wide aggregated-findings sweep (Fase 3.54), four more real,
+independently verified gaps — `List<T>.IndexOf`, `StringBuilder`'s indexer/`Length` setter,
+`Regex.Matches`, and `Decimal.ToString` — each confirmed against real `dotnet run` output before
+being implemented.
+
+- [x] `List<T>.IndexOf(T)` (also wired to the legacy `ArrayList.IndexOf`) — a plain linear scan
+      reusing the existing `valuesEqual` helper every other equality-based `List<T>` method
+      already shares.
+- [x] `StringBuilder[int]` (indexer getter) and `StringBuilder.Length` (setter — the getter
+      already existed) — both operate on the same backing store `Append`/`ToString`/etc. already
+      use. The setter's real .NET behavior when GROWING (not just truncating) is to pad with
+      `'\0'` characters, not throw or leave garbage — confirmed against real `dotnet run` output
+      rather than assumed.
+- [x] `Regex.Matches(string)` — the plural, all-matches method (`Match` was already real). Its
+      real return type, `MatchCollection`, needed no new struct: reused the existing `*nativeList`
+      (the same trick `ArrayList` already takes to reuse `List<T>`'s own natives), exposing only
+      `get_Count`/`GetEnumerator` — the actual real-world usage this corpus exercises. Surfaced a
+      real, separate bug while verifying: `foreach (Match m in regex.Matches(s))` casts each
+      `Current` (typed `object`, since `MatchCollection.GetEnumerator()` returns the non-generic
+      `IEnumerator`) down to `Match` — and `*nativeMatchVal` (the `Match` wrapper) had no
+      `NativeTypeName` entry at all, so every such cast threw `InvalidCastException`
+      unconditionally, regardless of `Matches` itself. Fixed alongside it.
+- [x] `Decimal.ToString()`/`ToString(format)` — bigger than it looked: `System.Decimal` had **no
+      constructor registered at all**, so even `decimal d = 1234.5m;` failed immediately at
+      `System.Decimal::.ctor`, long before ever reaching `ToString`. Added the real 5-int `(lo,
+      mid, hi, isNegative, scale)` constructor (confirmed via a real probe: this is exactly what
+      the compiler emits for a `decimal` literal) plus the `int`/`long`/`float`/`double`/
+      parameterless overloads, all collapsing to the existing `KindR8` representation per this
+      codebase's already-documented "no distinct `Decimal` representation" scope (`system_data_
+      sqlite.go`'s own doc comment, Fase 3.53). `ToString` then reuses `doubleToString` verbatim.
+
+**Found, not fixed** (genuinely out of this round's narrow scope, not oversights): `Decimal`'s
+arithmetic operators (`op_Addition` etc.) and the `int[]` bits-array constructor overload remain
+unimplemented — no real call site for the bits-array overload was found in this corpus, and
+arithmetic operators weren't part of what this round's `ToString`-only findings called for.
+
+### How to verify Fase 3.55
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+```
+
+---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 
 **Goal:** turn the functional engine into an adoptable product — reliable, documented, and

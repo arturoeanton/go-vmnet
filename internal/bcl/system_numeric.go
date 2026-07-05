@@ -2,6 +2,7 @@ package bcl
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -63,6 +64,107 @@ func init() {
 	register("System.UInt32::ToString", true, uint32ToString)
 	register("System.UInt64::ToString", true, uint64ToString)
 	register("System.Single::ToString", true, singleToString)
+	// System.Decimal (Fase 3.53) — see decimalCtorInPlace's own doc
+	// comment for why this codebase's total lack of a distinct Decimal
+	// representation still lets ToString work correctly for every real
+	// value found in this loop's target packages: a decimal collapses to
+	// a plain KindR8 double, so its ToString is genuinely just
+	// doubleToString (system_misc.go) reused verbatim, not new numeric
+	// logic — formatValue's own "System.Double"/"System.Single"/
+	// "System.Decimal" formatting bucket (system_misc.go) already treats
+	// all three identically.
+	register("System.Decimal::.ctor", false, decimalCtorInPlace)
+	register("System.Decimal::ToString", true, doubleToString)
+}
+
+// decimalCtorInPlace backs every real System.Decimal instance constructor
+// overload, reached via `ldloca`+`call` — the compiler always initializes
+// a value-type local this way rather than `newobj`+`stloc` (same
+// established pattern DateTime/TimeSpan/KeyValuePair`2 already needed
+// their own ctor-in-place entry for; see system_collections.go's
+// keyValuePairCtorInPlace).
+//
+// vmnet has no dedicated Decimal Kind — System.Decimal still has no
+// distinct representation anywhere in this codebase (docs/en/ROADMAP.md;
+// system_data_sqlite.go's own GetDecimal doc comment already documents
+// the same gap for a SQLite column read as DbType.Decimal). Every decimal
+// value here collapses to a plain KindR8 double instead — the same
+// simplification formatValue's own composite-format bucket already makes
+// for "System.Decimal" formatting. That loses real decimal's exact
+// base-10 arithmetic and its 28-29 significant digits of precision for
+// genuinely huge/high-precision values, but every real constructor
+// argument found in this loop's target packages (ordinary prices,
+// quantities, totals — well within float64's own ~15-17 significant
+// digits) round-trips through it exactly fine.
+//
+// The 5-int (lo, mid, hi, isNegative, scale) overload is what the C#
+// compiler actually emits for every decimal LITERAL (`1234.5m` becomes
+// `ldc.i4 12345 ... ldc.i4.1 (scale) ... call instance void
+// System.Decimal::.ctor(int32, int32, int32, bool, uint8)`) — confirmed
+// against a real `dotnet run` probe before assuming it, not guessed — by
+// far the most common real shape. The narrower int/long/float/double
+// overloads (an implicit numeric-to-decimal conversion, or
+// Convert.ToDecimal) and the parameterless default(decimal)/`new
+// Decimal()` are also covered, since none of them cost anything extra
+// once the receiver-mutation plumbing already exists for the 5-int case.
+// The int[4] bits-array overload (interop with decimal.GetBits' own round
+// trip) is deliberately NOT covered — no real call site constructing a
+// Decimal that way was found in this loop's target packages.
+func decimalCtorInPlace(args []runtime.Value) (runtime.Value, error) {
+	if len(args) == 0 || args[0].Kind != runtime.KindRef || args[0].Ref == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: Decimal constructor called without a receiver")
+	}
+	var v float64
+	switch len(args) {
+	case 1:
+		// Decimal() / default(decimal) — no explicit value at all.
+		v = 0
+	case 2:
+		switch args[1].Kind {
+		case runtime.KindI4:
+			v = float64(args[1].I4)
+		case runtime.KindI8:
+			v = float64(args[1].I8)
+		case runtime.KindR4:
+			v = float64(args[1].R4)
+		case runtime.KindR8:
+			v = args[1].R8
+		default:
+			return runtime.Value{}, fmt.Errorf("bcl: System.Decimal constructor: unsupported single-argument kind %v", args[1].Kind)
+		}
+	case 6:
+		lo, mid, hi, isNegative, scale := args[1], args[2], args[3], args[4], args[5]
+		if lo.Kind != runtime.KindI4 || mid.Kind != runtime.KindI4 || hi.Kind != runtime.KindI4 || scale.Kind != runtime.KindI4 {
+			return runtime.Value{}, fmt.Errorf("bcl: System.Decimal(int,int,int,bool,byte) constructor: unsupported argument shape")
+		}
+		v = decimalFromBits(uint32(lo.I4), uint32(mid.I4), uint32(hi.I4), isNegative.Truthy(), uint(scale.I4))
+	default:
+		return runtime.Value{}, fmt.Errorf("bcl: System.Decimal constructor: unsupported argument count %d", len(args)-1)
+	}
+	*args[0].Ref = runtime.Float64(v)
+	return runtime.Value{}, nil
+}
+
+// decimalFromBits reconstructs the double this codebase approximates a
+// decimal with from its real (lo, mid, hi, isNegative, scale) 96-bit
+// mantissa + scale representation — exactly what a decimal literal's
+// compiled constructor call passes (decimalCtorInPlace's own doc
+// comment). The 96-bit unsigned mantissa (hi:mid:lo, each a uint32) is
+// combined as a plain float64 expression rather than via exact 96-bit
+// integer math (e.g. math/big): float64 already only has ~15-17
+// significant decimal digits, so doing exact integer arithmetic first and
+// converting to float64 only at the very end would still lose precision
+// at that same final step — no accuracy is actually gained by the extra
+// complexity given this codebase's already-lossy decimal-as-double
+// approximation.
+func decimalFromBits(lo, mid, hi uint32, isNegative bool, scale uint) float64 {
+	const twoPow32 = 4294967296.0
+	mantissa := float64(hi)*twoPow32*twoPow32 + float64(mid)*twoPow32 + float64(lo)
+	v := mantissa / math.Pow(10, float64(scale))
+	if isNegative {
+		v = -v
+	}
+	return v
 }
 
 // uint32ToString backs UInt32.ToString([format]) — UNLIKE SByte/UInt16

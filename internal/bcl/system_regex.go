@@ -60,6 +60,7 @@ func init() {
 	registerCtor("System.Text.RegularExpressions.Regex", regexCtor)
 	register("System.Text.RegularExpressions.Regex::IsMatch", true, regexIsMatch)
 	register("System.Text.RegularExpressions.Regex::Match", true, regexMatch)
+	register("System.Text.RegularExpressions.Regex::Matches", true, regexMatches)
 	register("System.Text.RegularExpressions.Regex::Replace", true, regexReplace)
 	// Regex.Escape(string) is a plain static string transform, no Machine
 	// access needed — Go's regexp.QuoteMeta escapes a slightly different
@@ -81,6 +82,20 @@ func init() {
 	// comment.
 	register("System.Text.RegularExpressions.Group::get_Success", true, groupGetSuccess)
 	register("System.Text.RegularExpressions.Capture::get_Value", true, groupGetValue)
+
+	// MatchCollection (Regex.Matches's real return type, Fase 3.53) needs
+	// no dedicated Go struct at all: it's backed by the exact same
+	// *nativeList every List<T>/ArrayList already use, tagged with its own
+	// real type name — the identical reuse trick ArrayList's own
+	// registration above already applies to List`1's natives (see that
+	// register() block's doc comment: "Machine.call's virtual dispatch
+	// tries the receiver's actual concrete struct type first"). Only
+	// get_Count/GetEnumerator are wired up — the overwhelmingly common real
+	// usage is `foreach (Match m in regex.Matches(s))`, and indexer/other
+	// ICollection members have no known load-bearing call site in this
+	// loop's target packages.
+	register("System.Text.RegularExpressions.MatchCollection::get_Count", true, listCount)
+	register("System.Text.RegularExpressions.MatchCollection::GetEnumerator", true, listGetEnumerator)
 }
 
 func regexEscape(args []runtime.Value) (runtime.Value, error) {
@@ -204,6 +219,15 @@ func buildMatchVal(re *regexp.Regexp, input string) *nativeMatchVal {
 	if loc == nil {
 		return &nativeMatchVal{groups: []nativeGroupVal{{success: false}}}
 	}
+	return matchValFromLoc(loc, input)
+}
+
+// matchValFromLoc turns one FindStringSubmatchIndex-shaped index-pair
+// slice into a Match — factored out of buildMatchVal so regexMatches
+// (below) can build a whole collection of these from
+// FindAllStringSubmatchIndex without duplicating the per-match group
+// conversion.
+func matchValFromLoc(loc []int, input string) *nativeMatchVal {
 	groups := make([]nativeGroupVal, len(loc)/2)
 	for i := range groups {
 		start, end := loc[2*i], loc[2*i+1]
@@ -214,6 +238,31 @@ func buildMatchVal(re *regexp.Regexp, input string) *nativeMatchVal {
 		groups[i] = nativeGroupVal{success: true, value: input[start:end]}
 	}
 	return &nativeMatchVal{groups: groups}
+}
+
+// regexMatches backs Regex.Matches(string) — the plural method, distinct
+// from Match(string) above: every non-overlapping match in the input, not
+// just the first. FindAllStringSubmatchIndex(input, -1) (-1 = unlimited)
+// is Go's own direct equivalent, and already returns nil (zero matches)
+// rather than a one-element "no match" sentinel the way
+// FindStringSubmatchIndex does for the singular case — so, unlike
+// buildMatchVal, there's no separate empty-collection special case to
+// write here at all; a nil locs slice already turns into a correctly
+// empty MatchCollection via make([]runtime.Value, 0).
+func regexMatches(args []runtime.Value) (runtime.Value, error) {
+	re, input, err := resolveRegexAndInput(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	locs := re.FindAllStringSubmatchIndex(input, -1)
+	items := make([]runtime.Value, len(locs))
+	for i, loc := range locs {
+		items[i] = runtime.ObjRef(&runtime.Object{Native: matchValFromLoc(loc, input)})
+	}
+	return runtime.ObjRef(&runtime.Object{Native: &nativeList{
+		items:    items,
+		typeName: "System.Text.RegularExpressions.MatchCollection",
+	}}), nil
 }
 
 func asMatchVal(args []runtime.Value) (*nativeMatchVal, error) {
