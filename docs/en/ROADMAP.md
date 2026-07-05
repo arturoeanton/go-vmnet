@@ -5957,6 +5957,52 @@ cd benchmarks && dotnet build Bench.csproj -c Release && go run .
 ```
 
 ---
+## Fase 3.71 — freezing the public Go API, and a real semver commitment
+
+**Goal:** the last item of Priority 2 from this push's own planning pass — the public Go API had
+never been formally frozen or documented as a stable surface, and the project's git tags weren't
+valid semver at all, so a real Go module consumer had no meaningful way to `go get` a pinned
+release.
+
+**Result: `docs/en/api-stability.md`/`docs/es/api-stability.md`, a complete, current snapshot of
+every exported symbol in the root package with an explicit, concrete semver policy — plus the
+project's first real, valid semver git tag, `v0.1.0`, alongside the existing Fase-numbered tag on
+the same commit.**
+
+- **The frozen surface**: enumerated directly from `go doc -all .`'s own real output (not
+  hand-remembered) — three "verb" types (`VM`, `Assembly`, `Instance`), `Value` plus its six
+  constructors, `Error`/`Code` (spec §30, Fase 3.67), `Permissions` (spec's security model, Fase
+  3.59), and `NuGetManager`/`Package`. Deliberately small.
+- **The policy**: pre-1.0, so semver's own `0.y.z` rule technically permits anything to change —
+  narrowed down anyway to a concrete promise: a patch-equivalent release never changes an existing
+  signature/removes a symbol/changes a `Code`'s meaning; a minor-equivalent release may only add;
+  anything actually breaking gets called out explicitly, in bold, in that Fase's own ROADMAP entry,
+  never silently permitted just because pre-1.0 technically allows it. Post-v1.0.0, real semver
+  applies, with a breaking change requiring a new `/v2`-suffixed module path per Go's own
+  convention.
+- **A real, honest note on today's tags**: the existing `v0.0.3.<n>.faseNNN-<slug>` pattern isn't
+  valid Go module semver (too many numeric components, no real prerelease separator) — a `go get
+  .../go-vmnet@latest` today silently resolves to a pseudo-version, not a pinned release. Fixed by
+  tagging this Fase's own commit `v0.1.0` too (alongside the usual Fase-numbered tag, both on the
+  same commit) — the first tag an external consumer can actually `go get` by version number.
+- **An explicit divergence note**: `docs/en/spec.md` §6.1's original API sketch (`Options{Profile,
+  Debug, MaxStackDepth, MaxHeapBytes}` passed to `New`, a low-level `ResolveMethod`/`NewFrame`/
+  `Invoke` API, `BackendAuto`) was the project's own starting design vision — the real, built,
+  frozen API diverged from it (`New()` takes no arguments at all; `Permissions()` is its own
+  mutable-in-place accessor, not a constructor-time option). `api-stability.md`, not spec §6.1, is
+  now the authoritative description of what's actually frozen.
+
+### How to verify Fase 3.71
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+go doc -all . | diff - <(cat docs/en/api-stability.md)  # sanity-check only; expected to differ in prose, not in symbols
+```
+
+---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 
 **Goal:** turn the functional engine into an adoptable product — reliable, documented, and
@@ -6003,7 +6049,8 @@ benchmarked — the complete package for an engineering team to approve a real p
 - [ ] Method/token resolution cache, hot-path optimization pass
 
 **Stable API/CLI**
-- [ ] Freeze the public Go API (spec §6) for v1.0, semver commitment
+- [x] Freeze the public Go API (spec §6) for v1.0, semver commitment — landed Fase 3.71
+      (`docs/en/api-stability.md`); first real semver tag `v0.1.0` created
 - [ ] Complete CLI command set (inspect/il/check/run/add/restore/packages)
 - [ ] Cross-platform CI matrix: Linux/macOS/Windows, verify `CGO_ENABLED=0`
 

@@ -6239,6 +6239,55 @@ cd benchmarks && dotnet build Bench.csproj -c Release && go run .
 ```
 
 ---
+## Fase 3.71 — congelando la API pública de Go, y un compromiso de semver real
+
+**Objetivo:** el último ítem de la Prioridad 2 de la planificación de este empuje — la API pública
+de Go nunca se había congelado ni documentado formalmente como una superficie estable, y los tags
+de git del proyecto no eran semver válido en absoluto, así que un consumidor real de módulo Go no
+tenía forma significativa de hacer `go get` de un release fijado.
+
+**Resultado: `docs/en/api-stability.md`/`docs/es/api-stability.md`, una instantánea completa y
+actual de cada símbolo exportado en el paquete raíz con una política de semver explícita y
+concreta — más el primer tag de git semver real y válido del proyecto, `v0.1.0`, junto al tag
+numerado por Fase existente en el mismo commit.**
+
+- **La superficie congelada**: enumerada directamente de la propia salida real de `go doc -all .`
+  (no de memoria) — tres tipos "verbo" (`VM`, `Assembly`, `Instance`), `Value` más sus seis
+  constructores, `Error`/`Code` (spec §30, Fase 3.67), `Permissions` (el modelo de seguridad de la
+  spec, Fase 3.59), y `NuGetManager`/`Package`. Deliberadamente chica.
+- **La política**: pre-1.0, así que la propia regla `0.y.z` de semver técnicamente permite que
+  cualquier cosa cambie — acotada de todas formas a una promesa concreta: un release equivalente a
+  patch nunca cambia una firma existente/remueve un símbolo/cambia el significado de un `Code`; un
+  release equivalente a minor solo puede agregar; cualquier cosa realmente breaking se señala
+  explícitamente, en negrita, en la propia entrada de esa Fase en el ROADMAP, nunca permitida
+  silenciosamente solo porque pre-1.0 técnicamente lo permite. Después de v1.0.0, aplica el semver
+  real, con un cambio breaking requiriendo un path de módulo nuevo con sufijo `/v2` según la propia
+  convención de Go.
+- **Una nota real y honesta sobre los tags de hoy**: el patrón existente
+  `v0.0.3.<n>.faseNNN-<slug>` no es semver válido de módulo Go (demasiados componentes numéricos,
+  sin un separador de prerelease real) — un `go get .../go-vmnet@latest` hoy resuelve
+  silenciosamente a una pseudo-versión, no a un release fijado. Arreglado tageando el propio commit
+  de esta Fase también como `v0.1.0` (junto al tag usual numerado por Fase, ambos en el mismo
+  commit) — el primer tag que un consumidor externo realmente puede `go get` por número de versión.
+- **Una nota explícita de divergencia**: el propio boceto de API de la spec §6.1 de
+  `docs/en/spec.md` (`Options{Profile, Debug, MaxStackDepth, MaxHeapBytes}` pasado a `New`, una API
+  de bajo nivel `ResolveMethod`/`NewFrame`/`Invoke`, `BackendAuto`) fue la propia visión de diseño
+  inicial del proyecto — la API real, construida y congelada divergió de ella (`New()` no toma
+  ningún argumento en absoluto; `Permissions()` es su propio accesor mutable in situ, no una opción
+  en tiempo de construcción). `api-stability.md`, no la spec §6.1, es ahora la descripción
+  autoritativa de lo que realmente está congelado.
+
+### Cómo verificar la Fase 3.71
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+go doc -all . | diff - <(cat docs/en/api-stability.md)  # solo sanity-check; se espera que difiera en prosa, no en símbolos
+```
+
+---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
 
@@ -6289,7 +6338,8 @@ con benchmarks — el paquete completo para que un equipo de ingeniería apruebe
 - [ ] Cache de resolución de métodos/tokens, pasada de optimización de hot paths
 
 **API/CLI estables**
-- [ ] Congelar API pública Go (spec §6) para v1.0, compromiso semver
+- [x] Congelar API pública Go (spec §6) para v1.0, compromiso semver — lograda en la Fase 3.71
+      (`docs/es/api-stability.md`); creado el primer tag semver real `v0.1.0`
 - [ ] Set completo de comandos CLI (inspect/il/check/run/add/restore/packages)
 - [ ] Matriz CI multiplataforma: Linux/macOS/Windows, verificar `CGO_ENABLED=0`
 
