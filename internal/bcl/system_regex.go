@@ -61,7 +61,11 @@ func init() {
 	register("System.Text.RegularExpressions.Regex::IsMatch", true, regexIsMatch)
 	register("System.Text.RegularExpressions.Regex::Match", true, regexMatch)
 	register("System.Text.RegularExpressions.Regex::Matches", true, regexMatches)
-	register("System.Text.RegularExpressions.Regex::Replace", true, regexReplace)
+	// Regex.Replace moved to internal/interpreter/regexreplace.go (Fase
+	// 3.64): the MatchEvaluator-delegate overload needs Machine access to
+	// invoke it, so both overloads are now handled at that one call site
+	// instead of splitting "plain string replacement" (here) from
+	// "delegate-based" (there) — see that file's own doc comment.
 	// Regex.Escape(string) is a plain static string transform, no Machine
 	// access needed — Go's regexp.QuoteMeta escapes a slightly different
 	// (mostly overlapping) metacharacter set than real .NET's own Escape
@@ -191,12 +195,58 @@ func resolveRegexReplace(args []runtime.Value) (re *regexp.Regexp, input, replac
 	return nil, "", "", fmt.Errorf("bcl: Regex.Replace: unsupported argument shape")
 }
 
-func regexReplace(args []runtime.Value) (runtime.Value, error) {
+// RegexReplaceString backs the plain string-replacement Regex.Replace
+// overloads — exported (Fase 3.64) for internal/interpreter/
+// regexreplace.go's own Machine-aware Replace to delegate to when the
+// 3rd argument is a plain string rather than a MatchEvaluator delegate
+// (invoking a real delegate needs Machine access this package doesn't
+// have, so both overloads are now dispatched from that one call site).
+func RegexReplaceString(args []runtime.Value) (runtime.Value, error) {
 	re, input, replacement, err := resolveRegexReplace(args)
 	if err != nil {
 		return runtime.Value{}, err
 	}
 	return runtime.String(re.ReplaceAllString(input, replacement)), nil
+}
+
+// ResolveRegexReplaceEvaluatorTarget resolves the (compiled regex, input)
+// pair for the real Regex.Replace(string, MatchEvaluator) overloads —
+// instance (receiver, input, evaluator) and static (input, pattern,
+// evaluator) — the same instance-vs-static shape resolveRegexAndInput
+// already disambiguates for the 2-argument IsMatch/Match/plain-string-
+// Replace shapes, just with a 3rd (evaluator) argument along for the ride
+// this function itself never inspects.
+func ResolveRegexReplaceEvaluatorTarget(args []runtime.Value) (re *regexp.Regexp, input string, ok bool) {
+	if len(args) != 3 {
+		return nil, "", false
+	}
+	if args[0].Kind == runtime.KindObject && args[0].Obj != nil {
+		nr, isRegex := args[0].Obj.Native.(*nativeRegex)
+		if !isRegex || args[1].Kind != runtime.KindString {
+			return nil, "", false
+		}
+		compiled, err := nr.compiled()
+		if err != nil {
+			return nil, "", false
+		}
+		return compiled, args[1].Str, true
+	}
+	if args[0].Kind == runtime.KindString && args[1].Kind == runtime.KindString {
+		compiled, err := compileRegex(args[1].Str)
+		if err != nil {
+			return nil, "", false
+		}
+		return compiled, args[0].Str, true
+	}
+	return nil, "", false
+}
+
+// NewMatchValueFromLoc wraps one FindStringSubmatchIndex-shaped result as
+// a real Match value — exported (Fase 3.64) for internal/interpreter/
+// regexreplace.go's own MatchEvaluator-invoking Regex.Replace, which
+// needs one real Match per occurrence to pass to the delegate.
+func NewMatchValueFromLoc(loc []int, input string) runtime.Value {
+	return runtime.ObjRef(&runtime.Object{Native: matchValFromLoc(loc, input)})
 }
 
 func regexMatch(args []runtime.Value) (runtime.Value, error) {

@@ -75,6 +75,12 @@ examples/sqlite-demo/*.db
 examples/di-demo/bin/
 examples/di-demo/obj/
 
+# .NET build output for the examples/fluentvalidation-demo wrapper (same
+# rationale as jint-demo above — FvDemoWrapper.cs is committed source,
+# the compiled FvDemoWrapper.dll it produces is not)
+examples/fluentvalidation-demo/bin/
+examples/fluentvalidation-demo/obj/
+
 # macOS Finder metadata
 .DS_Store
 

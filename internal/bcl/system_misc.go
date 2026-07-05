@@ -43,6 +43,20 @@ func init() {
 	register("System.Double::Equals", true, doubleEquals)
 	register("System.Globalization.CultureInfo::get_CurrentCulture", true, cultureInfoInvariant)
 	register("System.Globalization.CultureInfo::get_Name", true, cultureInfoName)
+	// CultureInfo.TextInfo (Fase 3.64) — found via CsvHelper's own header
+	// name matching. Real .NET's TextInfo is culture-specific (Turkish
+	// "i" casing being the classic gotcha); vmnet has no real locale data
+	// at all (same posture cultureInfoInvariant's own doc comment already
+	// takes), so this always behaves like the invariant culture — correct
+	// for every real corpus caller found, which only ever runs under
+	// CultureInfo.InvariantCulture in the first place.
+	register("System.Globalization.CultureInfo::get_TextInfo", true, cultureInfoInvariant)
+	register("System.Globalization.TextInfo::ToUpper", true, textInfoToUpper)
+	register("System.Globalization.TextInfo::ToLower", true, textInfoToLower)
+	register("System.Globalization.TextInfo::ToTitleCase", true, textInfoToTitleCase)
+	// TextInfo.ListSeparator — real invariant-culture value is "," (found
+	// via CsvHelper's own configuration defaulting to it).
+	register("System.Globalization.TextInfo::get_ListSeparator", true, textInfoGetListSeparator)
 	// TimeZoneInfo.Local/Utc: vmnet has no real timezone database (same
 	// "no locale/culture data anywhere" limitation as CultureInfo above)
 	// — both return the same stub object, offset-less, matching the
@@ -289,6 +303,36 @@ func doubleEquals(args []runtime.Value) (runtime.Value, error) {
 
 func cultureInfoInvariant(args []runtime.Value) (runtime.Value, error) {
 	return runtime.ObjRef(&runtime.Object{}), nil
+}
+
+func textInfoGetListSeparator(args []runtime.Value) (runtime.Value, error) {
+	return runtime.String(","), nil
+}
+
+func textInfoToUpper(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 2 || args[1].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: TextInfo.ToUpper expects a string argument")
+	}
+	return runtime.String(strings.ToUpper(args[1].Str)), nil
+}
+
+func textInfoToLower(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 2 || args[1].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: TextInfo.ToLower expects a string argument")
+	}
+	return runtime.String(strings.ToLower(args[1].Str)), nil
+}
+
+// textInfoToTitleCase is a simplified approximation of real .NET's own
+// ToTitleCase (which has its own culture-aware rules — e.g. leaving an
+// all-caps word alone as an acronym): lowercases the whole string first,
+// then capitalizes the first letter of each whitespace-separated word.
+// No real corpus caller found needs the acronym-preserving nuance.
+func textInfoToTitleCase(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 2 || args[1].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: TextInfo.ToTitleCase expects a string argument")
+	}
+	return runtime.String(strings.Title(strings.ToLower(args[1].Str))), nil
 }
 
 func environmentThreadID(args []runtime.Value) (runtime.Value, error) {

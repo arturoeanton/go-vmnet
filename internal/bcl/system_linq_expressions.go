@@ -1,6 +1,7 @@
 package bcl
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/arturoeanton/go-vmnet/internal/runtime"
@@ -29,9 +30,19 @@ type nativeParameterExpression struct{}
 // ultimately reads via .Member.Name — derived from the property
 // accessor's own method name (get_Space -> "Space") right when
 // Expression.Property is called, rather than modeling a real
-// PropertyInfo/MemberInfo graph.
+// PropertyInfo/MemberInfo graph. expression (Fase 3.64) is the Expression
+// this member was accessed off of — Expression.Property's own first
+// argument, verbatim — needed by real consumers that walk BACK up the
+// tree (FluentValidation's own PropertyRule building, which checks
+// whether a lambda body's MemberExpression.Expression is the lambda's
+// own ParameterExpression — a direct property access, `x => x.Name` — or
+// another MemberExpression — a nested one, `x => x.Address.City`) rather
+// than just reading the member's own name forward (DocumentFormat.
+// OpenXml's own ConfigureMetadata, this subsystem's original real
+// caller, never needs this).
 type nativeMemberExpression struct {
 	propertyName string
+	expression   runtime.Value
 }
 
 // nativeMemberInfo backs MemberExpression.Member's real return type
@@ -53,6 +64,8 @@ func init() {
 	register("System.Linq.Expressions.Expression::Lambda", true, expressionLambda)
 	register("System.Linq.Expressions.LambdaExpression::get_Body", true, lambdaExpressionGetBody)
 	register("System.Linq.Expressions.MemberExpression::get_Member", true, memberExpressionGetMember)
+	register("System.Linq.Expressions.MemberExpression::get_Expression", true, memberExpressionGetExpression)
+	register("System.Linq.Expressions.Expression::get_NodeType", true, expressionGetNodeType)
 	// "System.Reflection.MemberInfo::get_Name" is registered once, in
 	// system_type.go's own init() (typeGetName) — that native now checks
 	// for this file's *nativeMemberInfo receiver shape too. Registering
@@ -98,7 +111,7 @@ func expressionProperty(args []runtime.Value) (runtime.Value, error) {
 	} else if p, ok := strings.CutPrefix(name, "set_"); ok {
 		name = p
 	}
-	return runtime.ObjRef(&runtime.Object{Native: &nativeMemberExpression{propertyName: name}}), nil
+	return runtime.ObjRef(&runtime.Object{Native: &nativeMemberExpression{propertyName: name, expression: args[0]}}), nil
 }
 
 // expressionLambda backs Expression.Lambda<TDelegate>(Expression body,
@@ -129,9 +142,81 @@ func memberExpressionGetMember(args []runtime.Value) (runtime.Value, error) {
 	return runtime.ObjRef(&runtime.Object{Native: &nativeMemberInfo{name: me.propertyName}}), nil
 }
 
+func memberExpressionGetExpression(args []runtime.Value) (runtime.Value, error) {
+	me, ok := nativeOf[*nativeMemberExpression](firstArg(args))
+	if !ok {
+		return runtime.Null(), nil
+	}
+	return me.expression, nil
+}
+
+// Real System.Linq.Expressions.ExpressionType values (confirmed against
+// a real .NET 10 Enum.GetValues(typeof(ExpressionType)) run, not
+// recalled from memory — a wrong constant here would be a silent
+// mismatch, not a crash) — only the three node kinds this narrow
+// subsystem can actually produce (see this file's own top-of-file doc
+// comment).
+const (
+	expressionTypeLambda       = 18
+	expressionTypeMemberAccess = 23
+	expressionTypeParameter    = 38
+)
+
+// expressionGetNodeType backs Expression.NodeType — real consumers
+// (FluentValidation's own PropertyRule/MemberAccessor construction) use
+// it to tell which concrete Expression subclass a body/parent actually
+// is before casting, the same role a real `is`/pattern-match would play
+// if the C# source used one instead.
+func expressionGetNodeType(args []runtime.Value) (runtime.Value, error) {
+	v := firstArg(args)
+	if v.Kind == runtime.KindObject && v.Obj != nil {
+		switch v.Obj.Native.(type) {
+		case *nativeMemberExpression:
+			return runtime.Int32(expressionTypeMemberAccess), nil
+		case *nativeParameterExpression:
+			return runtime.Int32(expressionTypeParameter), nil
+		case *nativeLambdaExpression:
+			return runtime.Int32(expressionTypeLambda), nil
+		}
+	}
+	return runtime.Value{}, fmt.Errorf("bcl: Expression.NodeType: receiver isn't one of the narrow Expression shapes this subsystem models (see system_linq_expressions.go's own doc comment)")
+}
+
 func firstArg(args []runtime.Value) runtime.Value {
 	if len(args) == 0 {
 		return runtime.Null()
 	}
 	return args[0]
+}
+
+// LambdaExpressionBody/IsParameterExpression/MemberExpressionParts expose
+// this file's own unexported native shapes to internal/interpreter/
+// compiledexpression.go (Fase 3.64), which needs to walk a real
+// expression tree node by node to actually EVALUATE it — see that file's
+// own doc comment for why Expression<TDelegate>.Compile() can produce a
+// real, working delegate for exactly the narrow property-access-chain
+// shapes this subsystem models (`x => x.Prop`, `x => x.Prop1.Prop2`),
+// without needing a general expression-to-IL JIT compiler at all.
+func LambdaExpressionBody(v runtime.Value) (runtime.Value, bool) {
+	le, ok := nativeOf[*nativeLambdaExpression](v)
+	if !ok {
+		return runtime.Value{}, false
+	}
+	return le.body, true
+}
+
+func IsParameterExpression(v runtime.Value) bool {
+	_, ok := nativeOf[*nativeParameterExpression](v)
+	return ok
+}
+
+// MemberExpressionParts returns a MemberExpression node's own property
+// name and the Expression it was accessed off of (Expression.Property's
+// own first argument — see nativeMemberExpression's own doc comment).
+func MemberExpressionParts(v runtime.Value) (propertyName string, inner runtime.Value, ok bool) {
+	me, ok := nativeOf[*nativeMemberExpression](v)
+	if !ok {
+		return "", runtime.Value{}, false
+	}
+	return me.propertyName, me.expression, true
 }

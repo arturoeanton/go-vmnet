@@ -218,7 +218,9 @@ func resolvableMethod(md *metadata.Metadata, fullName string) bool {
 	if fullName == "System.Type::IsAssignableFrom" || fullName == "System.Type::IsInstanceOfType" ||
 		fullName == "System.Type::IsSubclassOf" ||
 		fullName == "System.Lazy`1::get_Value" || fullName == "System.Threading.ThreadLocal`1::get_Value" ||
-		fullName == "System.Collections.Concurrent.ConcurrentDictionary`2::GetOrAdd" {
+		fullName == "System.Collections.Concurrent.ConcurrentDictionary`2::GetOrAdd" ||
+		fullName == "System.Linq.Expressions.Expression`1::Compile" ||
+		fullName == "System.Text.RegularExpressions.Regex::Replace" {
 		return true
 	}
 	if asyncMachineTargets[fullName] {
@@ -349,6 +351,8 @@ var reflectionMachineTargets = map[string]bool{
 	"System.Reflection.ConstructorInfo::op_Equality":        true,
 	"System.Reflection.MethodInfo::op_Inequality":           true,
 	"System.Reflection.MethodInfo::op_Equality":             true,
+	"System.Reflection.MemberInfo::op_Inequality":           true,
+	"System.Reflection.MemberInfo::op_Equality":             true,
 	"System.Reflection.Assembly::GetManifestResourceStream": true,
 	// Type.GetProperties/GetProperty plus PropertyInfo.GetValue/SetValue
 	// (Fase 3.51) — real natives (internal/interpreter/reflection.go)
@@ -445,6 +449,7 @@ var reflectionMachineTargets = map[string]bool{
 	"System.Reflection.FieldInfo::IsDefined":                           true,
 	"System.Type::IsDefined":                                           true,
 	"System.Attribute::GetCustomAttribute":                             true,
+	"System.Attribute::IsDefined":                                      true,
 	"System.Reflection.CustomAttributeExtensions::GetCustomAttributes": true,
 	"System.Reflection.CustomAttributeExtensions::IsDefined":           true,
 }

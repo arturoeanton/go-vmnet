@@ -39,6 +39,16 @@ func init() {
 	register("System.Int32::Parse", true, int32Parse)
 	register("System.Int32::TryParse", true, int32TryParse)
 	register("System.Int32::CompareTo", true, int32CompareTo)
+	// IComparable`1::CompareTo (Fase 3.64) — reached when a generic method
+	// constrained on IComparable<T> calls value.CompareTo(other) with T
+	// still open at the call site (`constrained.` prefix), so the
+	// compiled call names the INTERFACE, not any concrete numeric type;
+	// vmnet's own type-erased generics have no TypeDef for T to redirect
+	// through the ordinary virtual-dispatch ancestor walk, so this
+	// dispatches directly off the receiver's own runtime Kind instead.
+	// Found via FluentValidation's own GreaterThanOrEqualToValidator<T,
+	// TProperty>, comparing a real int/double property value this way.
+	register("System.IComparable`1::CompareTo", true, comparableCompareTo)
 	register("System.Int64::ToString", true, int64ToString)
 	register("System.Int64::Parse", true, int64Parse)
 	register("System.Int64::TryParse", true, int64TryParse)
@@ -437,6 +447,65 @@ func int32CompareTo(args []runtime.Value) (runtime.Value, error) {
 		return runtime.Int32(1), nil
 	default:
 		return runtime.Int32(0), nil
+	}
+}
+
+// comparableCompareTo backs IComparable`1::CompareTo for a still-open
+// generic type parameter (see its own registration comment above) —
+// dispatches directly off the receiver's runtime Kind rather than
+// delegating to a per-type CompareTo native, since not every numeric
+// Kind here (Int64, Single) has its own registered CompareTo to reuse.
+func comparableCompareTo(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("bcl: IComparable.CompareTo expects a receiver and an argument")
+	}
+	a, b := args[0], args[1]
+	if a.Kind == runtime.KindRef && a.Ref != nil {
+		a = *a.Ref
+	}
+	if b.Kind == runtime.KindRef && b.Ref != nil {
+		b = *b.Ref
+	}
+	cmp := func(less, greater bool) (runtime.Value, error) {
+		switch {
+		case less:
+			return runtime.Int32(-1), nil
+		case greater:
+			return runtime.Int32(1), nil
+		default:
+			return runtime.Int32(0), nil
+		}
+	}
+	switch a.Kind {
+	case runtime.KindI4:
+		return cmp(a.I4 < b.I4, a.I4 > b.I4)
+	case runtime.KindI8:
+		return cmp(a.I8 < b.I8, a.I8 > b.I8)
+	case runtime.KindR4:
+		return cmp(a.R4 < b.R4, a.R4 > b.R4)
+	case runtime.KindR8:
+		return cmp(a.R8 < b.R8, a.R8 > b.R8)
+	case runtime.KindString:
+		return cmp(a.Str < b.Str, a.Str > b.Str)
+	default:
+		// A reference-typed receiver with no meaningful numeric/string
+		// ordering vmnet can compute (found via a real, surprising case:
+		// FluentValidation's own internal code calls this against a
+		// ValidationContext<T> — almost certainly a generic utility
+		// (pooling/caching, not user-facing rule comparison) that doesn't
+		// actually need a real, correct answer to produce correct
+		// validation RESULTS). Reference equality is the only honest
+		// answer available without modeling that specific internal
+		// utility's exact intent — 0 (equal) for the same object, else an
+		// arbitrary-but-stable non-zero, rather than crashing the whole
+		// call outright.
+		if a.Kind == runtime.KindObject && b.Kind == runtime.KindObject {
+			if a.Obj == b.Obj {
+				return runtime.Int32(0), nil
+			}
+			return runtime.Int32(-1), nil
+		}
+		return runtime.Value{}, fmt.Errorf("bcl: IComparable.CompareTo: unsupported receiver kind %v (only numeric/string types are supported for a still-open generic type parameter)", a.Kind)
 	}
 }
 

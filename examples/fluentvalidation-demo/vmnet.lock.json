@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "target": "netstandard2.0",
+  "packages": [
+    {
+      "id": "FluentValidation",
+      "version": "11.9.2",
+      "selectedAsset": "lib/netstandard2.0/FluentValidation.dll",
+      "dependencies": [
+        "System.Threading.Tasks.Extensions"
+      ]
+    },
+    {
+      "id": "System.Runtime.CompilerServices.Unsafe",
+      "version": "4.5.3",
+      "selectedAsset": "lib/netstandard2.0/System.Runtime.CompilerServices.Unsafe.dll",
+      "dependencies": []
+    },
+    {
+      "id": "System.Threading.Tasks.Extensions",
+      "version": "4.5.4",
+      "selectedAsset": "lib/netstandard2.0/System.Threading.Tasks.Extensions.dll",
+      "dependencies": [
+        "System.Runtime.CompilerServices.Unsafe"
+      ]
+    }
+  ]
+}

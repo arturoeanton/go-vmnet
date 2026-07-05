@@ -51,6 +51,12 @@ func init() {
 	machineRegistry["System.Reflection.ConstructorInfo::op_Equality"] = memberInfoOpEquality
 	machineRegistry["System.Reflection.MethodInfo::op_Inequality"] = memberInfoOpInequality
 	machineRegistry["System.Reflection.MethodInfo::op_Equality"] = memberInfoOpEquality
+	// The base MemberInfo name itself (Fase 3.64) — reached when the
+	// compared receivers' declared static type is the MemberInfo base,
+	// not a concrete subtype directly; found via FluentValidation's own
+	// PropertyRule construction comparing two real MemberInfo values.
+	machineRegistry["System.Reflection.MemberInfo::op_Inequality"] = memberInfoOpInequality
+	machineRegistry["System.Reflection.MemberInfo::op_Equality"] = memberInfoOpEquality
 	// Type.GetProperties/GetProperty plus PropertyInfo.GetValue/SetValue
 	// (Fase 3.51) — same real-reflection posture as GetConstructor/
 	// GetMethod/GetField above: every PropertyInfo here names a real

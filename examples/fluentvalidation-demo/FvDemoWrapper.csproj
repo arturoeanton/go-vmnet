@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="FvDemoWrapper.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Referenced ONLY so `dotnet build` has the real FluentValidation
+         type surface to check FvDemoWrapper.cs against. Its actual DLL
+         is never loaded from here — main.go loads the real, unmodified
+         package from nuget.org via vm.LoadPackage, exactly like every
+         other real-package demo in examples/. -->
+    <PackageReference Include="FluentValidation" Version="11.9.2" />
+  </ItemGroup>
+</Project>

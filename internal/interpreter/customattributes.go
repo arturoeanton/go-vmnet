@@ -47,6 +47,12 @@ func init() {
 		machineRegistry[recv+"::IsDefined"] = customAttributesIsDefined
 	}
 	machineRegistry["System.Attribute::GetCustomAttribute"] = attributeGetCustomAttribute
+	// Attribute.IsDefined(MemberInfo, Type) — the static-method spelling
+	// of the same real API MemberInfo.IsDefined already provides as an
+	// instance method above; customAttributesIsDefined's own (receiver,
+	// attributeType) argument shape is identical either way, so no new
+	// function is needed. Found via CsvHelper's own real usage.
+	machineRegistry["System.Attribute::IsDefined"] = customAttributesIsDefined
 	// CustomAttributeExtensions.GetCustomAttribute<T>(this MemberInfo) —
 	// the generic extension-method spelling of the same real API (found
 	// via Markdig's own Markdown.Version reading its containing

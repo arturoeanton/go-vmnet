@@ -5240,6 +5240,100 @@ go test ./...
 ```
 
 ---
+## Fase 3.64 — real end-to-end verification: `FluentValidation`, `CsvHelper`, `AutoMapper`
+
+**Goal:** use Fase 3.63's own new `CustomAttributeData` subsystem to actually, honestly verify the
+three packages that motivated deferring it in the first place — not just re-measure their checker
+%, but try to get a REAL demo running for each, the same "three separated dimensions" standard
+(checker %, real demo, confidence) this project holds every other tracked package to.
+
+**Result: one real, verified, working end-to-end demo (`FluentValidation`); two packages that hit
+real, deeper, pre-existing architectural walls unrelated to attributes, found and honestly
+documented rather than shipped as a shallow, unconvincing demo.**
+
+- **`examples/fluentvalidation-demo`: real, unmodified `FluentValidation` 11.9.2 validating a real
+  object, both accepting and rejecting it with the correct error message.** Getting there needed
+  five more real interpreter fixes, all found by iterating against the actual failure at each step
+  rather than guessing ahead:
+  - **`MemberExpression.Expression`** — the existing `System.Linq.Expressions` subsystem
+    (Fase 3.41, built for `DocumentFormat.OpenXml`'s own narrower "inspect a tree's shape, never
+    compile it" use) never recorded which expression a member was accessed OFF OF.
+    FluentValidation's own `PropertyRule` construction walks back up the tree (is the parent the
+    lambda's own parameter — a direct access — or another member access — a nested one?), which
+    needs exactly this.
+  - **`Expression.NodeType`** — confirmed against a real `Enum.GetValues(typeof(ExpressionType))`
+    run rather than trusted from memory (`MemberAccess`=23, `Parameter`=38, `Lambda`=18) — a wrong
+    constant here would have been a silent mismatch, not a crash.
+  - **`Expression<TDelegate>.Compile()`, for real** — not a general expression-to-IL JIT compiler
+    (still out of scope, see `AutoMapper` below), but a real, working delegate for the ONE narrow
+    shape this subsystem's own natives can ever construct: a simple, non-branching property-access
+    chain (`x => x.Prop`, `x => x.Prop1.Prop2`). The returned delegate's `Func.Receiver` smuggles the
+    actual expression tree through `invokeFuncTarget`'s own existing receiver-prepending mechanism to
+    a new sentinel native (`internal/interpreter/compiledexpression.go`) that walks the tree and reads
+    each property via an ordinary property-getter call — real, correct evaluation without ever
+    generating or running new code.
+  - **`MemberInfo::op_Equality`/`op_Inequality`** — already real for `ConstructorInfo`/`MethodInfo`
+    receivers (Fase 3.39/3.51) but never mirrored under the base `MemberInfo` name itself, reached
+    when the compared values' declared static type is the base, not a concrete subtype.
+  - **`IComparable\`1::CompareTo`** — reached when a generic method constrained on
+    `IComparable<T>` calls `value.CompareTo(other)` with `T` still open at the call site
+    (`constrained.` prefix); vmnet's own type-erased generics have no `TypeDef` for `T` to redirect
+    through the ordinary virtual-dispatch walk, so this dispatches directly off the receiver's own
+    runtime `Kind` instead (`internal/bcl/system_numeric.go`).
+- **`CsvHelper`: real progress, one new real gap found, not fixed.** `TextInfo` (`CultureInfo.
+  TextInfo`, `ToUpper`/`ToLower`/`ToTitleCase`/`ListSeparator`) didn't exist at all — added, always
+  behaving like the invariant culture (vmnet has no real locale data, same posture
+  `cultureInfoInvariant` already documents). Past that, a real `[Name]`-attribute-driven CSV read
+  hits a genuinely different, deeper limitation: CsvHelper's own internal type-conversion cache uses
+  a `Dictionary` keyed by a struct containing an array field, and vmnet's `Dictionary` key hashing
+  (`internal/bcl/system_collections.go`) has no support for an array-shaped key component at all —
+  unrelated to attributes, not fixed this Fase.
+- **`AutoMapper`: confirmed blocked by a pre-existing, much larger gap, not attempted.** Its own
+  findings are dominated by `System.Linq.Expressions` (`Constant`/`Call`/`Block`/`Assign`/`New`/
+  `Convert`/`ExpressionVisitor`/`LambdaExpression.Parameters`, ~300 hits) — its real mapping-plan
+  generation COMPILES a whole custom expression tree per type pair into one big delegate, nothing
+  like the simple property-access chains `FluentValidation`'s own `Compile()` fix above can
+  evaluate. This is the same gap Fase 3.60 already flagged for `Microsoft.Extensions.
+  DependencyInjection`'s own `ExpressionResolverBuilder` fast path — a real, general expression-
+  tree-to-executable compiler, a substantially larger undertaking than anything else in this Fase,
+  correctly identified rather than worked around with a shallow demo that wouldn't actually exercise
+  `AutoMapper`'s real value.
+- **Re-measured** (methods flagged, `netstandard-lite`): `FluentValidation` 97.0% (baseline) → 98.3%,
+  `CsvHelper` 91.8% → 95.8%, `AutoMapper` 88.3% → 95.5% (checker-%-only progress; the real blocker
+  above remains).
+- New `TestFluentValidationDemoE2E` (network-gated, matching `TestDiDemoE2E`/`TestJintDemoE2E`'s own
+  established pattern).
+
+### Found, not fixed (this Fase)
+
+- **`CsvHelper`'s own Dictionary-with-array-shaped-key-component limitation** — a real, specific,
+  narrow gap in `internal/bcl/system_collections.go`'s own key-hashing support, unrelated to
+  attributes; not fixed this Fase.
+- **A general expression-tree-to-executable compiler** — needed for `AutoMapper`'s real mapping-plan
+  generation and `Microsoft.Extensions.DependencyInjection`'s own compiled-expression fast path
+  (Fase 3.60); a substantially larger undertaking than this Fase's narrow, property-access-chain-only
+  `Compile()`, and still not attempted.
+- **`FluentValidation`'s own numeric range validators** (`GreaterThanOrEqualTo`, etc.) hit a
+  different, deeper generics limitation found while investigating this Fase: `Comparer<T>.Default`'s
+  cached comparer instance isn't kept separate per closed generic instantiation in vmnet's own
+  type-erased generics model, so two different `T`s can observe each other's cached comparer —
+  `examples/fluentvalidation-demo` deliberately only exercises the string validators that already
+  work correctly; this is a real, deep, pre-existing architectural gap, not something this Fase
+  attempted to fix.
+
+### How to verify Fase 3.64
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+dotnet build examples/fluentvalidation-demo/FvDemoWrapper.csproj -c Release
+cd examples/fluentvalidation-demo && go run . && cd -
+VMNET_NETWORK_TESTS=1 go test -run TestFluentValidationDemoE2E -v .
+```
+
+---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 
 **Goal:** turn the functional engine into an adoptable product — reliable, documented, and
