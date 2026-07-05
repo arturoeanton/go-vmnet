@@ -5242,6 +5242,78 @@ VMNET_NETWORK_TESTS=1 go test -run TestDiDemoE2E -v .
 ```
 
 ---
+### Fase 3.61 — primera pasada sobre la lista extendida de NuGets del usuario: AsyncLocal/ThreadLocal, ConcurrentQueue, paridad de checker
+
+**Objetivo:** continuar la lista de prioridad de la Fase 3.60 — se midieron 5 paquetes candidatos
+nuevos que el usuario preguntó (`Markdig`, `HtmlAgilityPack`, `Google.Protobuf`,
+`OpenTelemetry.Api`, `Castle.Core`/`Moq`) y se atacaron los hallazgos de mayor apalancamiento y
+menor riesgo compartidos entre varios paquetes ya rastreados, en vez de una sola integración
+profunda esta vez.
+
+**Medido** (% de checker, `netstandard-lite`, con todas las dependencias transitivas):
+`Markdig@0.37.0` 2038 métodos/78 hallazgos (33 después de esta Fase, ver abajo),
+`OpenTelemetry.Api@1.9.0` 318/31 (20 después), `Google.Protobuf@3.28.2` 3639/189,
+`HtmlAgilityPack@1.11.61` 820/313, `Castle.Core@5.1.1` 3310/795, `Moq@4.20.72` 1659/751.
+**`Castle.Core`/`Moq` son una clase de problema distinta, no una de hallazgos de checker**: ambos
+están construidos fundamentalmente sobre generación de proxy dinámico al estilo
+`System.Reflection.Emit` — compilando IL nuevo para un tipo sintetizado en tiempo de ejecución —
+algo que vmnet no tiene ninguna forma de hacer en absoluto (interpreta IL pre-compilado; no hay un
+backend de JIT/codegen acá para apuntar). Hacer correr cualquiera de los dos de verdad necesitaría
+un subsistema dedicado de emulación de proxy dinámico (interceptando las propias llamadas de
+generación de `DynamicProxy` con una reimplementación nativa), no cobertura incremental de BCL —
+marcado acá como **difícil, probablemente fuera de alcance** en vez de intentado a ciegas.
+
+- **`System.Threading.ThreadLocal\`1`/`AsyncLocal\`1`** (`internal/bcl/system_threadlocal.go`,
+  `internal/interpreter/threadlocal.go`) — demanda real en `Microsoft.Extensions.Caching.Memory`/
+  `Logging`/`Logging.Abstractions` y `OpenTelemetry.Api`. Ambos tipos reales de BCL existen para
+  darle a cada hilo/flujo async concurrente su propio valor independiente — una distinción que
+  colapsa a nada acá (vmnet corre cada cadena de llamadas de forma sincrónica en una sola goroutine,
+  el mismo colapso que `system_cancellationtoken.go` ya documenta para `CancellationToken`), así que
+  ambos se modelan como una caja de valor mutable real, aunque trivial. El propio `valueFactory`
+  opcional de `ThreadLocal<T>` (computado a lo sumo una vez, espejando `System.Lazy\`1` exactamente
+  — el propio patrón de `bcl.LazyGetOrCompute` reusado tal cual como `bcl.ValueBoxGetOrCompute`)
+  necesita acceso a Machine para invocarse, a diferencia de `AsyncLocal<T>` (sin concepto de factory
+  en .NET real en absoluto).
+- **`System.Collections.Concurrent.ConcurrentQueue\`1`** (`internal/bcl/system_concurrentqueue.go`)
+  — no existía en absoluto; encontrado vía la propia llamada de `ConcurrentQueueExtensions.Clear`
+  de Markdig. Espeja de cerca al ya existente `Queue\`1` (`system_queue.go`), más un mutex (un
+  `ConcurrentQueue<T>` real se alcanza más seguido a través de un campo estático compartido, a
+  diferencia de `Queue<T>`) y un enumerador basado en snapshot (igualando el propio contrato
+  documentado "débilmente consistente" de `ConcurrentQueue<T>.GetEnumerator()` real, vs. el propio
+  enumerador vivo, sin snapshot, de `Queue<T>`).
+- **`System.Reflection.CustomAttributeExtensions.GetCustomAttribute<T>`/`GetCustomAttributes`/
+  `IsDefined`** — la forma de método de extensión genérico del mismo stub "no se encontraron
+  atributos" que la Fase 3.60 ya le dio a `System.Attribute`/`MemberInfo`/etc.; un `bcl.Native`
+  plano a pesar de ser un call site de método genérico, ya que el modelo `Value` type-erased de
+  vmnet significa que la respuesta no depende de en qué cierra `T`.
+- **Fix solo de paridad de checker, cero riesgo en tiempo de ejecución**: `System.IO.TextWriter`/
+  `StringWriter` (nativos reales y funcionales desde la Fase 3.57) nunca se reflejaron en la propia
+  lista de prefijos de namespace del profile del checker — la misma clase de brecha "resoluble pero
+  reportada out-of-profile" que este proyecto sigue encontrando de nuevo para cada área nueva de
+  BCL, encontrado vía el propio uso real de `TextWriter`/`StringWriter` de Markdig.
+
+### Encontrado, no arreglado (esta Fase)
+
+- **`Castle.Core`/`Moq`**: ver arriba — necesita un subsistema dedicado de emulación de proxy
+  dinámico, no cobertura incremental de BCL; no intentado esta Fase.
+- **`Google.Protobuf`/`HtmlAgilityPack`**: medidos pero todavía no trabajados — ambos todavía tienen
+  brechas sustanciales (189 y 313 hallazgos respectivamente) no tocadas por los fixes mecánicos y
+  entre paquetes de esta Fase; candidatos para un pase dedicado cada uno.
+- **`System.Type::GetTypeHandle`/`RuntimeTypeHandle::get_Value`/`IsSubclassOf`,
+  `System.Globalization.IdnMapping`/`CultureInfo::get_CompareInfo`** (hallazgos restantes de
+  Markdig) — brechas reales, todavía no implementadas; de menor valor/más de nicho que las
+  elecciones entre paquetes de esta Fase.
+
+### Cómo verificar Fase 3.61
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+```
+
+---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
 

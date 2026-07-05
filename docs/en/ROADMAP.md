@@ -5053,6 +5053,72 @@ VMNET_NETWORK_TESTS=1 go test -run TestDiDemoE2E -v .
 ```
 
 ---
+## Fase 3.61 — first pass at the user's extended NuGet priority list: AsyncLocal/ThreadLocal, ConcurrentQueue, checker-parity
+
+**Goal:** continue the priority list from Fase 3.60 — measured 5 new candidate packages the user
+asked about (`Markdig`, `HtmlAgilityPack`, `Google.Protobuf`, `OpenTelemetry.Api`, `Castle.Core`/
+`Moq`) and picked off the highest-leverage, lowest-risk findings shared across multiple packages
+already tracked, rather than a single deep integration this time.
+
+**Measured** (checker %, `netstandard-lite`, full transitive deps): `Markdig@0.37.0` 2038 methods/78
+findings (now 33 after this Fase, see below), `OpenTelemetry.Api@1.9.0` 318/31 (20 after), `Google.
+Protobuf@3.28.2` 3639/189, `HtmlAgilityPack@1.11.61` 820/313, `Castle.Core@5.1.1` 3310/795, `Moq@
+4.20.72` 1659/751. **`Castle.Core`/`Moq` are a different class of problem, not a checker-findings
+one**: both are fundamentally built on `System.Reflection.Emit`-style dynamic proxy generation —
+compiling brand-new IL for a synthesized type at runtime — which vmnet has no way to do at all (it
+interprets pre-compiled IL; there is no JIT/codegen backend here to target). Getting either running
+for real would need a dedicated dynamic-proxy-emulation subsystem (intercepting `DynamicProxy`'s own
+generation calls with a native reimplementation), not incremental BCL coverage — flagged here as
+**hard, likely out of scope** rather than attempted blindly.
+
+- **`System.Threading.ThreadLocal\`1`/`AsyncLocal\`1`** (`internal/bcl/system_threadlocal.go`,
+  `internal/interpreter/threadlocal.go`) — real demand across `Microsoft.Extensions.Caching.Memory`/
+  `Logging`/`Logging.Abstractions` and `OpenTelemetry.Api`. Both real BCL types exist to give each
+  concurrent thread/async flow its own independent value — a distinction that collapses to nothing
+  here (vmnet runs every call chain synchronously on one goroutine, same collapse
+  `system_cancellationtoken.go` already documents for `CancellationToken`), so both are modeled as a
+  real, if trivial, mutable value box. `ThreadLocal<T>`'s own optional `valueFactory` (computed at
+  most once, mirroring `System.Lazy\`1` exactly — `bcl.LazyGetOrCompute`'s own pattern reused
+  verbatim as `bcl.ValueBoxGetOrCompute`) needs Machine access to invoke, unlike `AsyncLocal<T>`
+  (no factory concept in real .NET at all).
+- **`System.Collections.Concurrent.ConcurrentQueue\`1`** (`internal/bcl/system_concurrentqueue.go`)
+  — didn't exist at all; found via Markdig's own `ConcurrentQueueExtensions.Clear` call. Mirrors the
+  existing `Queue\`1` (`system_queue.go`) closely, plus a mutex (a real `ConcurrentQueue<T>` is most
+  often reached through a shared static field, unlike `Queue<T>`) and a snapshot-based enumerator
+  (matching real `ConcurrentQueue<T>.GetEnumerator()`'s own documented "weakly consistent" contract,
+  vs. `Queue<T>`'s live, non-snapshot one).
+- **`System.Reflection.CustomAttributeExtensions.GetCustomAttribute<T>`/`GetCustomAttributes`/
+  `IsDefined`** — the generic-extension-method spelling of the same "no attributes found" stub Fase
+  3.60 already gave `System.Attribute`/`MemberInfo`/etc.; a plain `bcl.Native` despite being a
+  generic method call site, since vmnet's type-erased `Value` model means the answer doesn't depend
+  on what `T` closes over.
+- **Checker-parity-only fix, zero runtime risk**: `System.IO.TextWriter`/`StringWriter` (real,
+  working natives since Fase 3.57) were never mirrored into the checker's own profile namespace-
+  prefix list — the same "resolvable but reported out-of-profile" gap class this project keeps
+  finding freshly for each new BCL area, found via Markdig's own real `TextWriter`/`StringWriter`
+  usage.
+
+### Found, not fixed (this Fase)
+
+- **`Castle.Core`/`Moq`**: see above — needs a dedicated dynamic-proxy-emulation subsystem, not
+  incremental BCL coverage; not attempted this Fase.
+- **`Google.Protobuf`/`HtmlAgilityPack`**: measured but not yet worked — both still have substantial
+  gaps (189 and 313 findings respectively) not touched by this Fase's mechanical, cross-package
+  fixes; candidates for a dedicated pass each.
+- **`System.Type::GetTypeHandle`/`RuntimeTypeHandle::get_Value`/`IsSubclassOf`,
+  `System.Globalization.IdnMapping`/`CultureInfo::get_CompareInfo`** (Markdig's remaining findings)
+  — real gaps, not yet implemented; lower-value/more niche than this Fase's cross-package picks.
+
+### How to verify Fase 3.61
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+```
+
+---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 
 **Goal:** turn the functional engine into an adoptable product — reliable, documented, and

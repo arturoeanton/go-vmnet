@@ -216,7 +216,7 @@ func resolvableMethod(md *metadata.Metadata, fullName string) bool {
 		return true
 	}
 	if fullName == "System.Type::IsAssignableFrom" || fullName == "System.Type::IsInstanceOfType" ||
-		fullName == "System.Lazy`1::get_Value" ||
+		fullName == "System.Lazy`1::get_Value" || fullName == "System.Threading.ThreadLocal`1::get_Value" ||
 		fullName == "System.Collections.Concurrent.ConcurrentDictionary`2::GetOrAdd" {
 		return true
 	}

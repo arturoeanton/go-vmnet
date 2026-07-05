@@ -246,6 +246,10 @@ func NativeTypeName(native any) (string, bool) {
 		return "VmnetInternal.Grouping", true
 	case *nativeDBNull:
 		return "System.DBNull", true
+	case *nativeValueBox:
+		return n.typeName, true
+	case *nativeConcurrentQueue:
+		return "System.Collections.Concurrent.ConcurrentQueue`1", true
 	case *nativeFileInfo:
 		// Real System.IO.FileInfo (Fase 3.59, system_io_file.go) — needed
 		// so a call site declared against FileSystemInfo (FileInfo's real

@@ -270,10 +270,23 @@ func init() {
 		"System.ValueTuple`2::",
 		"System.Int64::",
 		"System.Collections.Concurrent.ConcurrentDictionary`2::",
+		// System.Collections.Concurrent.ConcurrentQueue`1 (Fase 3.61) —
+		// see internal/bcl/system_concurrentqueue.go.
+		"System.Collections.Concurrent.ConcurrentQueue`1::",
+		"System.Collections.Concurrent.ConcurrentQueue`1+Enumerator::",
+		"System.Collections.Concurrent.ConcurrentQueueExtensions::",
+		// System.IO.TextWriter/StringWriter (Fase 3.57, internal/bcl/
+		// system_io_stringwriter.go) — real natives that were simply
+		// never mirrored here, the same "resolvable but reported
+		// out-of-profile" gap class this file's own comments document
+		// repeatedly elsewhere. Found via Markdig's own real usage.
+		"System.IO.TextWriter::",
+		"System.IO.StringWriter::",
 		"System.Delegate::",
 		"System.Nullable::GetUnderlyingType",
 		"System.Reflection.Assembly::",
 		"System.Reflection.IntrospectionExtensions::",
+		"System.Reflection.CustomAttributeExtensions::",
 		"System.Runtime.CompilerServices.Unsafe::",
 		"System.Resources.ResourceManager::",
 		"System.Enum::GetValues",
@@ -323,6 +336,10 @@ func init() {
 		"System.IO.FileSystemInfo::",
 		"System.IO.Path::",
 		"System.Threading.Monitor::",
+		// System.Threading.ThreadLocal`1/AsyncLocal`1 (Fase 3.61) — see
+		// internal/bcl/system_threadlocal.go's own doc comment.
+		"System.Threading.ThreadLocal`1::",
+		"System.Threading.AsyncLocal`1::",
 		// Fase 3.59: real, Permissions-gated System.IO.File/Directory/
 		// FileStream/FileInfo/DirectoryInfo (internal/bcl/system_io_file.
 		// go, internal/interpreter/permissions.go) plus the two new

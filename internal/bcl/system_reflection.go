@@ -205,6 +205,18 @@ func init() {
 	// — same "no attribute ever found" posture as GetCustomAttributes
 	// above, just the singular real static-method shape.
 	register("System.Attribute::GetCustomAttribute", true, reflectionNullValue)
+	// CustomAttributeExtensions.GetCustomAttribute<T>(this MemberInfo) —
+	// the generic extension-method spelling of the same real API
+	// (found via Markdig's own Markdown.Version property reading its
+	// containing assembly's AssemblyFileVersionAttribute). Same "no
+	// attribute ever found" posture as System.Attribute::GetCustomAttribute
+	// above — a plain bcl.Native despite being a generic method call site,
+	// since vmnet's type-erased Value model means the answer (always
+	// null) doesn't depend on what T actually closes over, so no
+	// genericMachineRegistry entry is needed at all.
+	register("System.Reflection.CustomAttributeExtensions::GetCustomAttribute", true, reflectionNullValue)
+	register("System.Reflection.CustomAttributeExtensions::GetCustomAttributes", true, reflectionEmptyObjectArray)
+	register("System.Reflection.CustomAttributeExtensions::IsDefined", true, reflectionFalse)
 }
 
 func reflectionEmptyObjectArray(args []runtime.Value) (runtime.Value, error) {
