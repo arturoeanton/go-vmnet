@@ -81,6 +81,19 @@ func init() {
 	machineRegistry["System.Reflection.ConstructorInfo::GetParameters"] = methodBaseGetParameters
 	machineRegistry["System.Reflection.MethodInfo::GetParameters"] = methodBaseGetParameters
 	machineRegistry["System.Reflection.MethodBase::GetParameters"] = methodBaseGetParameters
+	// Type.GetFields()/GetMethods() (Fase 3.53, plural, no-args overloads)
+	// — found via a corpus-wide compatibility pass: 9 of 19 real NuGet
+	// packages call GetFields()/GetMethods() (distinct from the
+	// already-real singular GetField(name)/GetMethod(name) above) to
+	// enumerate every declared field/method rather than look one up by
+	// name, the same real, common "reflection-based registry" pattern
+	// GetConstructor/GetProperties already target. Each backed by its own
+	// new Machine.ResolveFields/ResolveMethods callback (assembly.go's
+	// resolveFields/resolveMethods) walking TypeDefFieldRange/
+	// TypeDefMethodRange directly, mirroring ResolveProperties' own
+	// TypeDefPropertyRange walk.
+	machineRegistry["System.Type::GetFields"] = typeGetFields
+	machineRegistry["System.Type::GetMethods"] = typeGetMethods
 }
 
 // assemblyGetManifestResourceStream backs Assembly.GetManifestResource
@@ -743,7 +756,11 @@ func typeGetMethod(m *Machine, args []runtime.Value, depth int, instrCount *int6
 
 // typeGetField backs Type.GetField(string name) — existence checked via
 // the same Type.FieldIndex/StaticFieldIndex lookup ldfld/ldsfld already
-// use, not a separate metadata scan.
+// use, not a separate metadata scan. The field's own declared TYPE (Fase
+// 3.53, FieldInfo.FieldType) is a separate, best-effort lookup via
+// fieldTypeFullNameOf below — Machine.ResolveFields being nil/not finding
+// it just means "" (a null FieldType later), never a hard failure, since
+// existence itself already came from t.FieldIndex/StaticFieldIndex above.
 func typeGetField(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
 	if len(args) != 2 {
 		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetField expects (this, name)")
@@ -766,7 +783,93 @@ func typeGetField(m *Machine, args []runtime.Value, depth int, instrCount *int64
 	if t.FieldIndex(fieldName) < 0 && t.StaticFieldIndex(fieldName) < 0 {
 		return runtime.Null(), nil
 	}
-	return bcl.NewFieldInfoValue(typeFullName, fieldName), nil
+	return bcl.NewFieldInfoValue(typeFullName, fieldName, fieldTypeFullNameOf(m, typeFullName, fieldName)), nil
+}
+
+// fieldTypeFullNameOf looks up fieldName's own declared type off
+// Machine.ResolveFields' parallel names/fieldTypes slices (assembly.go's
+// resolveFields) — shared by typeGetField (singular) and typeGetFields
+// (plural) below so both agree on exactly the same source. "" for an
+// unset resolver or an unresolvable type/field name, which the caller
+// then stores as FieldInfo.FieldType's own "no answer" sentinel (see
+// nativeFieldInfo's own doc comment) rather than treating as an error.
+func fieldTypeFullNameOf(m *Machine, typeFullName, fieldName string) string {
+	if m.ResolveFields == nil {
+		return ""
+	}
+	names, fieldTypes, _, ok := m.ResolveFields(typeFullName)
+	if !ok {
+		return ""
+	}
+	for i, n := range names {
+		if n == fieldName {
+			return fieldTypes[i]
+		}
+	}
+	return ""
+}
+
+// typeGetFields backs Type.GetFields() (Fase 3.53, plural, no-args
+// overload) — every field typeFullName's own TypeDef declares
+// (Machine.ResolveFields, backed by the real Field table, not a name
+// guess), each wrapped as its own FieldInfo carrying its real declared
+// type. Empty (not an error) for a BCL type vmnet has no TypeDef for at
+// all, matching GetProperties/GetInterfaces' own "no metadata, no
+// results" convention.
+func typeGetFields(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetFields expects a receiver")
+	}
+	typeFullName, ok := typeFullNameOfOpen(args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetFields receiver is not a Type")
+	}
+	if m.ResolveFields == nil {
+		return runtime.ArrRef(runtime.NewArray(0)), nil
+	}
+	names, fieldTypes, _, ok := m.ResolveFields(typeFullName)
+	if !ok {
+		return runtime.ArrRef(runtime.NewArray(0)), nil
+	}
+	elems := make([]runtime.Value, len(names))
+	for i, name := range names {
+		elems[i] = bcl.NewFieldInfoValue(typeFullName, name, fieldTypes[i])
+	}
+	return runtime.ArrRef(&runtime.Array{Elems: elems}), nil
+}
+
+// typeGetMethods backs Type.GetMethods() (Fase 3.53, plural, no-args
+// overload) — every method typeFullName's own TypeDef declares
+// (Machine.ResolveMethods), each wrapped as its own MethodInfo. Same "one
+// MethodInfo per declared name, no per-overload signature tracking"
+// simplification typeGetMethod's own doc comment already documents
+// accepting for a single-name lookup — a real overload set collapses to
+// duplicate, functionally interchangeable MethodInfo entries here
+// (Invoke always dispatches through the same first-match m.call), rather
+// than real reflection's one-distinct-MethodInfo-per-overload. Empty
+// (not an error) for a BCL type vmnet has no TypeDef for at all, matching
+// GetFields/GetProperties/GetInterfaces' own "no metadata, no results"
+// convention.
+func typeGetMethods(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetMethods expects a receiver")
+	}
+	typeFullName, ok := typeFullNameOfOpen(args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetMethods receiver is not a Type")
+	}
+	if m.ResolveMethods == nil {
+		return runtime.ArrRef(runtime.NewArray(0)), nil
+	}
+	names, ok := m.ResolveMethods(typeFullName)
+	if !ok {
+		return runtime.ArrRef(runtime.NewArray(0)), nil
+	}
+	elems := make([]runtime.Value, len(names))
+	for i, name := range names {
+		elems[i] = bcl.NewMethodInfoValue(typeFullName, name)
+	}
+	return runtime.ArrRef(&runtime.Array{Elems: elems}), nil
 }
 
 // constructorInfoInvoke backs ConstructorInfo.Invoke(object[] parameters)

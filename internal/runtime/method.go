@@ -134,4 +134,25 @@ type Resolvers struct {
 	// data available" contract; ok=true with zero overloads is real too
 	// (a type with no matching member at all).
 	ResolveMemberParams func(typeFullName, memberName string) (paramTypes [][]string, paramNames [][]string, ok bool)
+	// ResolveFields reads every field typeFullName's own TypeDef declares
+	// (Fase 3.53: System.Reflection — Type.GetFields, plus FieldInfo.
+	// FieldType) — parallel slices (names[i]/fieldTypes[i]/isStatic[i] all
+	// describe the same i'th field), same convention ResolveProperties'
+	// own parallel-slice fields already use. fieldTypes[i] is read
+	// straight off the field's own declared signature (no getter/setter
+	// indirection needed, unlike PropertyInfo.PropertyType — a field's
+	// type IS its signature). ok=false for a type with no TypeDef at all,
+	// matching every other resolver's own "no data available" contract.
+	ResolveFields func(typeFullName string) (names []string, fieldTypes []string, isStatic []bool, ok bool)
+	// ResolveMethods reads every method name typeFullName's own TypeDef
+	// declares (Fase 3.53: System.Reflection — Type.GetMethods), excluding
+	// real constructors (.ctor/.cctor — never returned by GetMethods,
+	// only GetConstructors). Unlike ResolveMember/ResolveMemberParams,
+	// this never disambiguates by signature: a same-named overload set
+	// appears once per real MethodDef row, the same "one MethodInfo per
+	// declared method, no per-overload parameter tracking" simplification
+	// Type.GetMethod's own doc comment already documents accepting.
+	// ok=false for a type with no TypeDef at all, matching every other
+	// resolver's own "no data available" contract.
+	ResolveMethods func(typeFullName string) (names []string, ok bool)
 }

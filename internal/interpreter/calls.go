@@ -86,6 +86,18 @@ type PropertyResolver func(typeFullName string) (names []string, canRead []bool,
 // GetParameters) — see runtime.Resolvers.ResolveMemberParams.
 type MemberParamsResolver func(typeFullName, memberName string) (paramTypes [][]string, paramNames [][]string, ok bool)
 
+// FieldsResolver reads every field typeFullName's own TypeDef declares
+// (Fase 3.53, Type.GetFields plus FieldInfo.FieldType) — parallel slices
+// (names[i]/fieldTypes[i]/isStatic[i] all describe the same i'th field,
+// same convention PropertyResolver's own names/canRead/canWrite/propTypes
+// slices already use) — see runtime.Resolvers.ResolveFields.
+type FieldsResolver func(typeFullName string) (names []string, fieldTypes []string, isStatic []bool, ok bool)
+
+// MethodsResolver reads every method name typeFullName's own TypeDef
+// declares (Fase 3.53, Type.GetMethods) — see runtime.Resolvers.
+// ResolveMethods.
+type MethodsResolver func(typeFullName string) (names []string, ok bool)
+
 // genericMachineNative is a Machine-aware native (like machineNative,
 // linq.go) that additionally needs the call site's own resolved generic
 // method type arguments (Fase 3.40, ir.Call.MethodGenericArgs) — e.g.

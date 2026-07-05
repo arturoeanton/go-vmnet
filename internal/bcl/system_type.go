@@ -60,6 +60,16 @@ func init() {
 	register("System.Type::GetElementType", true, typeGetElementType)
 	register("System.Type::MakeGenericType", true, typeMakeGenericType)
 	register("System.Nullable::GetUnderlyingType", true, nullableGetUnderlyingType)
+	// IsGenericTypeDefinition/GenericTypeArguments/ContainsGenericParameters/
+	// IsGenericParameter (Fase 3.53, found via a corpus-wide compatibility
+	// pass: 5-7 of 19 real NuGet packages each) — same pure string-shape
+	// posture as IsGenericType/GetGenericArguments above, no Machine access
+	// needed: every answer comes straight out of FullName's own
+	// "Open`N[[Arg1],[Arg2]]" encoding, never a plugin TypeDef's real flags.
+	register("System.Type::get_IsGenericTypeDefinition", true, typeGetIsGenericTypeDefinition)
+	register("System.Type::get_GenericTypeArguments", true, typeGetGenericTypeArguments)
+	register("System.Type::get_ContainsGenericParameters", true, typeGetContainsGenericParameters)
+	register("System.Type::get_IsGenericParameter", true, typeGetIsGenericParameter)
 
 	registerCtor("System.Reflection.Assembly", func([]runtime.Value) (*runtime.Object, error) {
 		return &runtime.Object{Native: &nativeAssembly{}}, nil
@@ -279,6 +289,67 @@ func typeGetGenericArguments(args []runtime.Value) (runtime.Value, error) {
 		elems[i] = NewTypeValue(n)
 	}
 	return runtime.ArrRef(&runtime.Array{Elems: elems}), nil
+}
+
+// typeGetIsGenericTypeDefinition backs Type.IsGenericTypeDefinition — true
+// only for the UNBOUND generic type itself (typeof(List<>), or
+// GetGenericTypeDefinition()'s own result): FullName carries a backtick
+// arity marker ("`1") but no closed "[[...]]" argument list at all. A
+// closed instantiation (typeof(List<int>), FullName "...`1[[System.
+// Int32]]") answers false here even though IsGenericType is true for it
+// too — real reflection's own documented distinction between "is this
+// type generic at all" (IsGenericType) and "is this SPECIFICALLY the
+// open definition" (IsGenericTypeDefinition).
+func typeGetIsGenericTypeDefinition(args []runtime.Value) (runtime.Value, error) {
+	ti, err := asTypeInfo(args[0])
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	return runtime.Bool(strings.Contains(ti.FullName, "`") && !strings.Contains(ti.FullName, "[[")), nil
+}
+
+// typeGetGenericTypeArguments backs the GenericTypeArguments property —
+// the same closed-generic-argument extraction GetGenericArguments()
+// performs (both read the same "[[Arg1],[Arg2]]" encoded suffix), but
+// real GenericTypeArguments only ever answers for a closed constructed
+// generic type: an open, unbound generic type or a non-generic type both
+// answer empty, matching real semantics. Unlike GetGenericArguments()
+// (which also returns the open definition's own unbound parameter
+// placeholders "T" — something vmnet has no way to name at all, see that
+// function's own doc comment), GenericTypeArguments never did return
+// those in the first place, so there's no divergent case to handle: this
+// safely reuses the exact same code path.
+func typeGetGenericTypeArguments(args []runtime.Value) (runtime.Value, error) {
+	return typeGetGenericArguments(args)
+}
+
+// typeGetContainsGenericParameters backs Type.ContainsGenericParameters —
+// true for any type that still has an unbound generic parameter
+// somewhere in its shape. vmnet's reflection-lite Type model only ever
+// represents two generic shapes: fully open (typeof(List<>), no
+// "[[...]]" suffix at all) and fully closed (every argument concrete,
+// typeof(List<int>)) — there's no partially-open shape to detect here
+// (e.g. an open type nested inside an otherwise-closed generic method's
+// own type parameter), so this collapses to exactly the same test as
+// IsGenericTypeDefinition: the type IS the open definition itself.
+func typeGetContainsGenericParameters(args []runtime.Value) (runtime.Value, error) {
+	return typeGetIsGenericTypeDefinition(args)
+}
+
+// typeGetIsGenericParameter backs Type.IsGenericParameter — true only for
+// a Type instance that IS itself a generic parameter placeholder (the
+// `T` in `class Foo<T>`, as obtained from real Type.GetGenericArguments()
+// called on the open generic type definition). vmnet never actually
+// produces such a value: ldtoken/typeof(T) inside a generic body is
+// always resolved to its real closed type argument by the time a Type
+// value exists at all (Fase 3.25's documented limitation — there's no
+// unbound-parameter Type shape modeled here), so this always answers
+// false for every Type value vmnet can construct.
+func typeGetIsGenericParameter(args []runtime.Value) (runtime.Value, error) {
+	if _, err := asTypeInfo(args[0]); err != nil {
+		return runtime.Value{}, err
+	}
+	return runtime.Bool(false), nil
 }
 
 // typeMakeGenericType receives its type arguments as a real System.Type[]
@@ -513,6 +584,31 @@ func typeGetName(args []runtime.Value) (runtime.Value, error) {
 	// only ever understands a real Type receiver.
 	if mi, ok := nativeOf[*nativeMemberInfo](args[0]); ok {
 		return runtime.String(mi.name), nil
+	}
+	// FieldInfo/MethodInfo/ConstructorInfo/PropertyInfo.Name (Fase 3.53) —
+	// same real-IL precedent as MemberInfo.DeclaringType (see that
+	// registration's own comment, internal/bcl/system_reflection.go): none
+	// of these four concrete reflection wrapper types redeclare Name
+	// themselves either (it's only ever declared once, on MemberInfo
+	// itself), so a real compiled call site's `xxxInfo.Name` always
+	// callvirts THIS exact "MemberInfo::get_Name" token regardless of
+	// which concrete wrapper it's actually holding — confirmed via
+	// ilspycmd against a real compiled test DLL enumerating Type.
+	// GetFields()'s own FieldInfo[] result. A ConstructorInfo's Name is
+	// always ".ctor" here (vmnet's reflection model never distinguishes a
+	// static .cctor as its own ConstructorInfo — see nativeConstructorInfo's
+	// own doc comment, which is only ever about instance constructors).
+	if _, ok := nativeOf[*nativeConstructorInfo](args[0]); ok {
+		return runtime.String(".ctor"), nil
+	}
+	if methodInfo, ok := nativeOf[*nativeMethodInfo](args[0]); ok {
+		return runtime.String(methodInfo.methodName), nil
+	}
+	if fi, ok := nativeOf[*nativeFieldInfo](args[0]); ok {
+		return runtime.String(fi.fieldName), nil
+	}
+	if pi, ok := nativeOf[*nativePropertyInfo](args[0]); ok {
+		return runtime.String(pi.propertyName), nil
 	}
 	ti, err := asTypeInfo(args[0])
 	if err != nil {

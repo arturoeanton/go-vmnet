@@ -51,9 +51,21 @@ type nativeMethodInfo struct {
 	genericArgs []string
 }
 
+// nativeFieldInfo backs System.Reflection.FieldInfo (Fase 3.39, Type.
+// GetField(s)). fieldTypeFullName (Fase 3.53) backs FieldType — unlike
+// PropertyInfo.PropertyType (nativePropertyInfo.propertyTypeFullName),
+// which has to read a getter/setter MethodDef's own return/parameter type
+// since a property is just a pair of accessor methods with no signature
+// of its own, a field's declared signature IS its type: assembly.go's
+// resolveFields reads it straight off the Field table (metadata.
+// ParseFieldSig + ir.SigTypeFullName) with no accessor indirection at
+// all. "" (same "somehow unresolvable" fallback propertyTypeFullName
+// uses) only for a FieldInfo obtained before ResolveFields existed, or a
+// BCL type vmnet has no TypeDef for.
 type nativeFieldInfo struct {
-	typeFullName string
-	fieldName    string
+	typeFullName      string
+	fieldName         string
+	fieldTypeFullName string
 }
 
 // nativeParameterInfo backs System.Reflection.ParameterInfo (Fase 3.52,
@@ -134,6 +146,69 @@ func init() {
 	register("System.Reflection.ParameterInfo::get_ParameterType", true, parameterInfoGetParameterType)
 	register("System.Reflection.ParameterInfo::get_Name", true, parameterInfoGetName)
 	register("System.Reflection.ParameterInfo::get_Position", true, parameterInfoGetPosition)
+	// FieldInfo.FieldType (Fase 3.53) — a plain read off the wrapper's own
+	// stored fieldTypeFullName (see nativeFieldInfo's own doc comment for
+	// why, unlike PropertyType, this needs no accessor-method indirection
+	// at all), so it stays a plain bcl.Native like ParameterType above
+	// rather than needing Machine access.
+	register("System.Reflection.FieldInfo::get_FieldType", true, fieldInfoGetFieldType)
+	// MemberInfo.DeclaringType (Fase 3.53) — real reflection's
+	// ConstructorInfo/MethodInfo/FieldInfo/PropertyInfo all inherit this
+	// from MemberInfo WITHOUT overriding/re-declaring it themselves (only
+	// RuntimeFieldInfo etc., the private concrete CLR types, actually
+	// override it) — so a real compiler-emitted call site against any of
+	// them (e.g. `fi.DeclaringType` where fi is statically typed
+	// FieldInfo) callvirts "System.Reflection.MemberInfo::get_
+	// DeclaringType" directly (confirmed via ilspycmd against a real
+	// compiled test DLL), never "FieldInfo::get_DeclaringType" — the exact
+	// same real-IL precedent get_Name's own registration comment above
+	// documents (and originally got wrong the same way, Fase 3.41's own
+	// bug). One shared registration handles every one of vmnet's four
+	// wrapper types, each already storing its own owning typeFullName
+	// (that's how GetValue/Invoke/GetParameters find their real target in
+	// the first place) — no Machine access needed, unlike Invoke/GetValue
+	// which actually have to run something.
+	register("System.Reflection.MemberInfo::get_DeclaringType", true, memberInfoGetDeclaringType)
+}
+
+func fieldInfoGetFieldType(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: FieldInfo.FieldType expects a receiver")
+	}
+	fi, ok := nativeOf[*nativeFieldInfo](args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: FieldInfo.FieldType receiver is not a FieldInfo")
+	}
+	if fi.fieldTypeFullName == "" {
+		return runtime.Null(), nil
+	}
+	return NewTypeValue(fi.fieldTypeFullName), nil
+}
+
+// memberInfoGetDeclaringType backs MemberInfo.DeclaringType for every one
+// of the four concrete wrapper types registered above — each one already
+// carries its own owning typeFullName (nativeConstructorInfo/
+// nativeMethodInfo/nativeFieldInfo/nativePropertyInfo), so this just
+// tries each shape in turn, the same "check every possible native shape"
+// posture typeGetName (system_type.go) already uses to answer
+// MemberInfo.Name for both a Type and a *nativeMemberInfo receiver.
+func memberInfoGetDeclaringType(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: MemberInfo.DeclaringType expects a receiver")
+	}
+	if ci, ok := nativeOf[*nativeConstructorInfo](args[0]); ok {
+		return NewTypeValue(ci.typeFullName), nil
+	}
+	if mi, ok := nativeOf[*nativeMethodInfo](args[0]); ok {
+		return NewTypeValue(mi.typeFullName), nil
+	}
+	if fi, ok := nativeOf[*nativeFieldInfo](args[0]); ok {
+		return NewTypeValue(fi.typeFullName), nil
+	}
+	if pi, ok := nativeOf[*nativePropertyInfo](args[0]); ok {
+		return NewTypeValue(pi.typeFullName), nil
+	}
+	return runtime.Value{}, fmt.Errorf("bcl: MemberInfo.DeclaringType receiver is not a ConstructorInfo, MethodInfo, FieldInfo, or PropertyInfo")
 }
 
 func methodInfoMakeGenericMethod(args []runtime.Value) (runtime.Value, error) {
@@ -326,8 +401,14 @@ func NewMethodInfoValue(typeFullName, methodName string) runtime.Value {
 	return runtime.ObjRef(&runtime.Object{Native: &nativeMethodInfo{typeFullName: typeFullName, methodName: methodName}})
 }
 
-func NewFieldInfoValue(typeFullName, fieldName string) runtime.Value {
-	return runtime.ObjRef(&runtime.Object{Native: &nativeFieldInfo{typeFullName: typeFullName, fieldName: fieldName}})
+// NewFieldInfoValue builds a FieldInfo wrapper carrying its own real
+// declared type (Fase 3.53, FieldInfo.FieldType) — fieldTypeFullName is
+// "" for the handful of call sites that don't have a real resolved type
+// name to hand (a BCL type vmnet has no TypeDef/FieldsResolver data for
+// at all), which fieldInfoGetFieldType above then answers with null,
+// matching PropertyInfo.PropertyType's own "" -> null convention.
+func NewFieldInfoValue(typeFullName, fieldName, fieldTypeFullName string) runtime.Value {
+	return runtime.ObjRef(&runtime.Object{Native: &nativeFieldInfo{typeFullName: typeFullName, fieldName: fieldName, fieldTypeFullName: fieldTypeFullName}})
 }
 
 // NewPropertyInfoValue builds a System.Reflection.PropertyInfo wrapper —

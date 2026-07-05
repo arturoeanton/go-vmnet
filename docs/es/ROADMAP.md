@@ -4778,6 +4778,56 @@ go test ./...
 ```
 
 ---
+### Fase 3.56 — cinco brechas más de reflection del barrido de prioridad del corpus completo
+
+**Objetivo:** continuando el barrido de todo el corpus (Fase 3.54/3.55), cinco brechas reales más
+de `System.Reflection`, cada una verificada de forma independiente contra la salida real de
+`dotnet run` (incluyendo cruzar contra IL real decompilado vía `ilspycmd` para confirmar
+exactamente a qué nombre `Type::Method` compila el código real antes de asumir).
+
+- [x] `FieldInfo.FieldType` — lee directo de la propia firma del campo (`metadata.ParseFieldSig` +
+      `ir.SigTypeFullName`), más simple que `PropertyInfo.PropertyType` (el propio precedente de
+      las Fases 3.51/3.52) ya que un campo no tiene indirección de método accesor que leer.
+- [x] `MemberInfo.DeclaringType` — un nativo compartido cubriendo los cuatro tipos wrapper de
+      reflection (`ConstructorInfo`/`MethodInfo`/`FieldInfo`/`PropertyInfo`) — confirmado vía IL
+      real decompilado que ninguno de los cuatro lo re-declara, todos resuelven a través del
+      `MemberInfo::get_DeclaringType` base, el mismo precedente ya establecido para
+      `MemberInfo::get_Name`.
+- [x] `Type.GetFields()`/`GetMethods()` (las sobrecargas PLURALES, sin argumentos, que devuelven
+      arrays — las singulares `GetField(name)`/`GetMethod(name)` ya existían) — nuevos callbacks
+      resolver `Machine.ResolveFields`/`ResolveMethods` conectados de la misma forma que ya lo
+      está `ResolveProperties` (`calls.go` → `eval.go` → `runtime/method.go` → los propios
+      recorredores de rango de campo/método de `assembly.go`), reusando el ya existente
+      `TypeDefFieldRange`/`TypeDefMethodRange`.
+- [x] `Type.IsGenericTypeDefinition`/`GenericTypeArguments`/`ContainsGenericParameters`/
+      `IsGenericParameter` — chequeos puros de forma de string sobre el propio nombre completo de
+      un tipo, la misma postura que los ya existentes `IsGenericType`/`GetGenericArguments`.
+- [x] **Fix bonus, necesario para que `GetFields()`/`GetMethods()` sean realmente usables**:
+      decompilar IL real para este pase reveló que `FieldInfo.Name`/`MethodInfo.Name`/
+      `ConstructorInfo.Name`/`PropertyInfo.Name` TAMBIÉN resuelven a través del
+      `MemberInfo::get_Name` compartido — que solo reconocía un receptor `Type`/
+      `nativeMemberInfo`. Cada llamador real que enumera un resultado de `GetFields()`/
+      `GetMethods()` lee `.Name` en cada elemento inmediatamente, así que esta fue una brecha real
+      y determinante descubierta ejercitando de verdad los nuevos métodos plurales de punta a
+      punta, no un hallazgo separado y no relacionado.
+
+**Encontrado, no arreglado** (limitaciones preexistentes, no regresiones nuevas):
+`Type.GetMethod(name)` solo busca los propios miembros declarados de un tipo, no los heredados
+(el .NET real busca en toda la cadena de base — una feature separada y más grande);
+`FieldType`/`PropertyType` no pueden resolver el propio tipo de campo de un parámetro de tipo
+genérico abierto (ej. `public T Value` en `Generic<T>`, ya que `ir.SigTypeFullName` no tiene caso
+`SigVar`/`SigMVar`) — una limitación que `PropertyType` ya tenía, no algo que este pase introdujo.
+
+### Cómo verificar Fase 3.56
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+```
+
+---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
 

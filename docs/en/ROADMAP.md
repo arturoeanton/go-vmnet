@@ -4628,6 +4628,53 @@ go test ./...
 ```
 
 ---
+### Fase 3.56 — five more reflection gaps from the corpus-wide priority sweep
+
+**Goal:** continuing the corpus-wide sweep (Fase 3.54/3.55), five more real `System.Reflection`
+gaps, each independently verified against real `dotnet run` output (including cross-referencing
+decompiled real IL via `ilspycmd` to confirm exactly which `Type::Method` name real code compiles
+to before assuming).
+
+- [x] `FieldInfo.FieldType` — reads straight off the field's own signature (`metadata.
+      ParseFieldSig` + `ir.SigTypeFullName`), simpler than `PropertyInfo.PropertyType` (Fase
+      3.51/3.52's own precedent) since a field has no accessor-method indirection to read through.
+- [x] `MemberInfo.DeclaringType` — one shared native covering all four reflection wrapper types
+      (`ConstructorInfo`/`MethodInfo`/`FieldInfo`/`PropertyInfo`) — confirmed via decompiled real
+      IL that none of the four redeclare it, they all resolve through the base `MemberInfo::
+      get_DeclaringType`, the same precedent already established for `MemberInfo::get_Name`.
+- [x] `Type.GetFields()`/`GetMethods()` (the PLURAL, no-args overloads returning arrays — the
+      singular `GetField(name)`/`GetMethod(name)` already existed) — new `Machine.ResolveFields`/
+      `ResolveMethods` resolver callbacks wired the same way `ResolveProperties` already is
+      (`calls.go` → `eval.go` → `runtime/method.go` → `assembly.go`'s own field/method-range
+      walkers), reusing the already-existing `TypeDefFieldRange`/`TypeDefMethodRange`.
+- [x] `Type.IsGenericTypeDefinition`/`GenericTypeArguments`/`ContainsGenericParameters`/
+      `IsGenericParameter` — pure string-shape checks on a type's own full name, the same posture
+      as the already-existing `IsGenericType`/`GetGenericArguments`.
+- [x] **Bonus fix, required to make `GetFields()`/`GetMethods()` actually usable**: decompiling
+      real IL for this pass turned up that `FieldInfo.Name`/`MethodInfo.Name`/`ConstructorInfo.
+      Name`/`PropertyInfo.Name` ALSO resolve through the shared `MemberInfo::get_Name` — which
+      only ever recognized a `Type`/`nativeMemberInfo` receiver. Every real caller enumerating a
+      `GetFields()`/`GetMethods()` result reads `.Name` on each element immediately, so this was a
+      real, load-bearing gap discovered by actually exercising the new plural methods end to end,
+      not a separate, unrelated finding.
+
+**Found, not fixed** (pre-existing limitations, not new regressions): `Type.GetMethod(name)` only
+searches a type's own declared members, not its inherited ones (real .NET searches the whole base
+chain — a separate, larger feature); `FieldType`/`PropertyType` can't resolve an open generic type
+parameter's own field type (e.g. `public T Value` on `Generic<T>`, since `ir.SigTypeFullName` has
+no `SigVar`/`SigMVar` case) — a limitation `PropertyType` already had, not something this pass
+introduced.
+
+### How to verify Fase 3.56
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+```
+
+---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 
 **Goal:** turn the functional engine into an adoptable product — reliable, documented, and

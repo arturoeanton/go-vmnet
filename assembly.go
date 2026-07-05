@@ -1204,6 +1204,8 @@ func (asm *Assembly) resolvers() *runtime.Resolvers {
 		ResolveManifestResource: asm.resolveManifestResource,
 		ResolveProperties:       asm.resolveProperties,
 		ResolveMemberParams:     asm.resolveMemberParams,
+		ResolveFields:           asm.resolveFields,
+		ResolveMethods:          asm.resolveMethods,
 	}
 }
 
@@ -1507,6 +1509,90 @@ func (asm *Assembly) paramNamesFor(methodRID uint32, paramCount int) []string {
 		names[p.Sequence-1] = p.Name
 	}
 	return names
+}
+
+// resolveFields backs the interpreter's FieldsResolver (Fase 3.53, Type.
+// GetFields, plus FieldInfo.FieldType) — reads typeFullName's own
+// declared fields directly off the real Field table (metadata.
+// TypeDefFieldRange/Field), the same rows buildType already walks to
+// compute each field's runtime default; unlike buildType, this keeps the
+// field's own declared TYPE name (metadata.ParseFieldSig + ir.
+// SigTypeFullName, the identical two-call sequence propertyTypeFullName
+// above already uses for PropertyInfo.PropertyType) rather than its
+// default value — a field's declared signature IS its type, with no
+// getter/setter indirection to read through at all, unlike a property.
+func (asm *Assembly) resolveFields(typeFullName string) (names []string, fieldTypes []string, isStatic []bool, ok bool) {
+	typeFullName = bcl.GenericOpenName(typeFullName)
+	namespace, typeName := splitTypeName(typeFullName)
+	typeRID, _, err := asm.md.FindTypeDef(namespace, typeName)
+	if err != nil {
+		for _, dep := range asm.deps {
+			if n, ft, st, depOK := dep.resolveFields(typeFullName); depOK {
+				return n, ft, st, true
+			}
+		}
+		return nil, nil, nil, false
+	}
+	start, end, err := asm.md.TypeDefFieldRange(typeRID)
+	if err != nil {
+		return nil, nil, nil, false
+	}
+	for rid := start; rid < end; rid++ {
+		f, err := asm.md.Field(rid)
+		if err != nil {
+			continue
+		}
+		fieldType := ""
+		if sig, sigErr := metadata.ParseFieldSig(f.Signature); sigErr == nil {
+			if name, nameErr := ir.SigTypeFullName(asm.md, sig); nameErr == nil {
+				fieldType = name
+			}
+		}
+		names = append(names, f.Name)
+		fieldTypes = append(fieldTypes, fieldType)
+		isStatic = append(isStatic, f.Flags&fieldAttrStatic != 0)
+	}
+	return names, fieldTypes, isStatic, true
+}
+
+// resolveMethods backs the interpreter's MethodsResolver (Fase 3.53, Type.
+// GetMethods) — every method name typeFullName's own TypeDef declares,
+// read directly off the real MethodDef table (metadata.
+// TypeDefMethodRange/MethodDef). Real constructors (.ctor/.cctor) are
+// excluded, matching real Type.GetMethods()'s own contract (a constructor
+// is never returned by GetMethods, only GetConstructors); every other
+// declared method — including a property's own get_Xxx/set_Xxx accessors,
+// which real reflection's default GetMethods() DOES return even though
+// GetProperties() already exposes them a different way — is included
+// as-is. Doesn't deduplicate or otherwise disambiguate a same-named
+// overload set: one MethodInfo per real MethodDef row, same "no
+// per-overload signature tracking" simplification Type.GetMethod's own
+// doc comment (typeGetMethod, internal/interpreter/reflection.go) already
+// documents accepting for a single-name lookup.
+func (asm *Assembly) resolveMethods(typeFullName string) (names []string, ok bool) {
+	typeFullName = bcl.GenericOpenName(typeFullName)
+	namespace, typeName := splitTypeName(typeFullName)
+	typeRID, _, err := asm.md.FindTypeDef(namespace, typeName)
+	if err != nil {
+		for _, dep := range asm.deps {
+			if n, depOK := dep.resolveMethods(typeFullName); depOK {
+				return n, true
+			}
+		}
+		return nil, false
+	}
+	start, end, err := asm.md.TypeDefMethodRange(typeRID)
+	if err != nil {
+		return nil, false
+	}
+	for rid := start; rid < end; rid++ {
+		r, err := asm.md.MethodDef(rid)
+		if err != nil || r.Name == ".ctor" || r.Name == ".cctor" {
+			continue
+		}
+		names = append(names, r.Name)
+	}
+	return names, true
 }
 
 // resolveTypeByFullName implements interpreter.TypeResolver: it builds a
