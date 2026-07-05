@@ -4922,6 +4922,137 @@ cd examples/sqlite-demo && go run . && cd -   # confirms the SqliteConnection re
 ```
 
 ---
+## Fase 3.60 — real Microsoft.Extensions.DependencyInjection, three deep interpreter fixes
+
+**Goal:** start on the user's own explicit priority list — official Microsoft
+`Microsoft.Extensions.*` packages and a further round of popular NuGets — by measuring the whole
+family (a corpus-wide checker scan the same way Fases 3.54-3.59 scoped their own priorities) and
+getting the highest-value one, `Microsoft.Extensions.DependencyInjection` (Microsoft's own official
+DI container, the foundation every ASP.NET Core/worker-service `Program.cs` builds on), running
+end to end with a real service resolved through real constructor injection — not just a high
+checker percentage.
+
+**Measured, before any new work** (checker %, `netstandard-lite` profile, full transitive deps):
+`Microsoft.Extensions.Configuration.Abstractions` 100.0%, `Options.ConfigurationExtensions` 100.0%,
+`Options` 99.7%, `Configuration.Json` 98.8%, `Logging` 98.1%, `Configuration.EnvironmentVariables`
+98.0%, `Logging.Abstractions` 97.8%, `Configuration` 97.2%, `Primitives` 96.9%,
+`Configuration.FileExtensions` 95.9%, `Caching.Abstractions` 95.9%, `DependencyInjection.Abstractions`
+94.0%, `System.ComponentModel.Annotations` 94.1%, `Logging.Console` 90.6%, `Configuration.Binder`
+89.4%, `DependencyInjection` 89.5%, `Caching.Memory` 87.3% — a 95.50% simple average across all 17,
+already far ahead of a cold start.
+
+Despite `DependencyInjection`'s own 89.5%, actually *running* `services.AddSingleton<TService,
+TImplementation>(); provider.GetRequiredService<TService>();` hit real, deep interpreter bugs no
+static checker percentage could have predicted — the checker proves a call target resolves to
+*something*, never that the resolved behavior is correct:
+
+- **A method-overload-resolution tie-break bug, causing an infinite self-recursion.**
+  `ServiceDescriptor`'s own real constructor chain has two different 3-argument constructors
+  differing only in their 2nd parameter's type (`object` on the real target vs. a concrete class on
+  a different overload) — a `null` 2nd argument at a call site whose own declared parameter type is
+  genuinely `object` (unresolvable to a name via `paramTypeName`, which only resolves
+  class/valuetype/generic-instantiation shapes, never `object` itself) was scoring the WRONG
+  candidate higher: `assembly.go`'s `pickMethodOverload` gives a `KindNull` argument a small,
+  deliberate bonus for a concrete class parameter over a bare `object` one (Fase 3.27, fixing a
+  *different* real Jint `Equals(object)`/`Equals(T)` mixup) — a reasonable tie-break when there's
+  truly no other signal, but wrong here because a stronger signal was available and simply
+  discarded: the call site's own parameter type genuinely IS `object`, and a candidate whose SAME
+  parameter is ALSO unresolvable-to-a-name (structurally "equally opaque") is real, positive
+  evidence of a match that outranks a candidate resolving to some unrelated concrete class. Fixed by
+  scoring that "both sides are equally unresolved" case explicitly, +6 — enough to overturn the
+  at-most-2-point `KindNull` class-vs-object gap without coming near any confirmed exact-match/
+  mismatch signal elsewhere in the same loop. Regression: `tests/fixtures/csharp/
+  OverloadTieBreak.cs`/`TestOverloadTieBreak_NullArgumentAgainstObjectVsClassParam`.
+- **`typeof(T)` never resolving on a generic method's own still-open type parameter.**
+  `ir.LoadTypeToken.IsMethodGenericParam` has existed since Fase 3.40 specifically to mark this
+  case, but `eval.go`'s own execution of it never actually consulted it — it always pushed the
+  IR-build-time `TypeFullName` (meaningless for this case, per that field's own doc comment),
+  degrading to an empty-named `Type` every time. `AddSingleton<TService, TImplementation>()`'s real
+  body does exactly `typeof(TImplementation)` on its own method generic parameter. Fixed by adding
+  `Frame.MethodGenericArgs` (the current call's own resolved generic type argument names, threaded
+  through a new `invoke(..., methodGenericArgs []string)` parameter — 7 call sites updated) and
+  having `LoadTypeToken`'s execution actually index into it. A second, deeper layer of the same gap:
+  a generic method *forwarding* its own still-open type parameter into ANOTHER generic call (e.g.
+  `ServiceDescriptor.Singleton<TService, TImplementation>()`'s own body calling itself recursively
+  through further generic machinery) compiles to a MethodSpec instantiated with the caller's own
+  unresolved `!!N` — `ir.SigTypeFullName` already had a documented `""` convention for this
+  (`metadata.SigGenericParam`), losing which parameter index was forwarded. Fixed by having
+  `methodSpecGenericArgNames` emit a `"!!N"` sentinel (ECMA-335's own ILAsm notation, reused
+  verbatim — a real type name can never begin with `!`) instead, resolved back into a real name by
+  `eval.go`'s own `ir.Call` case against the CALLING frame's `MethodGenericArgs`, at the exact point
+  each call executes (the same static IR runs for every different calling instantiation, so this
+  can't be resolved once at build time). Regression: `tests/fixtures/csharp/
+  GenericTypeOf.cs`/`TestGenericTypeOf_MethodGenericParam` (both the direct and the forwarded case).
+- **Six reflection resolvers missing the cross-package `globalTypeIndex` last-resort fallback a
+  sibling resolver already had.** `resolveTypeByFullName`/`resolveExplicitImplExact` already consult
+  `globalTypeIndex` (Fase 3.40/3.43) when a type isn't found through `asm.deps` — the reverse-edge
+  case where a shared framework assembly is handed a `Type`/reflects over a member belonging to the
+  type that loaded IT, not the other way any ordinary dependency edge points. `resolveMember`,
+  `resolveProperties`, `resolveMemberParams`, `resolveFields`, and `resolveMethods` (all added Fase
+  3.51-3.53, well after `globalTypeIndex` existed) never got the same fallback wired in — found via
+  a real, load-bearing case: `Microsoft.Extensions.DependencyInjection`'s own
+  `CallSiteFactory.CreateConstructorCallSite` calls `Type.GetConstructors()` on `Greeter`, a type
+  declared in the WRAPPER assembly that `DependencyInjection.dll` itself has no declared dependency
+  on at all (`wrapperAsm.WithDependencies(diAsm)` only ever points the other way). Fixed by adding
+  the identical two-line `globalTypeIndex` fallback to all six.
+- **New `MethodBase` accessibility getters**: `get_IsPublic`/`IsPrivate`/`IsFamily`/`IsAssembly`/
+  `IsStatic`/`IsVirtual`/`IsAbstract`/`IsFinal`, backed by a new `MemberFlagsResolver` (mirroring
+  `MemberParamsResolver`'s own re-resolve-by-(typeFullName,memberName,overloadIndex) shape) reading
+  each overload's raw ECMA-335 `MethodAttributes` bitmask straight off `MethodDefRow.Flags` — needed
+  by `DependencyInjection`'s own real constructor-selection logic (`IsPublic`) and found useful
+  enough (`ComponentModel.Annotations`/`Configuration.Binder` use several of the others) to
+  implement the whole family at once rather than piecemeal.
+- **`System.Type::IsInstanceOfType`** — the mirror image of the existing `IsAssignableFrom`, reusing
+  `isAssignableTo` directly against an actual value instead of a second `Type`; needed by
+  `ServiceProvider`'s own resolved-instance validation.
+- **`RuntimeHelpers.EnsureSufficientExecutionStack`** (a defensive real-recursion guard
+  `CallSiteRuntimeResolver` calls) registered as a no-op — vmnet's own `MaxCallDepth`/`MaxStackDepth`
+  already guard against runaway recursion at a layer above this.
+- **A minimal, explicitly-limited `GetCustomAttributes`/`IsDefined`/`Attribute.GetCustomAttribute`
+  stub** — always "no attributes found," across `ParameterInfo`/`MemberInfo`/`MethodInfo`/
+  `ConstructorInfo`/`MethodBase`/`PropertyInfo`/`FieldInfo`/`Type`. vmnet still has no real
+  `CustomAttributeData`/attribute-blob-decoding subsystem (ECMA-335 §II.23.3 — a genuinely new,
+  sizable piece of work, previously deferred and still deferred) — this stub is correct for the
+  overwhelming common case a defensive attribute check hits (there really is no such attribute
+  here), which is exactly what `DependencyInjection`'s own real constructor-injection call-site
+  builder does for every plain, unannotated parameter. Would give a wrong answer for a caller that
+  specifically depends on reading a real attribute's data.
+- **New demo, `examples/di-demo`**: the real, unmodified `Microsoft.Extensions.DependencyInjection`
+  8.0.0 package resolving `IGreeter` (which depends on `IClock`) through real constructor injection
+  — not a trivial parameterless-type special case. New `TestDiDemoE2E` (network-gated, matching
+  `TestJintDemoE2E`'s own established pattern).
+
+### Found, not fixed (this Fase)
+
+- **`System.Linq.Expressions` support remains minimal** (`Parameter`/`Property`/`Lambda`/`get_Body`/
+  `get_Member` only) — `DependencyInjection`'s own compiled-expression-tree fast path
+  (`ExpressionResolverBuilder`) needs far more (`Constant`/`Call`/`Block`/`Convert`/`IfThen`/
+  `Expression<T>.Compile()`/`ExpressionVisitor`, ...) than this Fase implements; not hit by the demo
+  above only because a service resolved a small, bounded number of times doesn't reach that
+  optimization tier in practice — a real risk for a long-running host resolving the same service
+  many times, still open.
+- **`System.Reflection.CustomAttributeData`/`System.Threading.AsyncLocal\`1`** — both have real,
+  measured demand across the `Microsoft.Extensions.*` family (`AsyncLocal` in `Caching.Memory`/
+  `Logging`/`Logging.Abstractions`; `CustomAttributeData` in `Configuration.Binder`/
+  `DependencyInjection`/`Logging`) and remain unimplemented — candidates for the next iteration.
+- **`Microsoft.Extensions.Logging.Console`'s own background flush thread** (`System.Threading.Thread`/
+  `Monitor.Wait`, real OS-thread-based async console writing) wasn't exercised by this Fase's demo
+  and remains unmeasured against a real run.
+
+### How to verify Fase 3.60
+
+```bash
+dotnet build tests/fixtures/csharp/Fixtures.csproj -c Release
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+dotnet build examples/di-demo/DiDemoWrapper.csproj -c Release
+cd examples/di-demo && go run . && cd -
+VMNET_NETWORK_TESTS=1 go test -run TestDiDemoE2E -v .
+```
+
+---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 
 **Goal:** turn the functional engine into an adoptable product — reliable, documented, and

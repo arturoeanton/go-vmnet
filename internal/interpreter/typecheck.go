@@ -237,15 +237,16 @@ var exceptionBaseType = map[string]string{
 	// UnauthorizedAccessException throws would otherwise have hit
 	// immediately the first time any caller wrapped one in a plain
 	// `catch (Exception e)`.
-	"System.IO.IOException":                "System.SystemException",
-	"System.IO.FileNotFoundException":      "System.IO.IOException",
-	"System.IO.DirectoryNotFoundException": "System.IO.IOException",
-	"System.IO.EndOfStreamException":       "System.IO.IOException",
-	"System.IO.InvalidDataException":       "System.IO.IOException",
-	"System.UnauthorizedAccessException":   "System.SystemException",
-	"System.ObjectDisposedException":       "System.InvalidOperationException",
-	"System.Data.DataException":            "System.SystemException",
-	"System.ApplicationException":          "System.Exception",
+	"System.IO.IOException":                      "System.SystemException",
+	"System.IO.FileNotFoundException":            "System.IO.IOException",
+	"System.IO.DirectoryNotFoundException":       "System.IO.IOException",
+	"System.IO.EndOfStreamException":             "System.IO.IOException",
+	"System.IO.InvalidDataException":             "System.IO.IOException",
+	"System.UnauthorizedAccessException":         "System.SystemException",
+	"System.ObjectDisposedException":             "System.InvalidOperationException",
+	"System.Data.DataException":                  "System.SystemException",
+	"System.ApplicationException":                "System.Exception",
+	"System.InsufficientExecutionStackException": "System.SystemException",
 }
 
 // nativeMatches handles isinst/castclass against a native-backed

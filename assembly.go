@@ -590,6 +590,41 @@ func (asm *Assembly) pickMethodOverload(typeRID uint32, methodName string, args 
 						score -= 3
 					}
 				}
+			} else if j < len(paramTypeNames) && paramTypeNames[j] == "" {
+				// Both the call site's own declared parameter type (baked
+				// into the call/newobj instruction's own MemberRef/MethodDef
+				// signature — sigParamTypeNames uses the exact same
+				// resolution rule as paramTypeName above) and this
+				// candidate's declared parameter type fail to resolve to a
+				// class/valuetype/generic-instantiation name — most
+				// commonly because BOTH are `object` (paramTypeName never
+				// resolves SigObject at all; an array/byref/primitive
+				// parameter shares the same "" fate). That is real,
+				// positive structural evidence of a match: a call site
+				// whose own parameter is genuinely `object` can never
+				// correctly resolve against a candidate whose SAME
+				// position parameter is a concrete, resolvable class —
+				// that candidate would need the call site's own parameter
+				// to ALSO resolve to that exact class name, which it
+				// didn't. Found via a real, load-bearing case: Microsoft.
+				// Extensions.DependencyInjection.ServiceDescriptor's own
+				// private (Type, object, ServiceLifetime) constructor
+				// consistently lost this exact tie to the wrong (Type,
+				// Type, ServiceLifetime) overload — every other parameter
+				// matched exactly (+1000 each) on both candidates, so the
+				// deciding factor was this one `object`-vs-`Type` parameter
+				// facing a null argument, where runtime.KindNull's own
+				// scoreParamMatch above deliberately favors a concrete
+				// SigClass (5) over SigObject (3) — a reasonable tie-break
+				// when there's genuinely no other signal (Fase 3.27, fixing
+				// a different real Jint Equals(object)/Equals(T) mixup),
+				// but wrong here specifically because a stronger signal —
+				// this structural "both sides are equally unresolved"
+				// match — was being silently discarded instead of applied.
+				// +6 is enough to overturn that at-most-2-point KindNull
+				// gap without coming close to any confirmed +1000/-3 exact-
+				// match/mismatch signal elsewhere in this same loop.
+				score += 6
 			}
 		}
 		if score > bestScore {
@@ -1215,6 +1250,7 @@ func (asm *Assembly) resolvers() *runtime.Resolvers {
 		ResolveMemberParams:     asm.resolveMemberParams,
 		ResolveFields:           asm.resolveFields,
 		ResolveMethods:          asm.resolveMethods,
+		ResolveMemberFlags:      asm.resolveMemberFlags,
 	}
 }
 
@@ -1336,6 +1372,22 @@ func (asm *Assembly) resolveMember(typeFullName, memberName string, paramTypeFul
 				return name, true
 			}
 		}
+		// Cross-package last resort (Fase 3.60, same globalTypeIndex gap
+		// resolveTypeByFullName/resolveExplicitImplExact already close —
+		// see globalTypeIndex's own doc comment): typeFullName may name a
+		// real type that lives in some OTHER package in this same
+		// LoadPackage graph, reached not through asm's own declared deps
+		// edge but because a shared framework assembly (e.g. Microsoft.
+		// Extensions.DependencyInjection's own CallSiteFactory) was
+		// handed a Type value naming a type from the CALLER's own
+		// assembly — the reverse of every ordinary deps edge, found via a
+		// real, load-bearing case: DependencyInjection's own constructor-
+		// selection reflection over a service implementation type
+		// declared in a wrapper/host assembly it has no declared
+		// dependency on at all.
+		if owner, ok := asm.globalTypeIndex[typeFullName]; ok && owner != asm {
+			return owner.resolveMember(typeFullName, memberName, paramTypeFullNames)
+		}
 		return "", false
 	}
 	_, rows, err := asm.md.FindMethodDefCandidates(typeRID, memberName)
@@ -1381,6 +1433,11 @@ func (asm *Assembly) resolveProperties(typeFullName string) (names []string, can
 			if n, r, w, pt, depOK := dep.resolveProperties(typeFullName); depOK {
 				return n, r, w, pt, true
 			}
+		}
+		// Cross-package last resort (Fase 3.60) — see resolveMember's own
+		// doc comment on this exact globalTypeIndex fallback.
+		if owner, ok := asm.globalTypeIndex[typeFullName]; ok && owner != asm {
+			return owner.resolveProperties(typeFullName)
 		}
 		return nil, nil, nil, nil, false
 	}
@@ -1466,6 +1523,11 @@ func (asm *Assembly) resolveMemberParams(typeFullName, memberName string) (param
 				return pt, pn, true
 			}
 		}
+		// Cross-package last resort (Fase 3.60) — see resolveMember's own
+		// doc comment on this exact globalTypeIndex fallback.
+		if owner, ok := asm.globalTypeIndex[typeFullName]; ok && owner != asm {
+			return owner.resolveMemberParams(typeFullName, memberName)
+		}
 		return nil, nil, false
 	}
 	rids, rows, err := asm.md.FindMethodDefCandidates(typeRID, memberName)
@@ -1491,6 +1553,43 @@ func (asm *Assembly) resolveMemberParams(typeFullName, memberName string) (param
 		paramNames = append(paramNames, asm.paramNamesFor(rids[i], len(sig.Params)))
 	}
 	return paramTypes, paramNames, true
+}
+
+// resolveMemberFlags backs the interpreter's MemberFlagsResolver (Fase
+// 3.60, MethodBase.IsPublic/IsPrivate/IsStatic/IsVirtual/IsAbstract/
+// IsFinal/IsFamily/IsAssembly) — every real overload of typeFullName's
+// member named memberName, in exactly the same FindMethodDefCandidates
+// order resolveMemberParams above already enumerates them in, so a
+// ConstructorInfo/MethodInfo's existing overloadIndex indexes both
+// results identically.
+func (asm *Assembly) resolveMemberFlags(typeFullName, memberName string) (flags []uint16, ok bool) {
+	namespace, typeName := splitTypeName(typeFullName)
+	typeRID, _, err := asm.md.FindTypeDef(namespace, typeName)
+	if err != nil {
+		for _, dep := range asm.deps {
+			if f, depOK := dep.resolveMemberFlags(typeFullName, memberName); depOK {
+				return f, true
+			}
+		}
+		// Cross-package last resort (Fase 3.60) — see resolveMember's own
+		// doc comment on this exact globalTypeIndex fallback.
+		if owner, ok := asm.globalTypeIndex[typeFullName]; ok && owner != asm {
+			return owner.resolveMemberFlags(typeFullName, memberName)
+		}
+		return nil, false
+	}
+	_, rows, err := asm.md.FindMethodDefCandidates(typeRID, memberName)
+	if err != nil {
+		// A real type with no overload of this member at all — ok=true
+		// with zero results, same convention resolveMemberParams's own
+		// identical case above uses.
+		return nil, true
+	}
+	flags = make([]uint16, len(rows))
+	for i, row := range rows {
+		flags[i] = row.Flags
+	}
+	return flags, true
 }
 
 // paramNamesFor reads methodRID's real Param row names
@@ -1540,6 +1639,11 @@ func (asm *Assembly) resolveFields(typeFullName string) (names []string, fieldTy
 				return n, ft, st, true
 			}
 		}
+		// Cross-package last resort (Fase 3.60) — see resolveMember's own
+		// doc comment on this exact globalTypeIndex fallback.
+		if owner, ok := asm.globalTypeIndex[typeFullName]; ok && owner != asm {
+			return owner.resolveFields(typeFullName)
+		}
 		return nil, nil, nil, false
 	}
 	start, end, err := asm.md.TypeDefFieldRange(typeRID)
@@ -1587,6 +1691,11 @@ func (asm *Assembly) resolveMethods(typeFullName string) (names []string, ok boo
 			if n, depOK := dep.resolveMethods(typeFullName); depOK {
 				return n, true
 			}
+		}
+		// Cross-package last resort (Fase 3.60) — see resolveMember's own
+		// doc comment on this exact globalTypeIndex fallback.
+		if owner, ok := asm.globalTypeIndex[typeFullName]; ok && owner != asm {
+			return owner.resolveMethods(typeFullName)
 		}
 		return nil, false
 	}

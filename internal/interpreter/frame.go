@@ -28,6 +28,25 @@ type Frame struct {
 	// of being restored, an edge case rare enough not to warrant a full
 	// stack for it.
 	currentException *runtime.ManagedException
+
+	// MethodGenericArgs holds THIS specific call's own resolved generic
+	// method type arguments (Fase 3.60) — e.g. ["Vmnet.Fixtures.Greeter"]
+	// for a call into `T Identity<T>()` closed over Greeter — nil for a
+	// non-generic method, or any call reached through a path that doesn't
+	// carry them (New/Invoke/CallInstance's own public entry points,
+	// a .cctor run, an attribute's CreateNew/Deserialize helper, ...).
+	// Populated only by tryCall's own fallback into an ordinary
+	// interpreted method body, from the ORIGINAL call site's own
+	// ir.Call.MethodGenericArgs (previously this information stopped at
+	// genericMachineRegistry and never reached an interpreted method's
+	// own IR at all — see ir.LoadTypeToken's own doc comment on
+	// IsMethodGenericParam, which is the one real consumer: `typeof(T)`
+	// on the enclosing generic method's own still-open type parameter,
+	// found via a real, load-bearing case — Microsoft.Extensions.
+	// DependencyInjection's own ServiceDescriptor.Singleton<TService,
+	// TImplementation>() calling typeof(TImplementation) on the
+	// generic parameter directly, not through any native intercept).
+	MethodGenericArgs []string
 }
 
 func (f *Frame) push(v runtime.Value) { f.Stack = append(f.Stack, v) }

@@ -11,6 +11,7 @@ import (
 
 func init() {
 	machineRegistry["System.Type::IsAssignableFrom"] = typeIsAssignableFrom
+	machineRegistry["System.Type::IsInstanceOfType"] = typeIsInstanceOfType
 	machineRegistry["System.Type::get_IsValueType"] = typeGetIsValueType
 	machineRegistry["System.Type::get_IsEnum"] = typeGetIsEnum
 	machineRegistry["System.Type::get_IsInterface"] = typeGetIsInterface
@@ -81,6 +82,25 @@ func init() {
 	machineRegistry["System.Reflection.ConstructorInfo::GetParameters"] = methodBaseGetParameters
 	machineRegistry["System.Reflection.MethodInfo::GetParameters"] = methodBaseGetParameters
 	machineRegistry["System.Reflection.MethodBase::GetParameters"] = methodBaseGetParameters
+	// MethodBase's own accessibility/modifier getters (Fase 3.60) — found
+	// via a real, load-bearing case: Microsoft.Extensions.
+	// DependencyInjection's own ConstructorMatcher (real .NET reflection-
+	// based service activation) reads IsPublic while picking which of a
+	// service implementation's constructors to invoke; ComponentModel.
+	// Annotations/Configuration.Binder read a few of the others while
+	// walking a validated/bound object's own members. Registered under
+	// all three MethodBase subclasses reachable here, same rationale as
+	// GetParameters above.
+	for _, recv := range []string{"System.Reflection.ConstructorInfo", "System.Reflection.MethodInfo", "System.Reflection.MethodBase"} {
+		machineRegistry[recv+"::get_IsPublic"] = methodBaseGetIsPublic
+		machineRegistry[recv+"::get_IsPrivate"] = methodBaseGetIsPrivate
+		machineRegistry[recv+"::get_IsFamily"] = methodBaseGetIsFamily
+		machineRegistry[recv+"::get_IsAssembly"] = methodBaseGetIsAssembly
+		machineRegistry[recv+"::get_IsStatic"] = methodBaseGetIsStatic
+		machineRegistry[recv+"::get_IsVirtual"] = methodBaseGetIsVirtual
+		machineRegistry[recv+"::get_IsAbstract"] = methodBaseGetIsAbstract
+		machineRegistry[recv+"::get_IsFinal"] = methodBaseGetIsFinal
+	}
 	// Type.GetFields()/GetMethods() (Fase 3.53, plural, no-args overloads)
 	// — found via a corpus-wide compatibility pass: 9 of 19 real NuGet
 	// packages call GetFields()/GetMethods() (distinct from the
@@ -597,6 +617,35 @@ func typeIsAssignableFrom(m *Machine, args []runtime.Value, depth int, instrCoun
 	return runtime.Bool(m.typeMatches(t, target)), nil
 }
 
+// typeIsInstanceOfType implements Type.IsInstanceOfType(object) — the
+// mirror image of typeIsAssignableFrom above: instead of comparing two
+// Type values by name, the second argument here is an actual runtime
+// value (any Kind at all, not necessarily a Type), so this reuses
+// isAssignableTo (typecheck.go) directly — the exact same real
+// inheritance-aware check isinst/castclass and exception catch-matching
+// already use — rather than re-deriving it from a resolved Type name a
+// second time. Found via a real, load-bearing case: Microsoft.Extensions.
+// DependencyInjection's own ServiceProvider validates a resolved
+// implementation instance against its registered service Type this way
+// before caching it.
+func typeIsInstanceOfType(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.IsInstanceOfType expects (this, obj)")
+	}
+	// A null object is never an instance of anything, unlike
+	// IsAssignableFrom(null Type) above (a different, Type-vs-Type
+	// question) — matches real IsInstanceOfType's own documented
+	// behavior exactly.
+	if args[1].Kind == runtime.KindNull {
+		return runtime.Bool(false), nil
+	}
+	target, ok := bcl.TypeFullNameOf(args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.IsInstanceOfType receiver is not a Type")
+	}
+	return runtime.Bool(m.isAssignableTo(args[1], target)), nil
+}
+
 // typeGetConstructor backs Type.GetConstructor(Type[] parameterTypes) —
 // real reflection (Fase 3.39), not Reflection.Emit: finds a real .ctor
 // matching the declared parameter types via Machine.ResolveMember, and
@@ -699,6 +748,121 @@ func methodBaseGetParameters(m *Machine, args []runtime.Value, depth int, instrC
 		elems[i] = bcl.NewParameterInfoValue(types[i], names[i], i)
 	}
 	return runtime.ArrRef(&runtime.Array{Elems: elems}), nil
+}
+
+// Raw ECMA-335 MethodAttributes bit values (§II.23.1.10) — MemberAccessMask
+// is the low 3 bits; Static/Virtual/Abstract/Final are single bits above it.
+// Mirrors assembly.go's own fieldAttrStatic/fieldAttrLiteral constants for
+// FieldAttributes, one layer up in the package graph (these are needed
+// here, in internal/interpreter, not assembly.go's root package).
+const (
+	methodAttrMemberAccessMask = 0x0007
+	methodAttrPrivate          = 0x0001
+	methodAttrFamANDAssem      = 0x0002
+	methodAttrAssembly         = 0x0003
+	methodAttrFamily           = 0x0004
+	methodAttrFamORAssem       = 0x0005
+	methodAttrPublic           = 0x0006
+	methodAttrStatic           = 0x0010
+	methodAttrFinal            = 0x0020
+	methodAttrVirtual          = 0x0040
+	methodAttrAbstract         = 0x0400
+)
+
+// methodBaseFlags re-resolves a ConstructorInfo/MethodInfo receiver's own
+// raw MethodAttributes bitmask via Machine.ResolveMemberFlags (Fase
+// 3.60) — same dual-branch receiver handling and "first overload, no
+// signature to disambiguate against" MethodInfo posture as
+// methodBaseGetParameters above, since a MethodBase wrapper's identity is
+// exactly the same (typeFullName, memberName[, overloadIndex]) triple
+// either helper needs.
+func methodBaseFlags(m *Machine, args []runtime.Value) (uint16, error) {
+	if len(args) != 1 {
+		return 0, fmt.Errorf("interpreter: MethodBase accessibility property expects a receiver")
+	}
+	var typeFullName, memberName string
+	overloadIndex := 0
+	if tfn, idx, ok := bcl.ConstructorInfoParts(args[0]); ok {
+		typeFullName, memberName, overloadIndex = tfn, ".ctor", idx
+	} else if tfn, mn, ok := bcl.MethodInfoParts(args[0]); ok {
+		typeFullName, memberName = tfn, mn
+	} else {
+		return 0, fmt.Errorf("interpreter: MethodBase accessibility property receiver is not a ConstructorInfo or MethodInfo")
+	}
+	if m.ResolveMemberFlags == nil {
+		return 0, nil
+	}
+	flags, ok := m.ResolveMemberFlags(typeFullName, memberName)
+	if !ok || overloadIndex >= len(flags) {
+		return 0, nil
+	}
+	return flags[overloadIndex], nil
+}
+
+func methodBaseGetIsPublic(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	f, err := methodBaseFlags(m, args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	return runtime.Bool(f&methodAttrMemberAccessMask == methodAttrPublic), nil
+}
+
+func methodBaseGetIsPrivate(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	f, err := methodBaseFlags(m, args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	return runtime.Bool(f&methodAttrMemberAccessMask == methodAttrPrivate), nil
+}
+
+// methodBaseGetIsFamily backs MethodBase.IsFamily — real C# `protected`.
+func methodBaseGetIsFamily(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	f, err := methodBaseFlags(m, args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	return runtime.Bool(f&methodAttrMemberAccessMask == methodAttrFamily), nil
+}
+
+// methodBaseGetIsAssembly backs MethodBase.IsAssembly — real C# `internal`.
+func methodBaseGetIsAssembly(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	f, err := methodBaseFlags(m, args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	return runtime.Bool(f&methodAttrMemberAccessMask == methodAttrAssembly), nil
+}
+
+func methodBaseGetIsStatic(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	f, err := methodBaseFlags(m, args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	return runtime.Bool(f&methodAttrStatic != 0), nil
+}
+
+func methodBaseGetIsVirtual(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	f, err := methodBaseFlags(m, args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	return runtime.Bool(f&methodAttrVirtual != 0), nil
+}
+
+func methodBaseGetIsAbstract(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	f, err := methodBaseFlags(m, args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	return runtime.Bool(f&methodAttrAbstract != 0), nil
+}
+
+func methodBaseGetIsFinal(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	f, err := methodBaseFlags(m, args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	return runtime.Bool(f&methodAttrFinal != 0), nil
 }
 
 // typeGetMethod backs every real Type.GetMethod overload sharing the

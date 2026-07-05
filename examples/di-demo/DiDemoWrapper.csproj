@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="DiDemoWrapper.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Referenced ONLY so `dotnet build` has the real Microsoft.Extensions.
+         DependencyInjection type surface to check DiDemoWrapper.cs
+         against. Its actual DLL is never loaded from here — main.go loads
+         the real, unmodified package from nuget.org via vm.LoadPackage,
+         exactly like every other real-package demo in examples/. -->
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.0.0" />
+  </ItemGroup>
+</Project>

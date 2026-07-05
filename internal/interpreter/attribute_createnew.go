@@ -101,7 +101,7 @@ func elementMetadataAddAttribute(m *Machine, args []runtime.Value, methodGeneric
 	if err != nil {
 		return runtime.Value{}, err
 	}
-	return m.invoke(method, args, depth+1, instrCount)
+	return m.invoke(method, args, depth+1, instrCount, nil)
 }
 
 // recordAttributeSimpleType computes the real (namespace, localName)
@@ -244,5 +244,5 @@ func attributeInfoCreateNew(m *Machine, args []runtime.Value, depth int, instrCo
 	if err != nil {
 		return runtime.Value{}, err
 	}
-	return m.invoke(method, args, depth+1, instrCount)
+	return m.invoke(method, args, depth+1, instrCount, nil)
 }

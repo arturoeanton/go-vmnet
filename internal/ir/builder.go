@@ -731,6 +731,34 @@ func resolveCallTarget(md *metadata.Metadata, token uint32) (fullName string, ha
 // to each type argument's full name, reusing SigTypeFullName the same way
 // ldtoken's closed-TypeSpec handling already does — see
 // resolveCallTarget's TableMethodSpec case for why this matters.
+//
+// One argument slot needs its own handling instead of SigTypeFullName's:
+// a generic method forwarding its OWN still-open type parameter to
+// another generic call (e.g. `Method2<T>() { Method1<T>(); }`, compiled
+// as a MethodSpec instantiated with `!!0`, not a closed type at all).
+// SigTypeFullName already has a documented "" convention for this shape
+// (metadata.SigGenericParam), but "" alone loses WHICH parameter index
+// was forwarded — fine for its other callers (a field/property type that
+// simply can't be resolved further), but fatal here: this call site's own
+// MethodGenericArgs needs to carry enough information to resolve the
+// forward at the CALLING frame's own MethodGenericArgs, once that's
+// known at runtime, not now. metadata.SigType already tracks exactly the
+// raw VAR/MVAR index ECMA-335's own ILAsm textual syntax uses (`!!N` for
+// a method type parameter), so reusing that same notation as a sentinel
+// string is self-documenting and can never collide with a real type name
+// (which never begins with `!`) — resolved back into a real name by
+// eval.go's own ir.Call case, against frame.MethodGenericArgs, at the
+// exact point this call is about to execute (Fase 3.60; see Frame.
+// MethodGenericArgs's own doc comment for the real, load-bearing case
+// this fixed: Microsoft.Extensions.DependencyInjection.Abstractions'
+// own ServiceDescriptor.Singleton<TService, TImplementation>() calling
+// typeof(TImplementation) on ITS OWN generic parameter, itself only
+// reached by forwarding the CALLER's generic arguments this same way).
+// A type-level (class) generic parameter forward (SigVar, not SigMVar —
+// GenericParamIsMethod false) has no such runtime record to resolve
+// against (vmnet doesn't track a live object's own closed generic type
+// arguments at all) — falls through to SigTypeFullName's existing ""
+// degenerate behavior, unchanged.
 func methodSpecGenericArgNames(md *metadata.Metadata, instantiation []byte) ([]string, error) {
 	types, err := metadata.ParseMethodSpec(instantiation)
 	if err != nil {
@@ -738,6 +766,10 @@ func methodSpecGenericArgNames(md *metadata.Metadata, instantiation []byte) ([]s
 	}
 	names := make([]string, len(types))
 	for i, t := range types {
+		if t.Kind == metadata.SigGenericParam && t.GenericParamIsMethod {
+			names[i] = fmt.Sprintf("!!%d", t.GenericParamIndex)
+			continue
+		}
 		name, err := SigTypeFullName(md, t)
 		if err != nil {
 			return nil, err

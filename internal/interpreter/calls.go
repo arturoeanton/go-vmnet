@@ -98,6 +98,17 @@ type FieldsResolver func(typeFullName string) (names []string, fieldTypes []stri
 // ResolveMethods.
 type MethodsResolver func(typeFullName string) (names []string, ok bool)
 
+// MemberFlagsResolver reads every real overload of a member's own raw
+// ECMA-335 MethodAttributes bitmask (Fase 3.60, MethodBase.IsPublic/
+// IsPrivate/IsStatic/IsVirtual/IsAbstract/IsFinal/IsFamily/IsAssembly) —
+// flags[i] is memberName's i'th overload's Flags, in exactly the same
+// order MemberParamsResolver's own paramTypes[i]/paramNames[i] already
+// enumerate that member's overloads, so a ConstructorInfo/MethodInfo
+// wrapper's existing (typeFullName, memberName, overloadIndex) triple
+// re-resolves flags the same way methodBaseGetParameters already
+// re-resolves parameters, rather than needing its own new field.
+type MemberFlagsResolver func(typeFullName, memberName string) (flags []uint16, ok bool)
+
 // genericMachineNative is a Machine-aware native (like machineNative,
 // linq.go) that additionally needs the call site's own resolved generic
 // method type arguments (Fase 3.40, ir.Call.MethodGenericArgs) — e.g.
@@ -430,7 +441,7 @@ func (m *Machine) tryCall(fullName string, args []runtime.Value, depth int, inst
 	if rerr != nil {
 		return runtime.Value{}, false, nil, false, rerr
 	}
-	v, err = m.invoke(method, args, depth+1, instrCount)
+	v, err = m.invoke(method, args, depth+1, instrCount, methodGenericArgs)
 	return v, method.HasReturn, err, true, nil
 }
 

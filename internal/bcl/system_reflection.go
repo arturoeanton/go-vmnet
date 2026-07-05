@@ -169,6 +169,54 @@ func init() {
 	// the first place) — no Machine access needed, unlike Invoke/GetValue
 	// which actually have to run something.
 	register("System.Reflection.MemberInfo::get_DeclaringType", true, memberInfoGetDeclaringType)
+	// GetCustomAttributes/IsDefined (Fase 3.60) — a real, known limitation,
+	// not a full implementation: vmnet has no CustomAttributeData/attribute-
+	// blob-decoding subsystem yet (ECMA-335 §II.23.3 — a genuinely new,
+	// sizable piece of work, deliberately deferred), so every receiver here
+	// always answers "no custom attributes at all", regardless of what a
+	// real assembly's metadata actually declares. Correct for the
+	// overwhelming common case a defensive attribute check hits (there
+	// really is no such attribute on this specific member/parameter) —
+	// found via a real, load-bearing case: Microsoft.Extensions.
+	// DependencyInjection's own real constructor-injection call-site
+	// builder (CallSiteFactory.CreateArgumentCallSites) calls
+	// ParameterInfo.GetCustomAttributes() on every constructor parameter
+	// while resolving a service's real dependencies, and gracefully
+	// proceeds when none are found — exactly like real code would for a
+	// plain, unannotated constructor parameter. Would give a wrong answer
+	// only for a caller that specifically depends on reading a real
+	// attribute's data (e.g. FluentValidation's [Flags] checks, CsvHelper's
+	// [Name]) — those need the full subsystem this isn't, and remain a
+	// documented gap (docs/en/ROADMAP.md).
+	for _, recv := range []string{
+		"System.Reflection.ParameterInfo",
+		"System.Reflection.MemberInfo",
+		"System.Reflection.MethodInfo",
+		"System.Reflection.ConstructorInfo",
+		"System.Reflection.MethodBase",
+		"System.Reflection.PropertyInfo",
+		"System.Reflection.FieldInfo",
+		"System.Type",
+	} {
+		register(recv+"::GetCustomAttributes", true, reflectionEmptyObjectArray)
+		register(recv+"::IsDefined", true, reflectionFalse)
+	}
+	// Attribute.GetCustomAttribute(MemberInfo/ParameterInfo, Type[, bool])
+	// — same "no attribute ever found" posture as GetCustomAttributes
+	// above, just the singular real static-method shape.
+	register("System.Attribute::GetCustomAttribute", true, reflectionNullValue)
+}
+
+func reflectionEmptyObjectArray(args []runtime.Value) (runtime.Value, error) {
+	return runtime.ArrRef(runtime.NewArray(0)), nil
+}
+
+func reflectionFalse(args []runtime.Value) (runtime.Value, error) {
+	return runtime.Bool(false), nil
+}
+
+func reflectionNullValue(args []runtime.Value) (runtime.Value, error) {
+	return runtime.Null(), nil
 }
 
 func fieldInfoGetFieldType(args []runtime.Value) (runtime.Value, error) {

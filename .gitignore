@@ -69,6 +69,12 @@ examples/sqlite-demo/bin/
 examples/sqlite-demo/obj/
 examples/sqlite-demo/*.db
 
+# .NET build output for the examples/di-demo wrapper (same rationale as
+# jint-demo above — DiDemoWrapper.cs is committed source, the compiled
+# DiDemoWrapper.dll it produces is not)
+examples/di-demo/bin/
+examples/di-demo/obj/
+
 # macOS Finder metadata
 .DS_Store
 

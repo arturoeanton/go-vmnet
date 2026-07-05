@@ -15,6 +15,16 @@ import "github.com/arturoeanton/go-vmnet/internal/runtime"
 // pragmatic answer rather than the exact one.
 func init() {
 	register("System.Runtime.CompilerServices.RuntimeHelpers::IsReferenceOrContainsReferences", true, runtimeHelpersIsReferenceOrContainsReferencesFalse)
+	// EnsureSufficientExecutionStack is a defensive check real recursive
+	// algorithms (e.g. Microsoft.Extensions.DependencyInjection's own
+	// CallSiteRuntimeResolver, walking a service dependency graph) call
+	// before recursing further, throwing InsufficientExecutionStackException
+	// if the current native thread is actually near a real stack overflow —
+	// a no-op here, since vmnet's own MaxCallDepth/MaxStackDepth (internal/
+	// interpreter/limits.go) already guard against runaway recursion at a
+	// layer above this, deterministically and recoverably, well before any
+	// real Go-level stack ever gets close to overflowing.
+	register("System.Runtime.CompilerServices.RuntimeHelpers::EnsureSufficientExecutionStack", false, objectCtorNoop)
 }
 
 func runtimeHelpersIsReferenceOrContainsReferencesFalse(args []runtime.Value) (runtime.Value, error) {

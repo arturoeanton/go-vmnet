@@ -215,7 +215,8 @@ func resolvableMethod(md *metadata.Metadata, fullName string) bool {
 	if linqTargets[fullName] {
 		return true
 	}
-	if fullName == "System.Type::IsAssignableFrom" || fullName == "System.Lazy`1::get_Value" ||
+	if fullName == "System.Type::IsAssignableFrom" || fullName == "System.Type::IsInstanceOfType" ||
+		fullName == "System.Lazy`1::get_Value" ||
 		fullName == "System.Collections.Concurrent.ConcurrentDictionary`2::GetOrAdd" {
 		return true
 	}
@@ -364,6 +365,35 @@ var reflectionMachineTargets = map[string]bool{
 	"System.Reflection.ConstructorInfo::GetParameters": true,
 	"System.Reflection.MethodInfo::GetParameters":      true,
 	"System.Reflection.MethodBase::GetParameters":      true,
+	// MethodBase's own accessibility/modifier getters (Fase 3.60) — see
+	// internal/interpreter/reflection.go's methodBaseFlags and its 8
+	// individual getters, registered under all three MethodBase
+	// subclasses reachable here (ConstructorInfo/MethodInfo/MethodBase
+	// itself), same rationale as GetParameters above.
+	"System.Reflection.ConstructorInfo::get_IsPublic":   true,
+	"System.Reflection.MethodInfo::get_IsPublic":        true,
+	"System.Reflection.MethodBase::get_IsPublic":        true,
+	"System.Reflection.ConstructorInfo::get_IsPrivate":  true,
+	"System.Reflection.MethodInfo::get_IsPrivate":       true,
+	"System.Reflection.MethodBase::get_IsPrivate":       true,
+	"System.Reflection.ConstructorInfo::get_IsFamily":   true,
+	"System.Reflection.MethodInfo::get_IsFamily":        true,
+	"System.Reflection.MethodBase::get_IsFamily":        true,
+	"System.Reflection.ConstructorInfo::get_IsAssembly": true,
+	"System.Reflection.MethodInfo::get_IsAssembly":      true,
+	"System.Reflection.MethodBase::get_IsAssembly":      true,
+	"System.Reflection.ConstructorInfo::get_IsStatic":   true,
+	"System.Reflection.MethodInfo::get_IsStatic":        true,
+	"System.Reflection.MethodBase::get_IsStatic":        true,
+	"System.Reflection.ConstructorInfo::get_IsVirtual":  true,
+	"System.Reflection.MethodInfo::get_IsVirtual":       true,
+	"System.Reflection.MethodBase::get_IsVirtual":       true,
+	"System.Reflection.ConstructorInfo::get_IsAbstract": true,
+	"System.Reflection.MethodInfo::get_IsAbstract":      true,
+	"System.Reflection.MethodBase::get_IsAbstract":      true,
+	"System.Reflection.ConstructorInfo::get_IsFinal":    true,
+	"System.Reflection.MethodInfo::get_IsFinal":         true,
+	"System.Reflection.MethodBase::get_IsFinal":         true,
 	// Activator.CreateInstance(Type, object[]) has been a real,
 	// working genericMachineRegistry entry since Fase 3.39
 	// (internal/interpreter/activator.go) — this map simply never

@@ -38,6 +38,7 @@ tres separadas, a propósito, para cada paquete contra el que se mide vmnet.
 | `System.Text.Json@8.0.5` | 96.5% (3.577 métodos, 124 marcados) | [`examples/system-text-json-demo`](../../examples/system-text-json-demo) | **Verificado.** Parsea JSON real a través de la propia API real de `JsonDocument`, confirmado contra la salida real de .NET. |
 | `Jint@3.1.3` | 95.8% (5.414 métodos, 228 marcados) | [`examples/jint-demo`](../../examples/jint-demo), [`examples/jint-nowrapper`](../../examples/jint-nowrapper) | **Verificado.** Corre un motor de JavaScript real de punta a punta — parsea código JS real, construye un AST real, lo evalúa, y devuelve un resultado real — tanto a través de un wrapper compilado como con cero pegamento de C#. La evidencia más fuerte de que vmnet maneja código real genuinamente no trivial y profundamente orientado a objetos, no solo bibliotecas pequeñas de métodos estáticos. |
 | `Newtonsoft.Json@13.0.3` | 85.6% (4.064 métodos, 585 marcados) | [`examples/newtonsoft-json-demo`](../../examples/newtonsoft-json-demo) | **Verificado para el camino demostrado** (parseo real del DOM "LINQ to JSON" y acceso por indexador), pero el % de checker más bajo de cualquier paquete con demo — su superficie de tipado dinámico basada en `Dynamic`/`ExpandoObject` (`JValue+JValueDynamicProxy`) es una brecha real y no implementada que el demo no ejercita. No leas que el demo pase como "todo este paquete funciona". |
+| `Microsoft.Extensions.DependencyInjection@8.0.0` | 89.5% (437 métodos, 46 marcados) | [`examples/di-demo`](../../examples/di-demo) | **Verificado para inyección de constructor real** — el propio contenedor de DI oficial de Microsoft resuelve un servicio cuyo constructor depende de otro servicio registrado, a través de su propia API real `ServiceCollection`/`ServiceProvider`/`GetRequiredService<T>()`, sin modificar. Llegar acá requirió tres fixes reales del intérprete (Fase 3.60): un tie-break de resolución de overloads de método causando una auto-recursión infinita, `typeof(T)` nunca resolviendo sobre el propio parámetro de tipo abierto de un método genérico, y una brecha de reflection entre paquetes. **Todavía no verificado**: el propio camino rápido de árbol de expresión compilado de `DependencyInjection` (basado en `System.Linq.Expressions`, entra en juego después de que un servicio se resuelve suficientes veces) — solo se ejercita su camino de resolución basado en reflection plana hasta ahora. |
 
 ## Paquetes medidos solo por el checker (todavía sin demo)
 
@@ -82,6 +83,40 @@ funciona.
   100.0%, `Humanizer.Core` 97.9%, `NPOI` 97.9%, `Ardalis.GuardClauses` 97.5%, `FluentValidation`
   97.0%); el resto son objetivos activos de endurecimiento, priorizados por cuánto están por
   debajo del 97% y por cuánto uso real del mundo representan.
+
+## La familia `Microsoft.Extensions.*` — frameworks oficiales de Microsoft, una medición separada y en curso
+
+Distinto del corpus de 19 paquetes de arriba (el propio objetivo de compatibilidad de largo plazo
+de este proyecto), la Fase 3.60 empezó a medir específicamente paquetes oficiales de Microsoft
+`Microsoft.Extensions.*` — los building blocks del .NET moderno (inyección de dependencias,
+configuración, logging, options, caché) sobre los que se construye cada app de ASP.NET
+Core/worker-service. % de checker, profile `netstandard-lite`, con todas las dependencias
+transitivas, a la Fase 3.60:
+
+| Paquete | % de checker |
+|---|---|
+| `Microsoft.Extensions.Configuration.Abstractions@8.0.0` | 100.0% |
+| `Microsoft.Extensions.Options.ConfigurationExtensions@8.0.0` | 100.0% |
+| `Microsoft.Extensions.Options@8.0.0` | 99.7% |
+| `Microsoft.Extensions.Configuration.Json@8.0.0` | 98.8% |
+| `Microsoft.Extensions.Logging@8.0.0` | 98.1% |
+| `Microsoft.Extensions.Configuration.EnvironmentVariables@8.0.0` | 98.0% |
+| `Microsoft.Extensions.Logging.Abstractions@8.0.0` | 97.8% |
+| `Microsoft.Extensions.Configuration@8.0.0` | 97.2% |
+| `Microsoft.Extensions.Primitives@8.0.0` | 96.9% |
+| `Microsoft.Extensions.Configuration.FileExtensions@8.0.0` | 95.9% |
+| `Microsoft.Extensions.Caching.Abstractions@8.0.0` | 95.9% |
+| `Microsoft.Extensions.DependencyInjection.Abstractions@8.0.0` | 94.0% |
+| `System.ComponentModel.Annotations@5.0.0` | 94.1% |
+| `Microsoft.Extensions.Logging.Console@8.0.0` | 90.6% |
+| `Microsoft.Extensions.Configuration.Binder@8.0.0` | 89.4% |
+| `Microsoft.Extensions.DependencyInjection@8.0.0` | 89.5% (**verificado con un demo real**, arriba) |
+| `Microsoft.Extensions.Caching.Memory@8.0.0` | 87.3% |
+
+Promedio simple: 95.50%. El propio demo real de punta a punta de `DependencyInjection` (ver arriba)
+es la prueba más fuerte hasta ahora: un paquete oficial real, sin modificar, corriendo su propia
+lógica real de inyección de constructor, no solo una estimación estática. El resto de esta familia
+es lo próximo en la fila para el mismo tratamiento de corrida real.
 
 ## Metodología y reproducibilidad
 

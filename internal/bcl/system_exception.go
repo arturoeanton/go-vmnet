@@ -76,6 +76,14 @@ func init() {
 		"System.UnauthorizedAccessException",
 		"System.IO.FileNotFoundException",
 		"System.IO.DirectoryNotFoundException",
+		// System.InsufficientExecutionStackException (Fase 3.60) — the
+		// exception real RuntimeHelpers.EnsureSufficientExecutionStack
+		// throws (system_runtimehelpers.go's own no-op registration never
+		// throws it itself, since vmnet's own MaxCallDepth/MaxStackDepth
+		// already guard against runaway recursion) — registered anyway so
+		// a plugin that constructs or catches one directly still compiles
+		// and behaves like any other exception here.
+		"System.InsufficientExecutionStackException",
 	} {
 		registerCtor(name, newExceptionCtor(name))
 		// A plugin's own exception subclass (`class MyException :

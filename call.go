@@ -20,6 +20,7 @@ func (asm *Assembly) machine() *interpreter.Machine {
 		WithMemberParamsResolver(r.ResolveMemberParams).
 		WithFieldsResolver(r.ResolveFields).
 		WithMethodsResolver(r.ResolveMethods).
+		WithMemberFlagsResolver(r.ResolveMemberFlags).
 		WithPermissions(asm.permissions)
 }
 

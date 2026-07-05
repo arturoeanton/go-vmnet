@@ -155,4 +155,16 @@ type Resolvers struct {
 	// ok=false for a type with no TypeDef at all, matching every other
 	// resolver's own "no data available" contract.
 	ResolveMethods func(typeFullName string) (names []string, ok bool)
+	// ResolveMemberFlags reads every real overload of typeFullName's
+	// member named memberName's own raw ECMA-335 MethodAttributes bitmask
+	// (Fase 3.60: System.Reflection — MethodBase.IsPublic/IsPrivate/
+	// IsStatic/IsVirtual/IsAbstract/IsFinal/IsFamily/IsAssembly) —
+	// flags[i] parallels ResolveMemberParams's own paramTypes[i]/
+	// paramNames[i], describing the same i'th overload, so a
+	// ConstructorInfo/MethodInfo wrapper's existing (typeFullName,
+	// memberName, overloadIndex) triple re-resolves flags the same way it
+	// already re-resolves parameters. ok=false for a type with no TypeDef
+	// at all, matching every other resolver's own "no data available"
+	// contract.
+	ResolveMemberFlags func(typeFullName, memberName string) (flags []uint16, ok bool)
 }

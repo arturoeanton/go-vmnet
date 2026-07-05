@@ -1971,3 +1971,62 @@ func TestPermissions_FileIO(t *testing.T) {
 		}
 	})
 }
+
+// TestGenericTypeOf_MethodGenericParam regresses Fase 3.60: typeof(T) on
+// a generic method's own still-open type parameter, both used directly
+// and forwarded into another generic call — see tests/fixtures/csharp/
+// GenericTypeOf.cs's own doc comment for the real Microsoft.Extensions.
+// DependencyInjection pattern this mirrors.
+func TestGenericTypeOf_MethodGenericParam(t *testing.T) {
+	asm := loadFixture(t)
+
+	t.Run("direct typeof(T)", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.GenericTypeOf", "NameOfTargetCaller")
+		if err != nil {
+			t.Fatalf("NameOfTargetCaller() error = %v", err)
+		}
+		if got := out.Native().(string); got != "Vmnet.Fixtures.GenericTypeOfTarget" {
+			t.Errorf("NameOfTargetCaller() = %q, want %q", got, "Vmnet.Fixtures.GenericTypeOfTarget")
+		}
+	})
+
+	t.Run("forwarded typeof(T) through another generic call", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.GenericTypeOf", "ForwardedNameOfTargetCaller")
+		if err != nil {
+			t.Fatalf("ForwardedNameOfTargetCaller() error = %v", err)
+		}
+		if got := out.Native().(string); got != "Vmnet.Fixtures.GenericTypeOfTarget" {
+			t.Errorf("ForwardedNameOfTargetCaller() = %q, want %q", got, "Vmnet.Fixtures.GenericTypeOfTarget")
+		}
+	})
+}
+
+// TestOverloadTieBreak_NullArgumentAgainstObjectVsClassParam regresses
+// Fase 3.60: a null argument at a call site whose own declared parameter
+// type is `object` must not lose the overload tie-break to a same-arity
+// candidate whose corresponding parameter is a concrete, resolvable
+// class — see tests/fixtures/csharp/OverloadTieBreak.cs's own doc
+// comment for the real ServiceDescriptor bug this mirrors (there, picking
+// the wrong overload caused an infinite self-recursion; here it just
+// picks the wrong constructor body, a simpler and equally conclusive
+// signal).
+func TestOverloadTieBreak_NullArgumentAgainstObjectVsClassParam(t *testing.T) {
+	asm := loadFixture(t)
+
+	obj, err := asm.New("Vmnet.Fixtures.OverloadTieBreak", String("x"))
+	if err != nil {
+		t.Fatalf("New(OverloadTieBreak) error = %v", err)
+	}
+	tag, err := obj.Call("GetTag")
+	if err != nil {
+		t.Fatalf("GetTag error = %v", err)
+	}
+	// "core:x:0" (not "core:x:A"): vmnet has no enum-aware ToString for a
+	// plugin-declared enum yet (an unrelated, pre-existing limitation —
+	// mode.ToString() here just prints the underlying int32) — this test
+	// only cares that the "core" constructor ran at all, not exact enum
+	// formatting.
+	if got := tag.Native().(string); got != "core:x:0" {
+		t.Errorf("OverloadTieBreak(\"x\").Tag = %q, want %q (picked the wrong constructor overload)", got, "core:x:0")
+	}
+}

@@ -85,6 +85,6 @@ func (m *Machine) runCctor(typeFullName string, depth int, instrCount *int64) er
 		}
 		return fmt.Errorf("interpreter: %s::.cctor exists but failed to build: %w", typeFullName, err)
 	}
-	_, err = m.invoke(cctor, nil, depth+1, instrCount)
+	_, err = m.invoke(cctor, nil, depth+1, instrCount, nil)
 	return err
 }

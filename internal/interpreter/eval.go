@@ -2,6 +2,8 @@ package interpreter
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/arturoeanton/go-vmnet/internal/bcl"
 	"github.com/arturoeanton/go-vmnet/internal/ir"
@@ -23,6 +25,7 @@ type Machine struct {
 	ResolveMemberParams     MemberParamsResolver
 	ResolveFields           FieldsResolver
 	ResolveMethods          MethodsResolver
+	ResolveMemberFlags      MemberFlagsResolver
 	Limits                  Limits
 
 	// Permissions is the deny-by-default capability gate (Fase 3.59,
@@ -128,6 +131,15 @@ func (m *Machine) WithMethodsResolver(r MethodsResolver) *Machine {
 	return m
 }
 
+// WithMemberFlagsResolver attaches a MemberFlagsResolver (Fase 3.60,
+// MethodBase.IsPublic/IsPrivate/IsStatic/IsVirtual/IsAbstract/IsFinal/
+// IsFamily/IsAssembly) — same rationale as WithFieldBytesResolver/
+// WithMemberResolver.
+func (m *Machine) WithMemberFlagsResolver(r MemberFlagsResolver) *Machine {
+	m.ResolveMemberFlags = r
+	return m
+}
+
 // WithPermissions attaches the deny-by-default capability gate (Fase
 // 3.59) — same rationale as WithFieldBytesResolver/WithMemberResolver: a
 // separate setter so every existing caller (tests especially) keeps
@@ -152,7 +164,7 @@ func (m *Machine) Invoke(method *runtime.Method, args []runtime.Value) (result r
 		}
 	}()
 	instrCount := new(int64)
-	return m.invoke(method, args, 0, instrCount)
+	return m.invoke(method, args, 0, instrCount, nil)
 }
 
 // New constructs an instance of typeFullName via a real newobj + its
@@ -193,7 +205,7 @@ func (m *Machine) CallInstance(fullName string, args []runtime.Value) (result ru
 	return
 }
 
-func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int, instrCount *int64, methodGenericArgs []string) (runtime.Value, error) {
 	if m.Limits.MaxCallDepth > 0 && depth > m.Limits.MaxCallDepth {
 		return runtime.Value{}, ErrCallDepthExceeded
 	}
@@ -223,6 +235,7 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 		prevResolveMemberParams := m.ResolveMemberParams
 		prevResolveFields := m.ResolveFields
 		prevResolveMethods := m.ResolveMethods
+		prevResolveMemberFlags := m.ResolveMemberFlags
 		if method.Resolvers.Resolve != nil {
 			m.Resolve = method.Resolvers.Resolve
 		}
@@ -256,6 +269,9 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 		if method.Resolvers.ResolveMethods != nil {
 			m.ResolveMethods = method.Resolvers.ResolveMethods
 		}
+		if method.Resolvers.ResolveMemberFlags != nil {
+			m.ResolveMemberFlags = method.Resolvers.ResolveMemberFlags
+		}
 		defer func() {
 			m.Resolve, m.ResolveType = prevResolve, prevResolveType
 			m.ResolveExplicitImpl, m.ResolveEnum = prevResolveExplicitImpl, prevResolveEnum
@@ -266,6 +282,7 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 			m.ResolveMemberParams = prevResolveMemberParams
 			m.ResolveFields = prevResolveFields
 			m.ResolveMethods = prevResolveMethods
+			m.ResolveMemberFlags = prevResolveMemberFlags
 		}()
 	}
 
@@ -280,9 +297,10 @@ func (m *Machine) invoke(method *runtime.Method, args []runtime.Value, depth int
 	}
 
 	frame := &Frame{
-		Args:   args,
-		Locals: locals,
-		Stack:  make([]runtime.Value, 0, method.MaxStack+8),
+		Args:              args,
+		Locals:            locals,
+		Stack:             make([]runtime.Value, 0, method.MaxStack+8),
+		MethodGenericArgs: methodGenericArgs,
 	}
 
 	// A managed exception surfacing from runFrame (from `throw`/`rethrow`
@@ -494,7 +512,8 @@ func (m *Machine) runFrame(frame *Frame, method *runtime.Method, depth int, inst
 			if in.HasThis && callArgs[0].Kind == runtime.KindFunc {
 				result, hasReturn, err = m.invokeFunc(callArgs[0].Func, callArgs[1:], depth, instrCount)
 			} else {
-				result, hasReturn, err = m.call(in.FullName, callArgs, in.Virtual, depth, instrCount, in.ParamTypeNames, in.MethodGenericArgs)
+				methodGenericArgs := resolveForwardedGenericArgs(in.MethodGenericArgs, frame.MethodGenericArgs)
+				result, hasReturn, err = m.call(in.FullName, callArgs, in.Virtual, depth, instrCount, in.ParamTypeNames, methodGenericArgs)
 			}
 			if err != nil {
 				return runtime.Value{}, err
@@ -731,17 +750,31 @@ func (m *Machine) runFrame(frame *Frame, method *runtime.Method, depth int, inst
 			frame.push(runtime.FuncVal(&runtime.Func{FullName: in.FullName, Virtual: in.Virtual}))
 
 		case ir.LoadTypeToken:
-			// IsMethodGenericParam (Fase 3.40): typeof(T) on the enclosing
-			// method's own generic parameter, which this interpreted path
-			// has no way to resolve (the same IR runs for every different
-			// call site's instantiation — see ir.Call.MethodGenericArgs's
-			// own doc comment). Pushing an empty-name Type here is the
-			// same "" degenerate behavior this already fell back to
-			// before MethodGenericArgs existed at all; the real fix for
-			// specific, load-bearing cases (FeatureCollectionBase.Get<T>)
-			// is genericMachineRegistry (calls.go), which intercepts the
-			// call before its body ever reaches this ldtoken.
-			frame.push(bcl.NewTypeValue(in.TypeFullName))
+			// IsMethodGenericParam (Fase 3.40, resolved for real as of
+			// Fase 3.60): typeof(T) on the enclosing method's own generic
+			// parameter — the same IR runs for every different call
+			// site's instantiation, so TypeFullName (baked in at IR-build
+			// time) is meaningless here; frame.MethodGenericArgs carries
+			// THIS specific call's own resolved type argument names
+			// instead (populated by tryCall's fallback into an ordinary
+			// interpreted method body — see Frame.MethodGenericArgs's own
+			// doc comment for the real, load-bearing case this fixed:
+			// Microsoft.Extensions.DependencyInjection's own
+			// ServiceDescriptor.Singleton<TService,TImplementation>()).
+			// Falls back to the old "" degenerate behavior only if this
+			// call path genuinely has no generic args available (e.g.
+			// reached through New/Invoke/a .cctor run, none of which
+			// thread them today) — an out-of-range index defensively
+			// does the same, rather than panicking on malformed IR.
+			typeName := in.TypeFullName
+			if in.IsMethodGenericParam {
+				if in.MethodGenericParamIndex >= 0 && in.MethodGenericParamIndex < len(frame.MethodGenericArgs) {
+					typeName = frame.MethodGenericArgs[in.MethodGenericParamIndex]
+				} else {
+					typeName = ""
+				}
+			}
+			frame.push(bcl.NewTypeValue(typeName))
 
 		case ir.LoadFieldToken:
 			// No real Value of its own (see LoadFieldToken's doc comment)
@@ -974,6 +1007,57 @@ func (m *Machine) fieldSlot(receiver runtime.Value, typeFullName, fieldName stri
 			Message:  fmt.Sprintf("Object reference not set to an instance of an object (%s.%s)", typeFullName, fieldName),
 		}
 	}
+}
+
+// resolveForwardedGenericArgs substitutes any "!!N" sentinel in callArgs
+// (ir.methodSpecGenericArgNames's own encoding for "this call forwards
+// the enclosing method's own Nth generic type parameter, unresolvable at
+// IR-build time" — Fase 3.60) with that parameter's real, closed name
+// from callerArgs — the CURRENTLY EXECUTING frame's own MethodGenericArgs
+// — resolved fresh at every single execution of this call site, since
+// the same static IR runs for every different calling instantiation. A
+// sentinel with no corresponding entry (index out of range, or
+// callerArgs nil — this call wasn't itself reached with any generic args
+// to forward) degrades to "" rather than panicking, matching every other
+// unresolvable-generic-argument case elsewhere in this project. Returns
+// callArgs unchanged (no allocation) when it contains no sentinel at all
+// — the overwhelming majority of calls, generic or not.
+func resolveForwardedGenericArgs(callArgs, callerArgs []string) []string {
+	var out []string
+	for i, a := range callArgs {
+		idx, ok := methodGenericParamSentinelIndex(a)
+		if !ok {
+			continue
+		}
+		if out == nil {
+			out = append([]string(nil), callArgs...)
+		}
+		if idx >= 0 && idx < len(callerArgs) {
+			out[i] = callerArgs[idx]
+		} else {
+			out[i] = ""
+		}
+	}
+	if out == nil {
+		return callArgs
+	}
+	return out
+}
+
+// methodGenericParamSentinelIndex recognizes ir.methodSpecGenericArgNames's
+// "!!N" sentinel (ECMA-335's own ILAsm notation for a method generic
+// parameter, reused verbatim since it can never collide with a real type
+// name — those never begin with "!").
+func methodGenericParamSentinelIndex(s string) (int, bool) {
+	rest, ok := strings.CutPrefix(s, "!!")
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.Atoi(rest)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // arrayIndex validates an ldelem/stelem array+index pair, returning a
