@@ -203,6 +203,30 @@ func NativeTypeName(native any) (string, bool) {
 		return "System.Linq.Expressions.MemberExpression", true
 	case *nativeLambdaExpression:
 		return "System.Linq.Expressions.Expression`1", true
+	case *nativeConstantExpression:
+		return "System.Linq.Expressions.ConstantExpression", true
+	case *nativeCallExpression:
+		return "System.Linq.Expressions.MethodCallExpression", true
+	case *nativeNewExpression:
+		return "System.Linq.Expressions.NewExpression", true
+	case *nativeNewArrayExpression:
+		return "System.Linq.Expressions.NewArrayExpression", true
+	case *nativeConvertExpression:
+		return "System.Linq.Expressions.UnaryExpression", true
+	case *nativeAssignExpression:
+		return "System.Linq.Expressions.BinaryExpression", true
+	case *nativeBlockExpression:
+		return "System.Linq.Expressions.BlockExpression", true
+	case *nativeDefaultExpression:
+		return "System.Linq.Expressions.DefaultExpression", true
+	case *nativeConditionalExpression:
+		return "System.Linq.Expressions.ConditionalExpression", true
+	case *nativeInvokeExpression:
+		return "System.Linq.Expressions.InvocationExpression", true
+	case *nativeIncDecExpression:
+		return "System.Linq.Expressions.UnaryExpression", true
+	case *nativeBinaryCompareExpression:
+		return "System.Linq.Expressions.BinaryExpression", true
 	case *nativeMemberInfo:
 		return "System.Reflection.MemberInfo", true
 	case *nativeHashSet:

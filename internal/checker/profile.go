@@ -58,6 +58,8 @@ func init() {
 		"System.Collections.Generic.List`1::",
 		"System.Collections.Generic.List`1+Enumerator::",
 		"System.Collections.ObjectModel.Collection`1::",
+		"System.Collections.ObjectModel.ReadOnlyCollection`1::",
+		"System.Runtime.CompilerServices.ReadOnlyCollectionBuilder`1::",
 		"System.Collections.Generic.Dictionary`2::",
 		"System.Collections.Generic.Dictionary`2+Enumerator::",
 		"System.Collections.Generic.Dictionary`2+ValueCollection::",
@@ -130,6 +132,20 @@ func init() {
 		"System.Linq.Expressions.Expression`1::",
 		"System.Linq.Expressions.LambdaExpression::",
 		"System.Linq.Expressions.MemberExpression::",
+		// Widened expression-tree evaluator (Fase 3.65) — see
+		// internal/bcl/system_linq_expressions.go's own doc comment.
+		"System.Linq.Expressions.ParameterExpression::",
+		"System.Linq.Expressions.ConstantExpression::",
+		"System.Linq.Expressions.MethodCallExpression::",
+		"System.Linq.Expressions.NewExpression::",
+		"System.Linq.Expressions.NewArrayExpression::",
+		"System.Linq.Expressions.UnaryExpression::",
+		"System.Linq.Expressions.BinaryExpression::",
+		"System.Linq.Expressions.BlockExpression::",
+		"System.Linq.Expressions.DefaultExpression::",
+		"System.Linq.Expressions.ConditionalExpression::",
+		"System.Linq.Expressions.InvocationExpression::",
+		"System.Linq.Expressions.ExpressionVisitor::",
 		"System.Linq.Enumerable::",
 		// VmnetInternal.Ordered/VmnetInternal.Grouping are vmnet's own
 		// synthetic result types for a LINQ OrderBy/ThenBy chain
@@ -240,6 +256,7 @@ func init() {
 		"System.Data.Common.DbTransaction::",
 		"System.Environment::get_NewLine",
 		"System.Environment::GetEnvironmentVariable",
+		"System.Environment::get_ProcessorCount",
 		"System.Double::",
 		"System.Threading.Interlocked::",
 		"System.WeakReference::",

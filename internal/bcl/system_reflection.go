@@ -500,6 +500,19 @@ func PropertyInfoParts(v runtime.Value) (typeFullName, propertyName string, canR
 	return pi.typeFullName, pi.propertyName, pi.canRead, pi.canWrite, true
 }
 
+// propertyInfoTypeNameOf reads a PropertyInfo wrapper's own declared
+// property type — used by system_linq_expressions.go's own
+// Expression.Property(Expression, PropertyInfo) overload (Fase 3.65) to
+// give the resulting MemberExpression a real .Type without needing a
+// second, separate reflection call.
+func propertyInfoTypeNameOf(v runtime.Value) (string, bool) {
+	pi, ok := nativeOf[*nativePropertyInfo](v)
+	if !ok || pi.propertyTypeFullName == "" {
+		return "", false
+	}
+	return pi.propertyTypeFullName, true
+}
+
 func propertyInfoName(v runtime.Value) (string, bool) {
 	pi, ok := nativeOf[*nativePropertyInfo](v)
 	if !ok {

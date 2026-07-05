@@ -5550,6 +5550,144 @@ VMNET_NETWORK_TESTS=1 go test -run TestFluentValidationDemoE2E -v .
 ```
 
 ---
+## Fase 3.65 — un evaluador real de árbol de expresión: `System.Linq.Expressions.Expression<T>.Compile()`, generalizado
+
+**Objetivo:** construir el subsistema general de árbol-de-expresión-a-ejecutable que la Fase 3.60 y
+la Fase 3.64 identificaron y postergaron — específicamente porque desbloquearía DOS consumidores
+reales, independientes y de alto valor a la vez: la propia generación de plan de mapeo de
+`AutoMapper` (compila un árbol de expresión completo y personalizado por cada par de tipos) y el
+propio camino rápido de resolución compilada `ExpressionResolverBuilder` de `Microsoft.Extensions.
+DependencyInjection`.
+
+**Esto es un intérprete que recorre el árbol, no un JIT.** Nada en este subsistema genera o ejecuta
+código máquina nuevo jamás — vmnet no tiene ningún backend de generación de código, y esta Fase no
+agrega uno. `Expression<TDelegate>.Compile()` devuelve un delegado cuya invocación recorre el árbol
+ya construido (los propios tipos de nodo nativos de `internal/bcl/system_linq_expressions.go`) nodo
+por nodo en el momento de la llamada, despachando cada operación real (una lectura de propiedad, una
+llamada a método, una llamada a constructor, una asignación a una variable de ámbito `Block`, un
+incremento, una comparación por referencia, ...) a través de la MISMA maquinaria real `Machine.call`/
+`newObj` que ya usa cualquier sitio de llamada compilado ordinario. El árbol del delegado se
+contrabandea a través de `Func.Receiver` (el mismo mecanismo que introdujo la Fase 3.64), y el
+entorno del evaluador es un `map[*runtime.Object]runtime.Value` indexado por la identidad de objeto
+propia de cada nodo `ParameterExpression`/`Variable`, así que la misma variable referenciada muchas
+veces a través de un árbol siempre resuelve al mismo slot.
+
+**Resultado: un evaluador genuinamente general (aunque todavía no exhaustivo), validado contra una
+prueba sintética hecha a mano al estilo AutoMapper Y contra porciones reales y sustanciales de la
+propia maquinaria en tiempo de ejecución de AutoMapper 16.2.0 real — doce correcciones reales del
+intérprete en el camino, un bloqueo real, profundo y sin arreglar encontrado y documentado
+honestamente.**
+
+- **Nuevos tipos de nodo** (más allá del conjunto angosto de cadena-de-acceso-a-propiedad de la Fase
+  3.41/3.64): `Constant`, `Call`, `New`, `NewArrayInit`, `Convert`/`ConvertChecked`, `Assign` (a una
+  variable Y a una propiedad/campo, vía el setter real), `Block` (con locales declarados,
+  inicializados a un `default(T)` real), `Default`, `Conditional` (cubre `IfThen`/`IfThenElse`/
+  `Condition`), `Invoke`, `ReferenceEqual`/`ReferenceNotEqual`, y `Pre`/`PostIncrementAssign`/`Pre`/
+  `PostDecrementAssign`. Cada valor del enum `ExpressionType` usado se confirmó contra una ejecución
+  real de `dotnet run` imprimiendo `Enum.GetValues(typeof(ExpressionType))`, no se confió en la
+  memoria.
+- **`System.Linq.Expressions.ExpressionVisitor`** (`internal/interpreter/exprvisitor.go`, nuevo) —
+  las subclases reales de .NET de esta clase base (encontradas vía `AutoMapper.Execution.
+  ReplaceVisitorBase`/`ReplaceVisitor`/`ParameterReplaceVisitor`, usadas para insertar una plantilla
+  de mapeo por-propiedad cacheada dentro de la propia lambda externa de quien llama, sustituyendo un
+  `ParameterExpression` por otro) típicamente sobrescriben solo UN método (`Visit` o
+  `VisitParameter`) y confían por completo en el propio comportamiento por defecto de la clase base
+  ("recorrer los hijos, reconstruir si algo cambió") para cualquier otro tipo de nodo. `
+  ExpressionVisitor` en sí se distribuye como IL de BCL compilado del que vmnet no tiene bytecode en
+  absoluto, así que cada método `Visit`/`VisitXxx` es una implementación nativa en Go que reemplaza
+  ese comportamiento por defecto — `Visit` despacha virtualmente (así que la propia sobrescritura de
+  una subclase de cualquier `VisitXxx` individual sigue aplicando, vía el mismo recorrido de
+  ancestros que `Machine.call` ya usa para cualquier otra llamada virtual) a uno de trece nativos `
+  VisitXxx`, cada uno reconstruyendo su propio tipo de nodo a partir de hijos recién visitados vía
+  nuevos constructores exportados en `system_linq_expressions.go`.
+- **Errores reales encontrados y corregidos probando contra el AutoMapper 16.2.0 real**, cada uno vía
+  el ciclo establecido "medir → chocar con un error real → arreglar → re-ejecutar", no adivinados de
+  antemano:
+  - `Expression.Empty()` — la fábrica sin argumentos (un `DefaultExpression` tipado `void`) no
+    existía.
+  - `Type.GetMember(string, MemberTypes, BindingFlags)` — no existía en absoluto; agregado,
+    resolviendo solo la familia `Method` (la única que el único llamador real encontrado,
+    `TypeExtensions.GetInstanceMethod`, necesita).
+  - `System.Runtime.CompilerServices.ReadOnlyCollectionBuilder<T>` — un tipo real de buffer creciente
+    (`.ctor()`/`Add`/`ToReadOnlyCollection()`) que respalda `AutoMapper.Internal.PrimitiveHelper.
+    ToReadOnly<T>`; modelado con el mismo `*nativeList` real que ya usa `List<T>`, bajo su propio
+    nombre de tipo.
+  - Las sobrecargas ambiguas de 2 argumentos de `Expression.Call` — `Call(MethodInfo, params
+    Expression[])`, `Call(MethodInfo, Expression)` (un único argumento sin arreglo) y `Call(
+    Expression, MethodInfo)` (una llamada de instancia, sin argumentos extra) comparten la misma
+    aridad; desambiguadas según qué posición realmente contiene un `MethodInfo`, y — para ese caso —
+    si el otro argumento es en sí mismo un nodo Expression real.
+  - Un fallback de métodos de interfaz BCL bien conocidos (`internal/interpreter/reflection.go`) —
+    `typeof(IDisposable).GetMethod("Dispose")` y `typeof(IList).GetMethod("Clear")` devolvían `null`
+    porque vmnet no tiene ningún `TypeDef` real para estas interfaces BCL en absoluto, lo cual luego
+    hacía fallar `Expression.Call(disposable, methodInfoNulo)` con un error de `MethodInfo` nulo; una
+    lista blanca pequeña y explícita de métodos de interfaz siempre-presentes ahora responde "sí,
+    esto existe" exactamente para los que se encontró que un llamador real necesita, sin afirmar nada
+    sobre cómo despacharían realmente.
+  - `Type.GetConstructor`/`GetConstructors` solo aceptaban sus sobrecargas más simples (exactamente 2
+    args / exactamente 1 arg) — el propio `AutoMapper.Internal.Mappers.ConstructorMapper` real usa el
+    `GetConstructor(BindingFlags, Binder, Type[], ParameterModifier[])` de 5 argumentos y el
+    `GetConstructors(BindingFlags)` de 1 argumento; ambos ahora escanean cada argumento final
+    buscando el primer `Type[]` real (o aceptan cualquier aridad ≥1), la misma postura que `Type.
+    GetMethod` ya estableció para su propio abanico de aridades multi-sobrecarga.
+  - `Environment.ProcessorCount` — no existía (el propio `LockingConcurrentDictionary` de `
+    AutoMapper` dimensiona su cantidad de particiones a partir de él); respondido con el propio
+    `runtime.NumCPU()` real de Go — a diferencia de `GetEnvironmentVariable`/`UserName`
+    (deliberadamente falsos, ya que esos pueden revelar la identidad del host), una cantidad de CPUs
+    solo revela capacidad, así que una respuesta real está bien acá.
+- **El propio CLI de `vmnet check package` ahora imprime `Methods flagged` directamente**
+  (`cmd/vmnet/main.go`) — antes solo se imprimía `Methods analyzed`, forzando una aproximación manual
+  basada en `grep` de la cantidad de métodos marcados que resultó no coincidir con el propio contador
+  de verdad del checker en casos límite; imprimir el campo real elimina la necesidad de aproximar.
+- **Re-medido contra la MISMA herramienta, antes vs. después, en los propios commits de inicio/fin de
+  esta Fase** (no contra cifras documentadas previamente, que resultaron no coincidir con lo que esta
+  misma herramienta reporta al re-ejecutarse — una inconsistencia de medición preexistente, no algo
+  que esta Fase introdujo, ahora corregida re-derivando siempre ambos lados de una comparación desde
+  una sola ejecución): `AutoMapper` 2.319 métodos, 256 marcados (89.0%) → 152 marcados (93.4%); `
+  Microsoft.Extensions.DependencyInjection` 437 métodos, 40 marcados (90.8%) → 26 marcados (94.1%).
+
+### Encontrado, no arreglado (esta Fase)
+
+- **El propio `Mapper.Map<TDestination>(source)` real de AutoMapper todavía lanza una excepción** —
+  una `NullReferenceException` real (`System.ValueTuple\`2.Item2`) en las profundidades de la propia
+  maquinaria de selección de constructor/`TypeDetails`, alcanzada solo después de atravesar toda su
+  inicialización estática, su capa de reflexión y su infraestructura de inserción de plantillas
+  basada en `ExpressionVisitor`. Solo `TypeDetails` abarca miles de líneas de IL real usando cadenas
+  LINQ `Select`/`Where` sobre tipos anónimos generados por el compilador y una caché de métodos
+  genéricos — encontrar la causa raíz exacta de qué mecanismo interno produce un campo de tupla nulo
+  necesitaría arqueología dedicada sustancial más allá del alcance propio de esta Fase. No es una
+  regresión del propio trabajo de esta Fase: todo hasta este punto (inicialización estática, `
+  ConstructorMapper`, descubrimiento de miembros basado en reflexión, el patrón `ExpressionVisitor`)
+  ahora corre correctamente donde antes fallaba directamente.
+- **El propio camino rápido `ExpressionResolverBuilder` de Microsoft.Extensions.DependencyInjection
+  sigue sin verificar — y es inherentemente difícil de verificar desde fuera del uso normal.** Leer
+  su propio IL real (`ilspycmd`) muestra que es una optimización de mejor esfuerzo en segundo plano:
+  `DynamicServiceProviderEngine` resuelve las primeras DOS llamadas a cualquier servicio dado a
+  través de `CallSiteRuntimeResolver` (un intérprete simple que recorre el árbol, siempre disponible,
+  que no necesita `Expression.Compile()` en absoluto), luego encola un `ThreadPool.
+  UnsafeQueueUserWorkItem` en segundo plano para compilar el sitio de llamada vía `
+  ExpressionResolverBuilder` e intercambiar el delegado compilado para llamadas posteriores —
+  envuelto en un `try`/`catch` que TRAGA cualquier fallo de compilación y lo registra vía `
+  DependencyInjectionEventSource` en lugar de propagarlo. El propio comportamiento observable de un
+  llamador real (un servicio resuelto, construido correctamente) es IDÉNTICO ya sea que esa
+  compilación en segundo plano tenga éxito silenciosamente o falle silenciosamente, lo cual significa
+  que este camino rápido no se puede demostrar como "funcionando" o "roto" a través del uso ordinario
+  de DI de la forma en que el propio camino `CallSiteRuntimeResolver` siempre activo de `examples/
+  di-demo` ya lo demuestra. El propio `di-demo` no se ve afectado de ninguna manera — ejercita el
+  camino del intérprete, no este.
+
+### Cómo verificar Fase 3.65
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+go run ./cmd/vmnet check package --profile=netstandard-lite automapper@16.2.0
+go run ./cmd/vmnet check package --profile=netstandard-lite microsoft.extensions.dependencyinjection@8.0.0
+```
+
+---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
 

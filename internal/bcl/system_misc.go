@@ -2,6 +2,7 @@ package bcl
 
 import (
 	"fmt"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 
@@ -36,6 +37,14 @@ func init() {
 	// the actual host.
 	register("System.Environment::get_UserName", true, environmentUserName)
 	register("System.Environment::get_MachineName", true, environmentUserName)
+	// ProcessorCount (Fase 3.65, found via AutoMapper's own
+	// LockingConcurrentDictionary sizing its internal partition count off
+	// it): unlike GetEnvironmentVariable/UserName above, a CPU count
+	// doesn't reveal anything about the host's identity, only its
+	// capacity — real Go's own runtime.NumCPU() (the actual host this
+	// process is running on) is a fine, honest answer here rather than a
+	// constant stand-in.
+	register("System.Environment::get_ProcessorCount", true, environmentProcessorCount)
 	register("System.Convert::ToInt32", true, convertToInt32)
 	register("System.Convert::ToInt64", true, convertToInt64)
 	register("System.Double::ToString", true, doubleToString)
@@ -349,6 +358,10 @@ func environmentGetEnvironmentVariableNull(args []runtime.Value) (runtime.Value,
 
 func environmentUserName(args []runtime.Value) (runtime.Value, error) {
 	return runtime.String("vmnet"), nil
+}
+
+func environmentProcessorCount(args []runtime.Value) (runtime.Value, error) {
+	return runtime.Int32(int32(goruntime.NumCPU())), nil
 }
 
 // convertToInt32 covers the string/double/int64/bool/object-typed

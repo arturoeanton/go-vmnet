@@ -44,6 +44,7 @@ func init() {
 	machineRegistry["System.Type::GetConstructor"] = typeGetConstructor
 	machineRegistry["System.Type::GetMethod"] = typeGetMethod
 	machineRegistry["System.Type::GetField"] = typeGetField
+	machineRegistry["System.Type::GetMember"] = typeGetMember
 	machineRegistry["System.Reflection.ConstructorInfo::Invoke"] = constructorInfoInvoke
 	machineRegistry["System.Reflection.MethodInfo::Invoke"] = methodInfoInvoke
 	machineRegistry["System.Reflection.FieldInfo::GetValue"] = fieldInfoGetValue
@@ -705,17 +706,36 @@ func typeIsInstanceOfType(m *Machine, args []runtime.Value, depth int, instrCoun
 // matching the declared parameter types via Machine.ResolveMember, and
 // wraps it as a ConstructorInfo if found (null otherwise, matching real
 // semantics for "no matching constructor").
+// typeGetConstructor backs both Type.GetConstructor(Type[]) and the
+// 5-argument Type.GetConstructor(BindingFlags, Binder, Type[],
+// ParameterModifier[]) overload (Fase 3.65, found via AutoMapper's own
+// ConstructorMapper — the SAME "scan every argument after the receiver
+// for the first real Type[]" posture typeGetMethod's own doc comment
+// already documents for its own multi-overload arity spread, rather than
+// hardcoding which positional argument holds the signature for each
+// shape.
 func typeGetConstructor(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
-	if len(args) != 2 {
-		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetConstructor expects (this, Type[])")
+	if len(args) < 2 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetConstructor expects (this, Type[], ...)")
 	}
 	typeFullName, ok := typeFullNameOfOpen(args[0])
 	if !ok {
 		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetConstructor receiver is not a Type")
 	}
-	paramNames, err := bcl.TypeArrayToFullNames(args[1])
-	if err != nil {
-		return runtime.Value{}, err
+	var paramNames []string
+	found := false
+	for _, a := range args[1:] {
+		if a.Kind != runtime.KindArray {
+			continue
+		}
+		if names, err := bcl.TypeArrayToFullNames(a); err == nil {
+			paramNames = names
+			found = true
+			break
+		}
+	}
+	if !found {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetConstructor: no Type[] argument found")
 	}
 	if m.ResolveMember == nil {
 		return runtime.Null(), nil
@@ -734,7 +754,7 @@ func typeGetConstructor(m *Machine, args []runtime.Value, depth int, instrCount 
 // to enumerate) — matching GetInterfaces/GetProperties' own "no
 // metadata, no results" convention.
 func typeGetConstructors(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
-	if len(args) != 1 {
+	if len(args) < 1 {
 		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetConstructors expects a receiver")
 	}
 	typeFullName, ok := typeFullNameOfOpen(args[0])
@@ -966,7 +986,7 @@ func typeGetMethod(m *Machine, args []runtime.Value, depth int, instrCount *int6
 	if m.ResolveMember == nil {
 		return runtime.Null(), nil
 	}
-	if _, ok := m.ResolveMember(typeFullName, methodName, paramNames); !ok {
+	if _, ok := m.ResolveMember(typeFullName, methodName, paramNames); !ok && !isWellKnownBCLInterfaceMethod(typeFullName, methodName) {
 		return runtime.Null(), nil
 	}
 	return bcl.NewMethodInfoValue(typeFullName, methodName), nil
@@ -1088,6 +1108,75 @@ func typeGetMethods(m *Machine, args []runtime.Value, depth int, instrCount *int
 		elems[i] = bcl.NewMethodInfoValue(typeFullName, name)
 	}
 	return runtime.ArrRef(&runtime.Array{Elems: elems}), nil
+}
+
+// memberTypesMethod is System.Reflection.MemberTypes.Method's real
+// ECMA-335 enum value (8) — the only member family typeGetMember below
+// actually searches, since every real caller found so far (AutoMapper's
+// own TypeExtensions.GetInstanceMethod helper) only ever asks for
+// Method and then casts the result to MethodInfo.
+const memberTypesMethod = 8
+
+// typeGetMember backs Type.GetMember(string name, MemberTypes type,
+// BindingFlags bindingAttr) — found via AutoMapper's own
+// TypeExtensions.GetInstanceMethod helper, which calls this then
+// `.FirstOrDefault()`s and casts the result to MethodInfo. Only the
+// Method member family is actually resolved (matching typeGetMethods'
+// own by-name-only posture); any other requested family returns an
+// empty result rather than a hard failure, the same "no metadata, no
+// results" convention typeGetFields/typeGetProperties/typeGetInterfaces
+// already use for BCL types vmnet has no TypeDef for.
+func typeGetMember(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) < 2 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetMember expects (this, name, ...)")
+	}
+	typeFullName, ok := typeFullNameOfOpen(args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetMember receiver is not a Type")
+	}
+	if args[1].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetMember expects a string name")
+	}
+	memberName := args[1].Str
+	wantsMethod := true
+	if len(args) >= 3 && args[2].Kind == runtime.KindI4 {
+		wantsMethod = args[2].I4&memberTypesMethod != 0
+	}
+	if !wantsMethod || m.ResolveMember == nil {
+		return runtime.ArrRef(runtime.NewArray(0)), nil
+	}
+	if _, ok := m.ResolveMember(typeFullName, memberName, nil); !ok && !isWellKnownBCLInterfaceMethod(typeFullName, memberName) {
+		return runtime.ArrRef(runtime.NewArray(0)), nil
+	}
+	return runtime.ArrRef(&runtime.Array{Elems: []runtime.Value{bcl.NewMethodInfoValue(typeFullName, memberName)}}), nil
+}
+
+// wellKnownBCLInterfaceMethods lists a handful of always-present BCL
+// interface methods that Type.GetMethod/GetMember need to say "yes, this
+// exists" for even though vmnet has no real TypeDef for the DECLARING
+// interface at all (IDisposable, IList — every real .NET interface, not
+// something this loop's own metadata models) — found via AutoMapper's
+// own ExpressionBuilder static constructor building real
+// `typeof(IDisposable).GetMethod("Dispose")` and
+// `typeof(IList).GetMethod("Clear")` static Expression templates. This
+// table only answers the EXISTENCE question; actual dispatch still goes
+// through Machine.call's own ordinary receiver-concrete-type resolution
+// exactly like any other reflection-found MethodInfo already does — a
+// false "doesn't exist" here (the default for anything not listed) is
+// safe (a real caller just gets a null MethodInfo, same as today);
+// listing something that doesn't actually get called correctly would
+// only surface as a LATER, separate error at the real call site, not
+// here.
+var wellKnownBCLInterfaceMethods = map[string]bool{
+	"System.IDisposable::Dispose":        true,
+	"System.Collections.IList::Clear":    true,
+	"System.Collections.IList::Add":      true,
+	"System.Collections.IList::Remove":   true,
+	"System.Collections.IList::Contains": true,
+}
+
+func isWellKnownBCLInterfaceMethod(typeFullName, methodName string) bool {
+	return wellKnownBCLInterfaceMethods[typeFullName+"::"+methodName]
 }
 
 // constructorInfoInvoke backs ConstructorInfo.Invoke(object[] parameters)

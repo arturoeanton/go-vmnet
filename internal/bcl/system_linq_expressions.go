@@ -7,65 +7,197 @@ import (
 	"github.com/arturoeanton/go-vmnet/internal/runtime"
 )
 
-// System.Linq.Expressions support here is deliberately narrow, not a
-// general expression-tree engine: every real call site found across
-// DocumentFormat.OpenXml/.Framework (Fase 3.41, ~1859 occurrences) uses
-// the exact same shape — every element's own ConfigureMetadata builds
-// an Expression<Func<TElement,TValue>> for each attribute accessor
-// (`a => a.Space`), which the compiler lowers to `Expression.Parameter`
-// + `ldtoken <property getter>`/`MethodBase.GetMethodFromHandle`/
-// `Expression.Property` + `Expression.Lambda`, and the only real
-// consumer (ElementMetadata.Builder<T>.AddAttribute, real interpreted
-// IL) does nothing but `expression.Body is MemberExpression m` then
-// reads `m.Member.Name` — never compiles or invokes the tree. So none of
-// these natives need to represent a real, walkable/compilable
-// expression graph — just enough shape for that one inspection to work.
+// System.Linq.Expressions support (Fase 3.41 narrow beginning, Fase 3.64
+// widened for a REAL property-access-chain Expression<T>.Compile(), Fase
+// 3.65 widened again into a genuinely general — if still not exhaustive —
+// expression-tree evaluator). This still isn't a JIT: nothing here ever
+// generates or runs new machine code or IL. Every node below is a plain
+// Go struct recording exactly what its real Expression.XXX(...) factory
+// call was given; internal/interpreter/exprcompile.go's own evalExprNode
+// walks that data recursively at invocation time, dispatching each real
+// operation (a property read, a method call, a constructor call, an
+// assignment into a Block-scoped variable, ...) through the SAME real
+// Machine.call/newObj machinery an ordinary compiled call site already
+// uses — a tree-walking interpreter for a small, real subset of
+// Expression node kinds, not a general one. Found via two real, deep
+// consumers: Microsoft.Extensions.DependencyInjection's own
+// ExpressionResolverBuilder (its compiled-service-resolution fast path)
+// and AutoMapper's own mapping-plan generation.
+//
+// Every node type below carries a typeName string for Expression.Type —
+// derived from data already available at construction time (the same
+// information the real .NET caller already had), not inferred centrally;
+// see expressionGetType's own doc comment.
 
-// nativeParameterExpression is completely opaque: nothing downstream
-// ever reads anything off it besides passing it back into
-// Expression.Lambda's own parameter array, itself unused.
-type nativeParameterExpression struct{}
+// nativeParameterExpression backs ParameterExpression — used for BOTH a
+// lambda's own formal parameters (Expression.Parameter) and a Block's
+// locals (Expression.Variable, a real, exact alias of Parameter in
+// .NET). Identity matters here in a way it didn't before Fase 3.65: the
+// evaluator's environment is keyed by this Value's own *runtime.Object
+// pointer, so the SAME ParameterExpression object appearing at multiple
+// points in a tree (the common case: a lambda parameter referenced many
+// times in its own body) always resolves to the same environment slot.
+type nativeParameterExpression struct {
+	typeName string
+	name     string
+}
 
-// nativeMemberExpression carries just the property name AddAttribute
-// ultimately reads via .Member.Name — derived from the property
-// accessor's own method name (get_Space -> "Space") right when
-// Expression.Property is called, rather than modeling a real
-// PropertyInfo/MemberInfo graph. expression (Fase 3.64) is the Expression
-// this member was accessed off of — Expression.Property's own first
-// argument, verbatim — needed by real consumers that walk BACK up the
-// tree (FluentValidation's own PropertyRule building, which checks
-// whether a lambda body's MemberExpression.Expression is the lambda's
-// own ParameterExpression — a direct property access, `x => x.Name` — or
-// another MemberExpression — a nested one, `x => x.Address.City`) rather
-// than just reading the member's own name forward (DocumentFormat.
-// OpenXml's own ConfigureMetadata, this subsystem's original real
-// caller, never needs this).
+// nativeMemberExpression carries the property name and, since Fase 3.64,
+// the Expression it was accessed off of. typeName (Fase 3.65) is the
+// member's own declared type — known when constructed via the
+// PropertyInfo overload (PropertyInfoParts already carries it); "" (falls
+// back to System.Object for Expression.Type) for the MethodInfo overload,
+// which carries no property-type information at all.
 type nativeMemberExpression struct {
 	propertyName string
 	expression   runtime.Value
+	typeName     string
 }
 
 // nativeMemberInfo backs MemberExpression.Member's real return type
 // (System.Reflection.MemberInfo) — exposes only .Name, the one member
-// AddAttribute reads.
+// AddAttribute (Fase 3.41) reads.
 type nativeMemberInfo struct {
 	name string
 }
 
-// nativeLambdaExpression backs Expression<TDelegate> — exposes only
-// .Body, the one member AddAttribute reads.
+// nativeLambdaExpression backs Expression<TDelegate> — body plus (Fase
+// 3.65) ALL of its own parameters, in order, needed both for
+// LambdaExpression.Parameters (a real, plural property several real
+// consumers read) and to seed the evaluator's environment with every
+// parameter, not just the first, when the compiled delegate is actually
+// invoked.
 type nativeLambdaExpression struct {
-	body runtime.Value
+	body       runtime.Value
+	parameters []runtime.Value
+}
+
+// nativeConstantExpression backs ConstantExpression — a literal value
+// baked into the tree at construction time.
+type nativeConstantExpression struct {
+	value    runtime.Value
+	typeName string
+}
+
+// nativeCallExpression backs MethodCallExpression — instance.Kind ==
+// KindNull for a static method call.
+type nativeCallExpression struct {
+	instance   runtime.Value
+	typeName   string
+	methodName string
+	args       []runtime.Value
+}
+
+// nativeNewExpression backs NewExpression.
+type nativeNewExpression struct {
+	typeName string
+	args     []runtime.Value
+}
+
+// nativeNewArrayExpression backs NewArrayExpression (Expression.
+// NewArrayInit — NewArrayBounds, a different real factory for an
+// uninitialized array of a given length, isn't modeled: no real corpus
+// caller found needs it).
+type nativeNewArrayExpression struct {
+	elemTypeName string
+	elements     []runtime.Value
+}
+
+// nativeConvertExpression backs UnaryExpression with NodeType Convert/
+// ConvertChecked — evalConvert (exprcompile.go) does the real coercion.
+type nativeConvertExpression struct {
+	operand  runtime.Value
+	typeName string
+}
+
+// nativeAssignExpression backs BinaryExpression with NodeType Assign —
+// real .NET models Assign as a BinaryExpression (Left/Right), not its
+// own subclass; modeled as its own narrow Go type here since Assign is
+// the only BinaryExpression kind this subsystem evaluates (no general
+// arithmetic/comparison operators — Add/Subtract/Equal/etc. — yet; no
+// real corpus caller confirmed needing one).
+type nativeAssignExpression struct {
+	left, right runtime.Value
+}
+
+// nativeBlockExpression backs BlockExpression — variables are this
+// block's own locally-scoped ParameterExpressions (Expression.Variable),
+// seeded to a real default(T) in the evaluator's environment before body
+// runs; body is evaluated in order, and the block's own value is its
+// LAST expression's value (real Block semantics).
+type nativeBlockExpression struct {
+	variables []runtime.Value
+	body      []runtime.Value
+}
+
+// nativeDefaultExpression backs DefaultExpression (Expression.Default).
+type nativeDefaultExpression struct {
+	typeName string
+}
+
+// nativeConditionalExpression backs ConditionalExpression — covers all
+// three real factories that produce one: IfThen (ifFalse.Kind ==
+// KindNull, a statement — no useful value), IfThenElse, and Condition
+// (both branches given, a real ternary-shaped value).
+type nativeConditionalExpression struct {
+	test, ifTrue, ifFalse runtime.Value
+}
+
+// nativeInvokeExpression backs InvocationExpression (Expression.Invoke)
+// — invoking a nested lambda/delegate-valued expression, distinct from a
+// MethodCallExpression (a real named method).
+type nativeInvokeExpression struct {
+	expr runtime.Value
+	args []runtime.Value
 }
 
 func init() {
 	register("System.Linq.Expressions.Expression::Parameter", true, expressionParameter)
+	register("System.Linq.Expressions.Expression::Variable", true, expressionParameter)
 	register("System.Linq.Expressions.Expression::Property", true, expressionProperty)
 	register("System.Linq.Expressions.Expression::Lambda", true, expressionLambda)
 	register("System.Linq.Expressions.LambdaExpression::get_Body", true, lambdaExpressionGetBody)
+	register("System.Linq.Expressions.LambdaExpression::get_Parameters", true, lambdaExpressionGetParameters)
 	register("System.Linq.Expressions.MemberExpression::get_Member", true, memberExpressionGetMember)
 	register("System.Linq.Expressions.MemberExpression::get_Expression", true, memberExpressionGetExpression)
 	register("System.Linq.Expressions.Expression::get_NodeType", true, expressionGetNodeType)
+	register("System.Linq.Expressions.Expression::get_Type", true, expressionGetType)
+	register("System.Linq.Expressions.ParameterExpression::get_Name", true, parameterExpressionGetName)
+	register("System.Linq.Expressions.ParameterExpression::get_Type", true, expressionGetType)
+	register("System.Linq.Expressions.Expression::Constant", true, expressionConstant)
+	register("System.Linq.Expressions.Expression::Call", true, expressionCall)
+	register("System.Linq.Expressions.Expression::New", true, expressionNew)
+	register("System.Linq.Expressions.Expression::NewArrayInit", true, expressionNewArrayInit)
+	register("System.Linq.Expressions.Expression::Convert", true, expressionConvert)
+	register("System.Linq.Expressions.Expression::ConvertChecked", true, expressionConvert)
+	register("System.Linq.Expressions.Expression::Assign", true, expressionAssign)
+	register("System.Linq.Expressions.Expression::Block", true, expressionBlock)
+	register("System.Linq.Expressions.Expression::Default", true, expressionDefault)
+	register("System.Linq.Expressions.Expression::Empty", true, expressionEmpty)
+	register("System.Linq.Expressions.Expression::IfThen", true, expressionIfThen)
+	register("System.Linq.Expressions.Expression::IfThenElse", true, expressionIfThenElse)
+	register("System.Linq.Expressions.Expression::Condition", true, expressionIfThenElse)
+	register("System.Linq.Expressions.Expression::Invoke", true, expressionInvoke)
+	register("System.Linq.Expressions.Expression::ReferenceEqual", true, expressionReferenceEqual)
+	register("System.Linq.Expressions.Expression::ReferenceNotEqual", true, expressionReferenceNotEqual)
+	register("System.Linq.Expressions.Expression::PreIncrementAssign", true, expressionPreIncrementAssign)
+	register("System.Linq.Expressions.Expression::PostIncrementAssign", true, expressionPostIncrementAssign)
+	register("System.Linq.Expressions.Expression::PreDecrementAssign", true, expressionPreDecrementAssign)
+	register("System.Linq.Expressions.Expression::PostDecrementAssign", true, expressionPostDecrementAssign)
+	register("System.Linq.Expressions.NewArrayExpression::get_Expressions", true, newArrayExpressionGetExpressions)
+	register("System.Linq.Expressions.MethodCallExpression::get_Object", true, callExpressionGetObject)
+	register("System.Linq.Expressions.MethodCallExpression::get_Arguments", true, callExpressionGetArguments)
+	register("System.Linq.Expressions.MethodCallExpression::get_Method", true, callExpressionGetMethod)
+	register("System.Linq.Expressions.UnaryExpression::get_Operand", true, convertExpressionGetOperand)
+	register("System.Linq.Expressions.BinaryExpression::get_Left", true, assignExpressionGetLeft)
+	register("System.Linq.Expressions.BinaryExpression::get_Right", true, assignExpressionGetRight)
+	register("System.Linq.Expressions.BlockExpression::get_Variables", true, blockExpressionGetVariables)
+	register("System.Linq.Expressions.BlockExpression::get_Expressions", true, blockExpressionGetExpressions)
+	register("System.Linq.Expressions.ConditionalExpression::get_Test", true, conditionalExpressionGetTest)
+	register("System.Linq.Expressions.ConditionalExpression::get_IfTrue", true, conditionalExpressionGetIfTrue)
+	register("System.Linq.Expressions.ConditionalExpression::get_IfFalse", true, conditionalExpressionGetIfFalse)
+	register("System.Linq.Expressions.InvocationExpression::get_Expression", true, invokeExpressionGetExpression)
+	register("System.Linq.Expressions.InvocationExpression::get_Arguments", true, invokeExpressionGetArguments)
 	// "System.Reflection.MemberInfo::get_Name" is registered once, in
 	// system_type.go's own init() (typeGetName) — that native now checks
 	// for this file's *nativeMemberInfo receiver shape too. Registering
@@ -83,8 +215,48 @@ func init() {
 	register("System.Reflection.MethodBase::GetMethodFromHandle", true, methodBaseGetMethodFromHandle)
 }
 
+// exprArgsFrom collects an IEnumerable<Expression>-shaped argument's own
+// elements — either a real CLI array (the overwhelmingly common case,
+// `params Expression[]`) or a *nativeList (a caller-built
+// List<Expression> passed as IEnumerable<Expression>, e.g.
+// Expression.Block(IEnumerable<ParameterExpression>, ...)).
+func exprArgsFrom(v runtime.Value) []runtime.Value {
+	switch v.Kind {
+	case runtime.KindArray:
+		if v.Arr == nil {
+			return nil
+		}
+		return v.Arr.Elems
+	case runtime.KindObject:
+		if l, ok := nativeOf[*nativeList](v); ok {
+			return l.items
+		}
+	}
+	return nil
+}
+
 func expressionParameter(args []runtime.Value) (runtime.Value, error) {
-	return runtime.ObjRef(&runtime.Object{Native: &nativeParameterExpression{}}), nil
+	p := &nativeParameterExpression{}
+	if len(args) > 0 {
+		if name, ok := TypeFullNameOf(args[0]); ok {
+			p.typeName = name
+		}
+	}
+	if len(args) > 1 && args[1].Kind == runtime.KindString {
+		p.name = args[1].Str
+	}
+	return runtime.ObjRef(&runtime.Object{Native: p}), nil
+}
+
+func parameterExpressionGetName(args []runtime.Value) (runtime.Value, error) {
+	p, ok := nativeOf[*nativeParameterExpression](firstArg(args))
+	if !ok {
+		return runtime.Null(), nil
+	}
+	if p.name == "" {
+		return runtime.Null(), nil
+	}
+	return runtime.String(p.name), nil
 }
 
 func methodBaseGetMethodFromHandle(args []runtime.Value) (runtime.Value, error) {
@@ -94,12 +266,19 @@ func methodBaseGetMethodFromHandle(args []runtime.Value) (runtime.Value, error) 
 	return args[0], nil
 }
 
-// expressionProperty backs Expression.Property(Expression, MethodInfo) —
-// the overload real ConfigureMetadata code always uses (a property
-// accessor method handle, never a bare PropertyInfo or string name).
+// expressionProperty backs BOTH real Expression.Property overloads:
+// (Expression, MethodInfo) — a property accessor method handle, the
+// shape DocumentFormat.OpenXml's own ConfigureMetadata always uses — and
+// (Expression, PropertyInfo) — a real PropertyInfo directly, which also
+// carries the property's own declared type (PropertyInfoParts), unlike
+// the MethodInfo overload.
 func expressionProperty(args []runtime.Value) (runtime.Value, error) {
 	if len(args) < 2 {
 		return runtime.Value{}, nil
+	}
+	if _, propName, _, _, ok := PropertyInfoParts(args[1]); ok {
+		propTypeName, _ := propertyInfoTypeNameOf(args[1])
+		return runtime.ObjRef(&runtime.Object{Native: &nativeMemberExpression{propertyName: propName, expression: args[0], typeName: propTypeName}}), nil
 	}
 	_, methodName, ok := MethodInfoParts(args[1])
 	if !ok {
@@ -115,15 +294,19 @@ func expressionProperty(args []runtime.Value) (runtime.Value, error) {
 }
 
 // expressionLambda backs Expression.Lambda<TDelegate>(Expression body,
-// ParameterExpression[] parameters) — a generic method, but TDelegate is
-// never consulted (nothing here compiles or invokes the tree), so this
-// is registered as a plain native rather than needing
-// genericMachineRegistry.
+// params ParameterExpression[] parameters) — a generic method, but
+// TDelegate is never consulted (see exprcompile.go's own doc comment for
+// why Compile() doesn't need it either), so this is registered as a
+// plain native rather than needing genericMachineRegistry.
 func expressionLambda(args []runtime.Value) (runtime.Value, error) {
 	if len(args) == 0 {
 		return runtime.Value{}, nil
 	}
-	return runtime.ObjRef(&runtime.Object{Native: &nativeLambdaExpression{body: args[0]}}), nil
+	var params []runtime.Value
+	if len(args) > 1 {
+		params = exprArgsFrom(args[1])
+	}
+	return runtime.ObjRef(&runtime.Object{Native: &nativeLambdaExpression{body: args[0], parameters: params}}), nil
 }
 
 func lambdaExpressionGetBody(args []runtime.Value) (runtime.Value, error) {
@@ -132,6 +315,14 @@ func lambdaExpressionGetBody(args []runtime.Value) (runtime.Value, error) {
 		return runtime.Null(), nil
 	}
 	return le.body, nil
+}
+
+func lambdaExpressionGetParameters(args []runtime.Value) (runtime.Value, error) {
+	le, ok := nativeOf[*nativeLambdaExpression](firstArg(args))
+	if !ok {
+		return runtime.ArrRef(runtime.NewArray(0)), nil
+	}
+	return runtime.ArrRef(&runtime.Array{Elems: append([]runtime.Value(nil), le.parameters...)}), nil
 }
 
 func memberExpressionGetMember(args []runtime.Value) (runtime.Value, error) {
@@ -153,33 +344,521 @@ func memberExpressionGetExpression(args []runtime.Value) (runtime.Value, error) 
 // Real System.Linq.Expressions.ExpressionType values (confirmed against
 // a real .NET 10 Enum.GetValues(typeof(ExpressionType)) run, not
 // recalled from memory — a wrong constant here would be a silent
-// mismatch, not a crash) — only the three node kinds this narrow
-// subsystem can actually produce (see this file's own top-of-file doc
-// comment).
+// mismatch, not a crash).
 const (
-	expressionTypeLambda       = 18
-	expressionTypeMemberAccess = 23
-	expressionTypeParameter    = 38
+	exprTypeCall                = 6
+	exprTypeConstant            = 9
+	exprTypeConvert             = 10
+	exprTypeConvertChecked      = 11
+	exprTypeInvoke              = 17
+	exprTypeLambda              = 18
+	exprTypeMemberAccess        = 23
+	exprTypeNew                 = 31
+	exprTypeNewArrayInit        = 32
+	exprTypeParameter           = 38
+	exprTypeAssign              = 46
+	exprTypeBlock               = 47
+	exprTypeDefault             = 51
+	exprTypeConditional         = 8
+	exprTypeEqual               = 13
+	exprTypeNotEqual            = 35
+	exprTypePreIncrementAssign  = 77
+	exprTypePreDecrementAssign  = 78
+	exprTypePostIncrementAssign = 79
+	exprTypePostDecrementAssign = 80
+)
+
+// Exported mirrors of the exprTypeXxx values above, needed by
+// internal/interpreter/exprcompile.go to tell which real
+// increment/decrement/reference-compare variant an
+// IncDecExpressionParts/BinaryCompareExpressionParts opType holds —
+// everything else about a node's shape is already exposed through its
+// own typed accessor, but opType itself is a bare int since it doubles
+// as the real NodeType value returned by expressionGetNodeType.
+const (
+	ExprTypeEqual               = exprTypeEqual
+	ExprTypeNotEqual            = exprTypeNotEqual
+	ExprTypePreIncrementAssign  = exprTypePreIncrementAssign
+	ExprTypePreDecrementAssign  = exprTypePreDecrementAssign
+	ExprTypePostIncrementAssign = exprTypePostIncrementAssign
+	ExprTypePostDecrementAssign = exprTypePostDecrementAssign
 )
 
 // expressionGetNodeType backs Expression.NodeType — real consumers
-// (FluentValidation's own PropertyRule/MemberAccessor construction) use
-// it to tell which concrete Expression subclass a body/parent actually
-// is before casting, the same role a real `is`/pattern-match would play
-// if the C# source used one instead.
+// (FluentValidation's own PropertyRule/MemberAccessor construction,
+// AutoMapper's own mapping-plan generation) use it to tell which
+// concrete Expression subclass a body/parent actually is before casting.
 func expressionGetNodeType(args []runtime.Value) (runtime.Value, error) {
 	v := firstArg(args)
 	if v.Kind == runtime.KindObject && v.Obj != nil {
-		switch v.Obj.Native.(type) {
+		switch n := v.Obj.Native.(type) {
 		case *nativeMemberExpression:
-			return runtime.Int32(expressionTypeMemberAccess), nil
+			return runtime.Int32(exprTypeMemberAccess), nil
 		case *nativeParameterExpression:
-			return runtime.Int32(expressionTypeParameter), nil
+			return runtime.Int32(exprTypeParameter), nil
 		case *nativeLambdaExpression:
-			return runtime.Int32(expressionTypeLambda), nil
+			return runtime.Int32(exprTypeLambda), nil
+		case *nativeConstantExpression:
+			return runtime.Int32(exprTypeConstant), nil
+		case *nativeCallExpression:
+			return runtime.Int32(exprTypeCall), nil
+		case *nativeNewExpression:
+			return runtime.Int32(exprTypeNew), nil
+		case *nativeNewArrayExpression:
+			return runtime.Int32(exprTypeNewArrayInit), nil
+		case *nativeConvertExpression:
+			return runtime.Int32(exprTypeConvert), nil
+		case *nativeAssignExpression:
+			return runtime.Int32(exprTypeAssign), nil
+		case *nativeBlockExpression:
+			return runtime.Int32(exprTypeBlock), nil
+		case *nativeDefaultExpression:
+			return runtime.Int32(exprTypeDefault), nil
+		case *nativeConditionalExpression:
+			return runtime.Int32(exprTypeConditional), nil
+		case *nativeInvokeExpression:
+			return runtime.Int32(exprTypeInvoke), nil
+		case *nativeIncDecExpression:
+			return runtime.Int32(int32(n.opType)), nil
+		case *nativeBinaryCompareExpression:
+			return runtime.Int32(int32(n.opType)), nil
 		}
 	}
-	return runtime.Value{}, fmt.Errorf("bcl: Expression.NodeType: receiver isn't one of the narrow Expression shapes this subsystem models (see system_linq_expressions.go's own doc comment)")
+	return runtime.Value{}, fmt.Errorf("bcl: Expression.NodeType: receiver isn't one of the Expression shapes this subsystem models (see system_linq_expressions.go's own doc comment)")
+}
+
+// expressionGetType backs Expression.Type — every node's own typeName
+// field, populated at construction time from data the real .NET caller
+// already had (the explicit Type argument to Constant/Parameter/Convert/
+// Default/New, or PropertyInfoParts' own propertyTypeFullName for
+// Expression.Property's PropertyInfo overload). Falls back to
+// "System.Object" when a node's own typeName is genuinely unavailable
+// (the MethodInfo-based Property overload, a Call node's own return
+// type, ...) rather than erroring — a real caller reading .Type mainly
+// to decide whether/how to emit a Convert node still gets a usable,
+// if imprecise, answer instead of a hard failure.
+func expressionGetType(args []runtime.Value) (runtime.Value, error) {
+	v := firstArg(args)
+	name := "System.Object"
+	if v.Kind == runtime.KindObject && v.Obj != nil {
+		switch n := v.Obj.Native.(type) {
+		case *nativeParameterExpression:
+			if n.typeName != "" {
+				name = n.typeName
+			}
+		case *nativeMemberExpression:
+			if n.typeName != "" {
+				name = n.typeName
+			}
+		case *nativeConstantExpression:
+			if n.typeName != "" {
+				name = n.typeName
+			}
+		case *nativeConvertExpression:
+			if n.typeName != "" {
+				name = n.typeName
+			}
+		case *nativeDefaultExpression:
+			if n.typeName != "" {
+				name = n.typeName
+			}
+		case *nativeNewExpression:
+			if n.typeName != "" {
+				name = n.typeName
+			}
+		case *nativeNewArrayExpression:
+			if n.elemTypeName != "" {
+				name = n.elemTypeName + "[]"
+			}
+		case *nativeAssignExpression:
+			return expressionGetType([]runtime.Value{n.left})
+		case *nativeBlockExpression:
+			if len(n.body) > 0 {
+				return expressionGetType(n.body[len(n.body)-1:])
+			}
+		case *nativeConditionalExpression:
+			return expressionGetType([]runtime.Value{n.ifTrue})
+		case *nativeIncDecExpression:
+			return expressionGetType([]runtime.Value{n.operand})
+		case *nativeBinaryCompareExpression:
+			name = "System.Boolean"
+		}
+	}
+	return NewTypeValue(name), nil
+}
+
+func expressionConstant(args []runtime.Value) (runtime.Value, error) {
+	if len(args) == 0 {
+		return runtime.Value{}, fmt.Errorf("bcl: Expression.Constant expects a value")
+	}
+	c := &nativeConstantExpression{value: args[0]}
+	if len(args) > 1 {
+		if name, ok := TypeFullNameOf(args[1]); ok {
+			c.typeName = name
+		}
+	}
+	return runtime.ObjRef(&runtime.Object{Native: c}), nil
+}
+
+// expressionCall backs both real Call overloads: (MethodInfo, Expression[])
+// static — always exactly 2 arguments — and (Expression, MethodInfo,
+// Expression[]) instance — always exactly 3. Arity alone disambiguates
+// them (see this file's own top doc comment).
+func expressionCall(args []runtime.Value) (runtime.Value, error) {
+	var instance, methodArg, argsArg runtime.Value
+	switch len(args) {
+	case 2:
+		// Three real, distinct overloads share this arity: Call(MethodInfo
+		// method, params Expression[] arguments) and Call(MethodInfo
+		// method, Expression arg0) — both STATIC, no instance — and
+		// Call(Expression instance, MethodInfo method) — an instance call
+		// with zero extra arguments (found via AutoMapper's own
+		// ExpressionBuilder static constructor, which uses all three:
+		// `Expression.Call(CheckContextMethod, ContextParameter)` (single
+		// bare Expression, not an array) and `Expression.Call(disposable,
+		// DisposeMethod)` (instance call, no args)). Disambiguated by
+		// which position actually holds a MethodInfo, and — for that
+		// case — whether the OTHER argument is itself a real Expression
+		// node (a bare single argument) rather than an array/list of them.
+		if _, _, ok := MethodInfoParts(args[0]); ok {
+			instance = runtime.Null()
+			methodArg = args[0]
+			if KindOfExprNode(args[1]) != ExprNodeNone {
+				argsArg = runtime.ArrRef(&runtime.Array{Elems: []runtime.Value{args[1]}})
+			} else {
+				argsArg = args[1]
+			}
+		} else {
+			instance, methodArg, argsArg = args[0], args[1], runtime.Value{}
+		}
+	case 3:
+		instance, methodArg, argsArg = args[0], args[1], args[2]
+	default:
+		return runtime.Value{}, fmt.Errorf("bcl: Expression.Call: unsupported argument shape (%d args)", len(args))
+	}
+	typeName, methodName, ok := MethodInfoParts(methodArg)
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: Expression.Call: 2nd argument is not a MethodInfo")
+	}
+	return runtime.ObjRef(&runtime.Object{Native: &nativeCallExpression{
+		instance:   instance,
+		typeName:   typeName,
+		methodName: methodName,
+		args:       exprArgsFrom(argsArg),
+	}}), nil
+}
+
+func callExpressionGetObject(args []runtime.Value) (runtime.Value, error) {
+	c, ok := nativeOf[*nativeCallExpression](firstArg(args))
+	if !ok {
+		return runtime.Null(), nil
+	}
+	return c.instance, nil
+}
+
+func callExpressionGetArguments(args []runtime.Value) (runtime.Value, error) {
+	c, ok := nativeOf[*nativeCallExpression](firstArg(args))
+	if !ok {
+		return runtime.ArrRef(runtime.NewArray(0)), nil
+	}
+	return runtime.ArrRef(&runtime.Array{Elems: append([]runtime.Value(nil), c.args...)}), nil
+}
+
+func callExpressionGetMethod(args []runtime.Value) (runtime.Value, error) {
+	c, ok := nativeOf[*nativeCallExpression](firstArg(args))
+	if !ok {
+		return runtime.Null(), nil
+	}
+	return NewMethodInfoValue(c.typeName, c.methodName), nil
+}
+
+// expressionNew backs Expression.New(ConstructorInfo, params Expression[])
+// and Expression.New(Type) (a parameterless constructor, given just the
+// type — no ConstructorInfo at all).
+func expressionNew(args []runtime.Value) (runtime.Value, error) {
+	if len(args) == 0 {
+		return runtime.Value{}, fmt.Errorf("bcl: Expression.New expects at least 1 argument")
+	}
+	if typeName, ok := TypeFullNameOf(args[0]); ok {
+		return runtime.ObjRef(&runtime.Object{Native: &nativeNewExpression{typeName: typeName}}), nil
+	}
+	typeName, _, ok := ConstructorInfoParts(args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: Expression.New: 1st argument is not a Type or ConstructorInfo")
+	}
+	var ctorArgs []runtime.Value
+	if len(args) > 1 {
+		ctorArgs = exprArgsFrom(args[1])
+	}
+	return runtime.ObjRef(&runtime.Object{Native: &nativeNewExpression{typeName: typeName, args: ctorArgs}}), nil
+}
+
+func expressionNewArrayInit(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: Expression.NewArrayInit expects a Type argument")
+	}
+	elemTypeName, _ := TypeFullNameOf(args[0])
+	var elems []runtime.Value
+	if len(args) > 1 {
+		elems = exprArgsFrom(args[1])
+	}
+	return runtime.ObjRef(&runtime.Object{Native: &nativeNewArrayExpression{elemTypeName: elemTypeName, elements: elems}}), nil
+}
+
+func newArrayExpressionGetExpressions(args []runtime.Value) (runtime.Value, error) {
+	n, ok := nativeOf[*nativeNewArrayExpression](firstArg(args))
+	if !ok {
+		return runtime.ArrRef(runtime.NewArray(0)), nil
+	}
+	return runtime.ArrRef(&runtime.Array{Elems: append([]runtime.Value(nil), n.elements...)}), nil
+}
+
+func expressionConvert(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 2 {
+		return runtime.Value{}, fmt.Errorf("bcl: Expression.Convert expects (Expression, Type)")
+	}
+	typeName, _ := TypeFullNameOf(args[1])
+	return runtime.ObjRef(&runtime.Object{Native: &nativeConvertExpression{operand: args[0], typeName: typeName}}), nil
+}
+
+func convertExpressionGetOperand(args []runtime.Value) (runtime.Value, error) {
+	if c, ok := nativeOf[*nativeConvertExpression](firstArg(args)); ok {
+		return c.operand, nil
+	}
+	if i, ok := nativeOf[*nativeIncDecExpression](firstArg(args)); ok {
+		return i.operand, nil
+	}
+	return runtime.Null(), nil
+}
+
+// nativeIncDecExpression backs Expression.PreIncrementAssign/
+// PostIncrementAssign/PreDecrementAssign/PostDecrementAssign (Fase 3.65,
+// found via AutoMapper's own ExpressionBuilder static constructor
+// building a real array-copy loop template: `Expression.PostIncrementAssign
+// (indexVariable)`). Reported as a real UnaryExpression (matching .NET's
+// own concrete type for these four factory methods), with opType holding
+// the real ExpressionType so exprTypeXxx-based NodeType/evaluation both
+// see the right one.
+type nativeIncDecExpression struct {
+	opType  int
+	operand runtime.Value
+}
+
+func expressionPreIncrementAssign(args []runtime.Value) (runtime.Value, error) {
+	return newIncDecExpression(exprTypePreIncrementAssign, args)
+}
+
+func expressionPostIncrementAssign(args []runtime.Value) (runtime.Value, error) {
+	return newIncDecExpression(exprTypePostIncrementAssign, args)
+}
+
+func expressionPreDecrementAssign(args []runtime.Value) (runtime.Value, error) {
+	return newIncDecExpression(exprTypePreDecrementAssign, args)
+}
+
+func expressionPostDecrementAssign(args []runtime.Value) (runtime.Value, error) {
+	return newIncDecExpression(exprTypePostDecrementAssign, args)
+}
+
+func newIncDecExpression(opType int, args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: Expression increment/decrement factory expects (Expression operand)")
+	}
+	return runtime.ObjRef(&runtime.Object{Native: &nativeIncDecExpression{opType: opType, operand: args[0]}}), nil
+}
+
+// IncDecExpressionParts exposes opType/operand to
+// internal/interpreter/exprcompile.go — opType is one of the real
+// exprTypeXxx ExpressionType values above, letting the evaluator pick
+// increment vs. decrement and pre- vs. post- semantics.
+func IncDecExpressionParts(v runtime.Value) (opType int, operand runtime.Value, ok bool) {
+	i, ok := nativeOf[*nativeIncDecExpression](v)
+	if !ok {
+		return 0, runtime.Value{}, false
+	}
+	return i.opType, i.operand, true
+}
+
+// nativeBinaryCompareExpression backs Expression.ReferenceEqual/
+// ReferenceNotEqual (Fase 3.65, found via the same AutoMapper
+// ExpressionBuilder static constructor: `Expression.ReferenceNotEqual
+// (disposable, Null)` guarding a real IDisposable.Dispose() call).
+// Reported as a real BinaryExpression; comparison is always by reference
+// identity (never a user-defined == operator), matching what
+// ReferenceEqual/ReferenceNotEqual actually mean in real .NET.
+type nativeBinaryCompareExpression struct {
+	opType      int
+	left, right runtime.Value
+}
+
+func expressionReferenceEqual(args []runtime.Value) (runtime.Value, error) {
+	return newBinaryCompareExpression(exprTypeEqual, args)
+}
+
+func expressionReferenceNotEqual(args []runtime.Value) (runtime.Value, error) {
+	return newBinaryCompareExpression(exprTypeNotEqual, args)
+}
+
+func newBinaryCompareExpression(opType int, args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 2 {
+		return runtime.Value{}, fmt.Errorf("bcl: Expression reference-compare factory expects (Expression left, Expression right)")
+	}
+	return runtime.ObjRef(&runtime.Object{Native: &nativeBinaryCompareExpression{opType: opType, left: args[0], right: args[1]}}), nil
+}
+
+// BinaryCompareExpressionParts exposes opType/left/right to
+// internal/interpreter/exprcompile.go, mirroring IncDecExpressionParts.
+func BinaryCompareExpressionParts(v runtime.Value) (opType int, left, right runtime.Value, ok bool) {
+	b, ok := nativeOf[*nativeBinaryCompareExpression](v)
+	if !ok {
+		return 0, runtime.Value{}, runtime.Value{}, false
+	}
+	return b.opType, b.left, b.right, true
+}
+
+func expressionAssign(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 2 {
+		return runtime.Value{}, fmt.Errorf("bcl: Expression.Assign expects (Expression left, Expression right)")
+	}
+	return runtime.ObjRef(&runtime.Object{Native: &nativeAssignExpression{left: args[0], right: args[1]}}), nil
+}
+
+func assignExpressionGetLeft(args []runtime.Value) (runtime.Value, error) {
+	if a, ok := nativeOf[*nativeAssignExpression](firstArg(args)); ok {
+		return a.left, nil
+	}
+	if b, ok := nativeOf[*nativeBinaryCompareExpression](firstArg(args)); ok {
+		return b.left, nil
+	}
+	return runtime.Null(), nil
+}
+
+func assignExpressionGetRight(args []runtime.Value) (runtime.Value, error) {
+	if a, ok := nativeOf[*nativeAssignExpression](firstArg(args)); ok {
+		return a.right, nil
+	}
+	if b, ok := nativeOf[*nativeBinaryCompareExpression](firstArg(args)); ok {
+		return b.right, nil
+	}
+	return runtime.Null(), nil
+}
+
+// expressionBlock backs Block(IEnumerable<ParameterExpression>,
+// Expression[]), Block(Expression[]) (no locals), and Block(Type,
+// Expression[]) (an explicit result type — accepted and ignored, same
+// "best-effort .Type" posture the rest of this file takes) — 2 args
+// where args[0] is a Type means the 3rd shape; 2 args where args[0] is a
+// variables collection means the 1st; 1 arg is always the 2nd.
+func expressionBlock(args []runtime.Value) (runtime.Value, error) {
+	if len(args) == 0 {
+		return runtime.Value{}, fmt.Errorf("bcl: Expression.Block expects at least 1 argument")
+	}
+	if len(args) == 1 {
+		return runtime.ObjRef(&runtime.Object{Native: &nativeBlockExpression{body: exprArgsFrom(args[0])}}), nil
+	}
+	// 2 arguments: (variables, expressions) or (Type, expressions) — a
+	// Type argument is never itself an Expression-shaped object, so
+	// checking for that shape tells the two apart.
+	if _, ok := TypeFullNameOf(args[0]); ok {
+		return runtime.ObjRef(&runtime.Object{Native: &nativeBlockExpression{body: exprArgsFrom(args[1])}}), nil
+	}
+	return runtime.ObjRef(&runtime.Object{Native: &nativeBlockExpression{
+		variables: exprArgsFrom(args[0]),
+		body:      exprArgsFrom(args[1]),
+	}}), nil
+}
+
+func blockExpressionGetVariables(args []runtime.Value) (runtime.Value, error) {
+	b, ok := nativeOf[*nativeBlockExpression](firstArg(args))
+	if !ok {
+		return runtime.ArrRef(runtime.NewArray(0)), nil
+	}
+	return runtime.ArrRef(&runtime.Array{Elems: append([]runtime.Value(nil), b.variables...)}), nil
+}
+
+func blockExpressionGetExpressions(args []runtime.Value) (runtime.Value, error) {
+	b, ok := nativeOf[*nativeBlockExpression](firstArg(args))
+	if !ok {
+		return runtime.ArrRef(runtime.NewArray(0)), nil
+	}
+	return runtime.ArrRef(&runtime.Array{Elems: append([]runtime.Value(nil), b.body...)}), nil
+}
+
+func expressionDefault(args []runtime.Value) (runtime.Value, error) {
+	typeName := ""
+	if len(args) > 0 {
+		typeName, _ = TypeFullNameOf(args[0])
+	}
+	return runtime.ObjRef(&runtime.Object{Native: &nativeDefaultExpression{typeName: typeName}}), nil
+}
+
+func expressionEmpty(args []runtime.Value) (runtime.Value, error) {
+	return runtime.ObjRef(&runtime.Object{Native: &nativeDefaultExpression{typeName: "System.Void"}}), nil
+}
+
+func expressionIfThen(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 2 {
+		return runtime.Value{}, fmt.Errorf("bcl: Expression.IfThen expects (test, ifTrue)")
+	}
+	return runtime.ObjRef(&runtime.Object{Native: &nativeConditionalExpression{test: args[0], ifTrue: args[1], ifFalse: runtime.Null()}}), nil
+}
+
+func expressionIfThenElse(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 3 {
+		return runtime.Value{}, fmt.Errorf("bcl: Expression.IfThenElse/Condition expects (test, ifTrue, ifFalse)")
+	}
+	return runtime.ObjRef(&runtime.Object{Native: &nativeConditionalExpression{test: args[0], ifTrue: args[1], ifFalse: args[2]}}), nil
+}
+
+func conditionalExpressionGetTest(args []runtime.Value) (runtime.Value, error) {
+	c, ok := nativeOf[*nativeConditionalExpression](firstArg(args))
+	if !ok {
+		return runtime.Null(), nil
+	}
+	return c.test, nil
+}
+
+func conditionalExpressionGetIfTrue(args []runtime.Value) (runtime.Value, error) {
+	c, ok := nativeOf[*nativeConditionalExpression](firstArg(args))
+	if !ok {
+		return runtime.Null(), nil
+	}
+	return c.ifTrue, nil
+}
+
+func conditionalExpressionGetIfFalse(args []runtime.Value) (runtime.Value, error) {
+	c, ok := nativeOf[*nativeConditionalExpression](firstArg(args))
+	if !ok {
+		return runtime.Null(), nil
+	}
+	return c.ifFalse, nil
+}
+
+func expressionInvoke(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: Expression.Invoke expects an Expression")
+	}
+	var invokeArgs []runtime.Value
+	if len(args) > 1 {
+		invokeArgs = exprArgsFrom(args[1])
+	}
+	return runtime.ObjRef(&runtime.Object{Native: &nativeInvokeExpression{expr: args[0], args: invokeArgs}}), nil
+}
+
+func invokeExpressionGetExpression(args []runtime.Value) (runtime.Value, error) {
+	i, ok := nativeOf[*nativeInvokeExpression](firstArg(args))
+	if !ok {
+		return runtime.Null(), nil
+	}
+	return i.expr, nil
+}
+
+func invokeExpressionGetArguments(args []runtime.Value) (runtime.Value, error) {
+	i, ok := nativeOf[*nativeInvokeExpression](firstArg(args))
+	if !ok {
+		return runtime.ArrRef(runtime.NewArray(0)), nil
+	}
+	return runtime.ArrRef(&runtime.Array{Elems: append([]runtime.Value(nil), i.args...)}), nil
 }
 
 func firstArg(args []runtime.Value) runtime.Value {
@@ -189,14 +868,78 @@ func firstArg(args []runtime.Value) runtime.Value {
 	return args[0]
 }
 
-// LambdaExpressionBody/IsParameterExpression/MemberExpressionParts expose
-// this file's own unexported native shapes to internal/interpreter/
-// compiledexpression.go (Fase 3.64), which needs to walk a real
-// expression tree node by node to actually EVALUATE it — see that file's
-// own doc comment for why Expression<TDelegate>.Compile() can produce a
-// real, working delegate for exactly the narrow property-access-chain
-// shapes this subsystem models (`x => x.Prop`, `x => x.Prop1.Prop2`),
-// without needing a general expression-to-IL JIT compiler at all.
+// LambdaExpressionBody/IsParameterExpression/MemberExpressionParts and
+// the rest of this section expose this file's own unexported native
+// shapes to internal/interpreter/exprcompile.go (Fase 3.64/3.65), which
+// needs to walk a real expression tree node by node to actually EVALUATE
+// it. ExprNodeKind identifies which one a given Value holds, so the
+// evaluator can dispatch with one type switch on the exported kind
+// rather than needing a type assertion against each unexported Go type
+// individually from outside this package.
+type ExprNodeKind int
+
+const (
+	ExprNodeNone ExprNodeKind = iota
+	ExprNodeLambda
+	ExprNodeParameter
+	ExprNodeMember
+	ExprNodeConstant
+	ExprNodeCall
+	ExprNodeNew
+	ExprNodeNewArrayInit
+	ExprNodeConvert
+	ExprNodeAssign
+	ExprNodeBlock
+	ExprNodeDefault
+	ExprNodeConditional
+	ExprNodeInvoke
+	ExprNodeIncDec
+	ExprNodeBinaryCompare
+)
+
+// KindOfExprNode identifies v's own real Expression node kind, or
+// ExprNodeNone if v isn't one of this subsystem's own native shapes at
+// all.
+func KindOfExprNode(v runtime.Value) ExprNodeKind {
+	if v.Kind != runtime.KindObject || v.Obj == nil {
+		return ExprNodeNone
+	}
+	switch v.Obj.Native.(type) {
+	case *nativeLambdaExpression:
+		return ExprNodeLambda
+	case *nativeParameterExpression:
+		return ExprNodeParameter
+	case *nativeMemberExpression:
+		return ExprNodeMember
+	case *nativeConstantExpression:
+		return ExprNodeConstant
+	case *nativeCallExpression:
+		return ExprNodeCall
+	case *nativeNewExpression:
+		return ExprNodeNew
+	case *nativeNewArrayExpression:
+		return ExprNodeNewArrayInit
+	case *nativeConvertExpression:
+		return ExprNodeConvert
+	case *nativeAssignExpression:
+		return ExprNodeAssign
+	case *nativeBlockExpression:
+		return ExprNodeBlock
+	case *nativeDefaultExpression:
+		return ExprNodeDefault
+	case *nativeConditionalExpression:
+		return ExprNodeConditional
+	case *nativeInvokeExpression:
+		return ExprNodeInvoke
+	case *nativeIncDecExpression:
+		return ExprNodeIncDec
+	case *nativeBinaryCompareExpression:
+		return ExprNodeBinaryCompare
+	default:
+		return ExprNodeNone
+	}
+}
+
 func LambdaExpressionBody(v runtime.Value) (runtime.Value, bool) {
 	le, ok := nativeOf[*nativeLambdaExpression](v)
 	if !ok {
@@ -205,9 +948,36 @@ func LambdaExpressionBody(v runtime.Value) (runtime.Value, bool) {
 	return le.body, true
 }
 
+func LambdaExpressionParameters(v runtime.Value) ([]runtime.Value, bool) {
+	le, ok := nativeOf[*nativeLambdaExpression](v)
+	if !ok {
+		return nil, false
+	}
+	return le.parameters, true
+}
+
+// ExprNodeIdentity returns v's own *runtime.Object pointer as an opaque
+// comparable key — used by exprcompile.go's own environment map to give
+// every distinct ParameterExpression/variable a stable slot regardless
+// of how many times it's referenced across a tree.
+func ExprNodeIdentity(v runtime.Value) (*runtime.Object, bool) {
+	if v.Kind != runtime.KindObject || v.Obj == nil {
+		return nil, false
+	}
+	return v.Obj, true
+}
+
 func IsParameterExpression(v runtime.Value) bool {
 	_, ok := nativeOf[*nativeParameterExpression](v)
 	return ok
+}
+
+func ParameterExpressionTypeName(v runtime.Value) (string, bool) {
+	p, ok := nativeOf[*nativeParameterExpression](v)
+	if !ok {
+		return "", false
+	}
+	return p.typeName, true
 }
 
 // MemberExpressionParts returns a MemberExpression node's own property
@@ -219,4 +989,153 @@ func MemberExpressionParts(v runtime.Value) (propertyName string, inner runtime.
 		return "", runtime.Value{}, false
 	}
 	return me.propertyName, me.expression, true
+}
+
+// MemberExpressionTypeName exposes a MemberExpression's own declared
+// .Type name — separate from MemberExpressionParts (whose two return
+// values are already used positionally by several call sites) since only
+// exprvisitor.go's own VisitMember rebuild actually needs it.
+func MemberExpressionTypeName(v runtime.Value) (string, bool) {
+	me, ok := nativeOf[*nativeMemberExpression](v)
+	if !ok {
+		return "", false
+	}
+	return me.typeName, true
+}
+
+func ConstantExpressionValue(v runtime.Value) (runtime.Value, bool) {
+	c, ok := nativeOf[*nativeConstantExpression](v)
+	if !ok {
+		return runtime.Value{}, false
+	}
+	return c.value, true
+}
+
+func CallExpressionParts(v runtime.Value) (instance runtime.Value, typeName, methodName string, args []runtime.Value, ok bool) {
+	c, ok := nativeOf[*nativeCallExpression](v)
+	if !ok {
+		return runtime.Value{}, "", "", nil, false
+	}
+	return c.instance, c.typeName, c.methodName, c.args, true
+}
+
+func NewExpressionParts(v runtime.Value) (typeName string, args []runtime.Value, ok bool) {
+	n, ok := nativeOf[*nativeNewExpression](v)
+	if !ok {
+		return "", nil, false
+	}
+	return n.typeName, n.args, true
+}
+
+func NewArrayExpressionParts(v runtime.Value) (elemTypeName string, elements []runtime.Value, ok bool) {
+	n, ok := nativeOf[*nativeNewArrayExpression](v)
+	if !ok {
+		return "", nil, false
+	}
+	return n.elemTypeName, n.elements, true
+}
+
+func ConvertExpressionParts(v runtime.Value) (operand runtime.Value, typeName string, ok bool) {
+	c, ok := nativeOf[*nativeConvertExpression](v)
+	if !ok {
+		return runtime.Value{}, "", false
+	}
+	return c.operand, c.typeName, true
+}
+
+func AssignExpressionParts(v runtime.Value) (left, right runtime.Value, ok bool) {
+	a, ok := nativeOf[*nativeAssignExpression](v)
+	if !ok {
+		return runtime.Value{}, runtime.Value{}, false
+	}
+	return a.left, a.right, true
+}
+
+func BlockExpressionParts(v runtime.Value) (variables, body []runtime.Value, ok bool) {
+	b, ok := nativeOf[*nativeBlockExpression](v)
+	if !ok {
+		return nil, nil, false
+	}
+	return b.variables, b.body, true
+}
+
+func DefaultExpressionTypeName(v runtime.Value) (string, bool) {
+	d, ok := nativeOf[*nativeDefaultExpression](v)
+	if !ok {
+		return "", false
+	}
+	return d.typeName, true
+}
+
+func ConditionalExpressionParts(v runtime.Value) (test, ifTrue, ifFalse runtime.Value, ok bool) {
+	c, ok := nativeOf[*nativeConditionalExpression](v)
+	if !ok {
+		return runtime.Value{}, runtime.Value{}, runtime.Value{}, false
+	}
+	return c.test, c.ifTrue, c.ifFalse, true
+}
+
+func InvokeExpressionParts(v runtime.Value) (expr runtime.Value, args []runtime.Value, ok bool) {
+	i, ok := nativeOf[*nativeInvokeExpression](v)
+	if !ok {
+		return runtime.Value{}, nil, false
+	}
+	return i.expr, i.args, true
+}
+
+// Rebuild constructors (Fase 3.65, ExpressionVisitor support) — exported
+// so internal/interpreter/exprvisitor.go's own default Visit/VisitXxx
+// implementations can build a NEW node of the same shape after
+// recursively visiting its children, exactly like real .NET's own
+// default ExpressionVisitor behavior (Update-if-changed). Unlike real
+// .NET, these always allocate a fresh node rather than returning the
+// original when nothing changed — object-identity preservation is a
+// real-.NET optimization this subsystem's own evaluator never depends
+// on, so it isn't reproduced here.
+func NewMemberExpressionValue(propertyName string, inner runtime.Value, typeName string) runtime.Value {
+	return runtime.ObjRef(&runtime.Object{Native: &nativeMemberExpression{propertyName: propertyName, expression: inner, typeName: typeName}})
+}
+
+func NewCallExpressionValue(instance runtime.Value, typeName, methodName string, args []runtime.Value) runtime.Value {
+	return runtime.ObjRef(&runtime.Object{Native: &nativeCallExpression{instance: instance, typeName: typeName, methodName: methodName, args: args}})
+}
+
+func NewNewExpressionValue(typeName string, args []runtime.Value) runtime.Value {
+	return runtime.ObjRef(&runtime.Object{Native: &nativeNewExpression{typeName: typeName, args: args}})
+}
+
+func NewNewArrayExpressionValue(elemTypeName string, elements []runtime.Value) runtime.Value {
+	return runtime.ObjRef(&runtime.Object{Native: &nativeNewArrayExpression{elemTypeName: elemTypeName, elements: elements}})
+}
+
+func NewConvertExpressionValue(operand runtime.Value, typeName string) runtime.Value {
+	return runtime.ObjRef(&runtime.Object{Native: &nativeConvertExpression{operand: operand, typeName: typeName}})
+}
+
+func NewIncDecExpressionValue(opType int, operand runtime.Value) runtime.Value {
+	return runtime.ObjRef(&runtime.Object{Native: &nativeIncDecExpression{opType: opType, operand: operand}})
+}
+
+func NewAssignExpressionValue(left, right runtime.Value) runtime.Value {
+	return runtime.ObjRef(&runtime.Object{Native: &nativeAssignExpression{left: left, right: right}})
+}
+
+func NewBinaryCompareExpressionValue(opType int, left, right runtime.Value) runtime.Value {
+	return runtime.ObjRef(&runtime.Object{Native: &nativeBinaryCompareExpression{opType: opType, left: left, right: right}})
+}
+
+func NewBlockExpressionValue(variables, body []runtime.Value) runtime.Value {
+	return runtime.ObjRef(&runtime.Object{Native: &nativeBlockExpression{variables: variables, body: body}})
+}
+
+func NewConditionalExpressionValue(test, ifTrue, ifFalse runtime.Value) runtime.Value {
+	return runtime.ObjRef(&runtime.Object{Native: &nativeConditionalExpression{test: test, ifTrue: ifTrue, ifFalse: ifFalse}})
+}
+
+func NewInvokeExpressionValue(expr runtime.Value, args []runtime.Value) runtime.Value {
+	return runtime.ObjRef(&runtime.Object{Native: &nativeInvokeExpression{expr: expr, args: args}})
+}
+
+func NewLambdaExpressionValue(body runtime.Value, parameters []runtime.Value) runtime.Value {
+	return runtime.ObjRef(&runtime.Object{Native: &nativeLambdaExpression{body: body, parameters: parameters}})
 }

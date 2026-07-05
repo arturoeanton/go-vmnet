@@ -14,7 +14,17 @@ type nativeTypeInfo struct {
 	FullName string
 }
 
+// typeStaticsType backs System.Type's own static fields (Fase 3.65) —
+// EmptyTypes (a real, immutable `new Type[0]`), the one real corpus
+// caller found: `typeof(X).GetConstructor(Type.EmptyTypes)`, looking up
+// a parameterless constructor's own ConstructorInfo (Expression.New's
+// own real usage, building a mapping-plan's object-construction step).
+var typeStaticsType = runtime.NewType("System", "Type", nil,
+	[]string{"EmptyTypes"}, nil,
+	[]runtime.Value{runtime.ArrRef(runtime.NewArray(0))})
+
 func init() {
+	registerStaticFieldHost(typeStaticsType)
 	register("System.Object::GetType", true, objectGetType)
 	register("System.Type::GetTypeFromHandle", true, typeGetTypeFromHandle)
 	// Type.GetTypeHandle()/RuntimeTypeHandle.Value (Fase 3.61) — real

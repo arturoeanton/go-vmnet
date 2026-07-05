@@ -436,6 +436,7 @@ func printReport(r *checker.Report) {
 	fmt.Printf("Status: %s\n", r.Status)
 	fmt.Printf("Profile: %s\n", r.Profile)
 	fmt.Printf("Methods analyzed: %d\n", r.MethodsAnalyzed)
+	fmt.Printf("Methods flagged: %d\n", r.MethodsFlagged)
 
 	if len(r.Findings) == 0 {
 		fmt.Println("Findings: none")

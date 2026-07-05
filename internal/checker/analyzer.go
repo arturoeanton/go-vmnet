@@ -220,6 +220,7 @@ func resolvableMethod(md *metadata.Metadata, fullName string) bool {
 		fullName == "System.Lazy`1::get_Value" || fullName == "System.Threading.ThreadLocal`1::get_Value" ||
 		fullName == "System.Collections.Concurrent.ConcurrentDictionary`2::GetOrAdd" ||
 		fullName == "System.Linq.Expressions.Expression`1::Compile" ||
+		fullName == "System.Linq.Expressions.LambdaExpression::Compile" ||
 		fullName == "System.Text.RegularExpressions.Regex::Replace" {
 		return true
 	}
@@ -230,6 +231,9 @@ func resolvableMethod(md *metadata.Metadata, fullName string) bool {
 		return true
 	}
 	if customAttributeGenericTargets[fullName] {
+		return true
+	}
+	if expressionVisitorTargets[fullName] {
 		return true
 	}
 	if arrayMachineTargets[fullName] {
@@ -343,6 +347,7 @@ var reflectionMachineTargets = map[string]bool{
 	"System.Type::GetConstructor":                           true,
 	"System.Type::GetMethod":                                true,
 	"System.Type::GetField":                                 true,
+	"System.Type::GetMember":                                true,
 	"System.Reflection.ConstructorInfo::Invoke":             true,
 	"System.Reflection.MethodInfo::Invoke":                  true,
 	"System.Reflection.MethodBase::Invoke":                  true,
@@ -461,6 +466,31 @@ var reflectionMachineTargets = map[string]bool{
 // customAttributeExtensionsGetCustomAttribute).
 var customAttributeGenericTargets = map[string]bool{
 	"System.Reflection.CustomAttributeExtensions::GetCustomAttribute": true,
+}
+
+// expressionVisitorTargets lists System.Linq.Expressions.ExpressionVisitor's
+// own base-class methods resolved through the Machine-aware registry
+// (Fase 3.65, internal/interpreter/exprvisitor.go) — a real subclass's
+// `call ExpressionVisitor::.ctor()`/`.Visit()`/`.VisitXxx()` chained base
+// call always names ExpressionVisitor itself (never the subclass), so
+// these need their own explicit allowlist entries the same way every
+// other Machine-aware BCL base class here does.
+var expressionVisitorTargets = map[string]bool{
+	"System.Linq.Expressions.ExpressionVisitor::.ctor":            true,
+	"System.Linq.Expressions.ExpressionVisitor::Visit":            true,
+	"System.Linq.Expressions.ExpressionVisitor::VisitParameter":   true,
+	"System.Linq.Expressions.ExpressionVisitor::VisitConstant":    true,
+	"System.Linq.Expressions.ExpressionVisitor::VisitDefault":     true,
+	"System.Linq.Expressions.ExpressionVisitor::VisitMember":      true,
+	"System.Linq.Expressions.ExpressionVisitor::VisitMethodCall":  true,
+	"System.Linq.Expressions.ExpressionVisitor::VisitNew":         true,
+	"System.Linq.Expressions.ExpressionVisitor::VisitNewArray":    true,
+	"System.Linq.Expressions.ExpressionVisitor::VisitUnary":       true,
+	"System.Linq.Expressions.ExpressionVisitor::VisitBinary":      true,
+	"System.Linq.Expressions.ExpressionVisitor::VisitBlock":       true,
+	"System.Linq.Expressions.ExpressionVisitor::VisitConditional": true,
+	"System.Linq.Expressions.ExpressionVisitor::VisitInvocation":  true,
+	"System.Linq.Expressions.ExpressionVisitor::VisitLambda":      true,
 }
 
 // asyncMachineTargets lists the async-related methods resolved through
