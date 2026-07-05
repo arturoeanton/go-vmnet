@@ -282,6 +282,10 @@ func init() {
 		// repeatedly elsewhere. Found via Markdig's own real usage.
 		"System.IO.TextWriter::",
 		"System.IO.StringWriter::",
+		// System.Type::GetTypeHandle/RuntimeTypeHandle.Value/Type.
+		// IsSubclassOf (Fase 3.61) — see internal/bcl/system_type.go and
+		// internal/interpreter/reflection.go's own typeIsSubclassOf.
+		"System.RuntimeTypeHandle::",
 		"System.Delegate::",
 		"System.Nullable::GetUnderlyingType",
 		"System.Reflection.Assembly::",

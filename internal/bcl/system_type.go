@@ -17,6 +17,20 @@ type nativeTypeInfo struct {
 func init() {
 	register("System.Object::GetType", true, objectGetType)
 	register("System.Type::GetTypeFromHandle", true, typeGetTypeFromHandle)
+	// Type.GetTypeHandle()/RuntimeTypeHandle.Value (Fase 3.61) — real
+	// callers here only ever use the resulting RuntimeTypeHandle as an
+	// opaque per-Type identity/comparison key (found via Markdig's own
+	// RendererBase.GetKeyForType, which uses it as a Dictionary key
+	// caching per-Type renderer info), never for anything that needs a
+	// genuine memory address — so GetTypeHandle is a pure identity
+	// passthrough (same trick GetTypeFromHandle above already takes: no
+	// separate RuntimeTypeHandle representation at all, just the Type
+	// value itself), and RuntimeTypeHandle.Value hashes the type's own
+	// FullName into a stable Int64 — the same real Type always yields the
+	// same handle value, and different real Types (overwhelmingly) don't
+	// collide, exactly what a dictionary-key use needs.
+	register("System.Type::GetTypeHandle", true, typeGetTypeFromHandle)
+	register("System.RuntimeTypeHandle::get_Value", true, runtimeTypeHandleGetValue)
 	register("System.Type::get_Name", true, typeGetName)
 	register("System.Type::get_FullName", true, typeGetFullName)
 	register("System.Type::ToString", true, typeGetFullName)
@@ -452,6 +466,35 @@ func typeGetTypeFromHandle(args []runtime.Value) (runtime.Value, error) {
 		return runtime.Value{}, fmt.Errorf("bcl: System.Type.GetTypeFromHandle expects 1 argument")
 	}
 	return args[0], nil
+}
+
+// runtimeTypeHandleGetValue hashes the receiver's own type FullName (FNV-
+// 1a, a real Go stdlib hash — no need for cryptographic strength here,
+// just low collision odds across the small number of distinct real Types
+// any one program actually names) into a stable Int64 — see
+// System.Type::GetTypeHandle's own registration comment above for why an
+// opaque, stable-per-name identity is all any real caller here needs.
+func runtimeTypeHandleGetValue(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 1 {
+		return runtime.Value{}, fmt.Errorf("bcl: RuntimeTypeHandle.Value expects a receiver")
+	}
+	name, ok := TypeFullNameOf(args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: RuntimeTypeHandle.Value receiver is not a Type")
+	}
+	h := fnvHash64(name)
+	return runtime.Int64(int64(h)), nil
+}
+
+func fnvHash64(s string) uint64 {
+	const offset64 = 14695981039346656037
+	const prime64 = 1099511628211
+	h := uint64(offset64)
+	for i := 0; i < len(s); i++ {
+		h ^= uint64(s[i])
+		h *= prime64
+	}
+	return h
 }
 
 // objectGetType inspects the receiver's actual runtime shape to produce

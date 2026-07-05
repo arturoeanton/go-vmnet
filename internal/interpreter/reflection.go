@@ -12,6 +12,7 @@ import (
 func init() {
 	machineRegistry["System.Type::IsAssignableFrom"] = typeIsAssignableFrom
 	machineRegistry["System.Type::IsInstanceOfType"] = typeIsInstanceOfType
+	machineRegistry["System.Type::IsSubclassOf"] = typeIsSubclassOf
 	machineRegistry["System.Type::get_IsValueType"] = typeGetIsValueType
 	machineRegistry["System.Type::get_IsEnum"] = typeGetIsEnum
 	machineRegistry["System.Type::get_IsInterface"] = typeGetIsInterface
@@ -615,6 +616,53 @@ func typeIsAssignableFrom(m *Machine, args []runtime.Value, depth int, instrCoun
 		return runtime.Bool(false), nil
 	}
 	return runtime.Bool(m.typeMatches(t, target)), nil
+}
+
+// typeIsSubclassOf implements Type.IsSubclassOf(Type c) — unlike
+// IsAssignableFrom/IsInstanceOfType above, this walks ONLY the real class
+// (BaseTypeFullName) chain, never interfaces (a real, documented
+// difference: IsSubclassOf(typeof(ISomeInterface)) is always false even
+// for an implementing class, matching real .NET), and requires a STRICT
+// ancestor — the receiver is never its own subclass, unlike
+// IsAssignableFrom's own reflexive true. Found via Markdig's own
+// MarkdownObjectExtensions.Descendants<T>, filtering a tree by real type.
+func typeIsSubclassOf(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) != 2 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.IsSubclassOf expects (this, c)")
+	}
+	receiver, ok := bcl.TypeFullNameOf(args[0])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.IsSubclassOf receiver is not a Type")
+	}
+	ancestor, ok := bcl.TypeFullNameOf(args[1])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("interpreter: Type.IsSubclassOf argument is not a Type")
+	}
+	if m.ResolveType == nil {
+		return runtime.Bool(false), nil
+	}
+	t, err := m.ResolveType(receiver)
+	if err != nil {
+		return runtime.Bool(false), nil
+	}
+	for t.BaseTypeFullName != "" {
+		if t.BaseTypeFullName == ancestor {
+			return runtime.Bool(true), nil
+		}
+		next, err := m.ResolveType(t.BaseTypeFullName)
+		if err != nil {
+			// A BCL base name past this point (e.g. "System.Object") has no
+			// real TypeDef for m.ResolveType to walk further, but real
+			// IsSubclassOf(typeof(object)) is true for absolutely any
+			// class — the walk reaching here at all (past the receiver's
+			// own real TypeDef chain) already confirms this IS a class, so
+			// "object" specifically still matches even though the walk
+			// itself can't continue past it.
+			return runtime.Bool(ancestor == "System.Object"), nil
+		}
+		t = next
+	}
+	return runtime.Bool(false), nil
 }
 
 // typeIsInstanceOfType implements Type.IsInstanceOfType(object) — the

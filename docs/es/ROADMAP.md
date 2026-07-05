@@ -5314,6 +5314,38 @@ go test ./...
 ```
 
 ---
+## Fase 3.62 — Type.IsSubclassOf, Type.GetTypeHandle/RuntimeTypeHandle.Value
+
+**Objetivo:** cerrar el resto de la propia lista "encontrado, no arreglado" de la Fase 3.61 — las
+brechas restantes de primitivas de reflection de Markdig (saltando las de Globalization de menor
+valor, `IdnMapping`/`CultureInfo::get_CompareInfo`, dejadas para un pase futuro ya que vmnet no
+tiene ningún dato real de locale/cultura para respaldarlas de forma significativa).
+
+- **`Type.IsSubclassOf(Type)`** (`internal/interpreter/reflection.go`) — a diferencia de los ya
+  reales `IsAssignableFrom`/`IsInstanceOfType`, esto camina SOLO la propia cadena de clase real
+  (`BaseTypeFullName`), nunca interfaces (una diferencia real y documentada:
+  `IsSubclassOf(typeof(IAlgunaInterfaz))` siempre es `false` aún para una clase que la implementa),
+  y requiere un ancestro ESTRICTO — un tipo nunca es su propia subclase. Encontrado vía el propio
+  `MarkdownObjectExtensions.Descendants<T>` de Markdig.
+- **`Type.GetTypeHandle()`/`RuntimeTypeHandle.Value`** (`internal/bcl/system_type.go`) — los
+  llamadores reales acá solo usan el handle resultante como una clave opaca de identidad/comparación
+  por Tipo (el propio `RendererBase.GetKeyForType` de Markdig lo usa como clave de `Dictionary`
+  cacheando información de renderer por Tipo, nunca para algo que necesite una dirección de memoria
+  genuina), así que `GetTypeHandle` es un passthrough de identidad puro (sin ninguna representación
+  separada de `RuntimeTypeHandle` en absoluto, el mismo truco que ya usa `GetTypeFromHandle`) y
+  `.Value` hashea el propio `FullName` del tipo a un `Int64` estable (FNV-1a) — el mismo Tipo real
+  siempre da el mismo valor de handle.
+
+### Cómo verificar Fase 3.62
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+```
+
+---
 
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
 
