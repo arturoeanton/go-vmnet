@@ -4,6 +4,11 @@ Un intérprete de IL/CIL puro en Go para correr plugins C# — y un conjunto
 creciente de paquetes NuGet reales — dentro de un programa Go, sin
 necesidad de tener el runtime de .NET instalado en el host.
 
+**Release actual: [v0.7.0](https://github.com/arturoeanton/go-vmnet/releases/tag/v0.7.0)** — ver
+las [notas del release](https://github.com/arturoeanton/go-vmnet/releases/tag/v0.7.0) para lo
+nuevo, y [`docs/es/api-stability.md`](docs/es/api-stability.md) para la API pública congelada y el
+compromiso de semver de este proyecto pre-1.0.
+
 ## Esto corre un motor de JavaScript real. Dentro de un binario Go. Sin CGo.
 
 ```go
@@ -40,21 +45,26 @@ un wrapper compilado en C# chiquito, para APIs que dependen de azúcar
 sintáctico exclusivo de C#).
 
 ```txt
-Estado: Fase 3.52 completa — demos reales de NuGet en Jint, librerías
-de Office/JSON, y Dapper; carga multi-ensamblado, despacho virtual/de
-interfaz, endurecimiento de reflection, superficie ADO.NET, y un
-checker de compatibilidad.
+Estado: Fase 3.74 completa — un modelo real de Permissions/sandbox
+deny-by-default con MaxStringBytes, un modelo de errores VMNET_*
+estructurado con stack traces reales en el formato de la spec, un
+evaluador general de árboles de expresión (Expression<T>.Compile()),
+una suite de tests golden auditada contra cada requisito documentado,
+una API pública de Go congelada con un compromiso real de semver, una
+suite de benchmarks real, y una caché de resolución de métodos/tokens
+(~35% menos overhead por llamada).
 
 Corpus actual: 19 paquetes NuGet reales chequeados con dependencias
-transitivas bajo netstandard-lite. Cobertura promedio de métodos
-limpios: ~92.5% (ver docs/es/COMPATIBILITY.md para el desglose por
-paquete siempre actualizado — % de checker, demo real, y confianza,
-mantenidos deliberadamente separados).
+transitivas bajo netstandard-lite. 7 de 19 ya superan la barra del 97%
+individual (subiendo de 5); promedio simple a través del corpus: 95.8%
+(ver docs/es/COMPATIBILITY.md para el desglose por paquete siempre
+actualizado — % de checker, demo real, y confianza, mantenidos
+deliberadamente separados).
 
-Sigue: Fase 4 — listo para producción: un modelo real de
-Permissions/sandbox (ver docs/es/security.md para el modelo de amenazas
-honesto de hoy), benchmarks, matriz de compatibilidad, CI, y empaquetado
-de release.
+Sigue: el resto de la Fase 4 — soporte real de Process/sockets
+(deliberadamente diferido, todavía sin demanda real del corpus), un set
+completo de comandos CLI, una matriz de CI multiplataforma, y una
+pasada final sobre el README de nivel superior.
 ```
 
 **Demos verificados en tiempo de ejecución** — cada uno carga el paquete real, sin modificar,
@@ -69,6 +79,9 @@ desde nuget.org, y compara su salida contra .NET real:
 | [System.Text.Json](examples/system-text-json-demo) / [Newtonsoft.Json](examples/newtonsoft-json-demo) | Parseo de JSON real |
 | [Dapper](examples/dapper-demo) | `Query`/`Execute` sobre un proveedor ADO.NET fake en memoria |
 | [Dapper + Microsoft.Data.Sqlite](examples/sqlite-demo) | El mismo código real de Dapper sobre un proveedor SQLite real y nativo en Go — verificado de forma independiente con el CLI real de `sqlite3` |
+| [FluentValidation](examples/fluentvalidation-demo) | Validación de objetos real, incluyendo un validador de rango numérico |
+| [Microsoft.Extensions.DependencyInjection](examples/di-demo) | El propio contenedor de DI oficial de Microsoft resolviendo inyección de constructor real |
+| [Permissions](examples/permissions-demo) | La puerta `Permissions` deny-by-default — el mismo C# compilado corrido tres veces contra tres otorgamientos de capacidad distintos |
 
 *[Read it in English →](README.md)*
 
@@ -92,13 +105,14 @@ para:
 Antes de cargar un assembly de terceros, `vmnet check` dice exactamente
 qué métodos van a correr y cuáles no —con una razón concreta para cada
 falta— en vez de fallar a mitad de la ejecución. Chequeado hoy contra 19
-paquetes NuGet reales y populares, con un promedio de ~92.5% limpio bajo
-el perfil `netstandard-lite` de vmnet — pero el promedio no es el número
-que importa: ver [`docs/es/COMPATIBILITY.md`](docs/es/COMPATIBILITY.md)
-para el desglose completo por paquete, que deliberadamente mantiene
-separados el porcentaje del checker estático, si existe un demo real
-corriendo, y una nota de confianza honesta para cada paquete, en vez de
-colapsarlos en un solo puntaje.
+paquetes NuGet reales y populares, 7 de los cuales ya superan una barra
+del 97% individual bajo el perfil `netstandard-lite` de vmnet — pero
+ningún número solo es el que importa: ver
+[`docs/es/COMPATIBILITY.md`](docs/es/COMPATIBILITY.md) para el desglose
+completo por paquete, que deliberadamente mantiene separados el
+porcentaje del checker estático, si existe un demo real corriendo, y una
+nota de confianza honesta para cada paquete, en vez de colapsarlos en un
+solo puntaje.
 
 La especificación técnica completa está en [`docs/es/spec.md`](docs/es/spec.md).
 
@@ -150,11 +164,15 @@ La especificación técnica completa está en [`docs/es/spec.md`](docs/es/spec.m
   transitivas), los cachean localmente, y se cargan con
   `vm.LoadPackage`.
 - **Sandbox**: límites de instrucciones/profundidad de llamadas/
-  profundidad de stack/longitud de arrays, y cualquier panic dentro del
-  código interpretado se recupera en el borde de la API — un plugin roto
-  o adversarial no puede tirar abajo el proceso host. Hoy esto es un
-  límite de **estabilidad**, todavía no un límite de confianza completo
-  — ver [`docs/es/security.md`](docs/es/security.md) para el modelo de
+  profundidad de stack/longitud de arrays/longitud de strings, cualquier
+  panic dentro del código interpretado se recupera en el borde de la API
+  (un plugin roto o adversarial no puede tirar abajo el proceso host), y
+  una puerta `Permissions` real deny-by-default (`AllowFileRead`/
+  `AllowFileWrite`) delante de cada nativo que toca I/O de disco real.
+  Hoy esto es un límite de **estabilidad-más-I/O-de-archivo**, todavía no
+  un límite de confianza completo (no existe superficie de red/generación
+  de procesos en absoluto todavía, a propósito) — ver
+  [`docs/es/security.md`](docs/es/security.md) para el modelo de
   amenazas honesto antes de correr C# no confiable a través de vmnet.
 
 Ver [`docs/es/ROADMAP.md`](docs/es/ROADMAP.md) para el historial completo fase
@@ -230,6 +248,10 @@ Ejemplos corribles y documentados en [`examples/`](examples/):
 | [`examples/calculator`](examples/calculator) | Una carga de aritmética/loop corrida a través de vmnet, Go nativo y (opcionalmente) CoreCLR real, lado a lado, para una comparación de corrección y velocidad |
 | [`examples/dapper-demo`](examples/dapper-demo) | El propio `SqlMapper.Query`/`Execute` del paquete NuGet Dapper real, corrido contra un proveedor ADO.NET fake mínimo en memoria — sin base de datos real, sin necesitar el SDK de .NET en tiempo de ejecución |
 | [`examples/sqlite-demo`](examples/sqlite-demo) | El mismo código real de Dapper corriendo contra el propio proveedor `Microsoft.Data.Sqlite` real y nativo en Go de vmnet — un archivo `.db` de SQLite embebido genuino, reabierto de forma independiente y verificado con `PRAGMA integrity_check` por el CLI real de `sqlite3` después |
+| [`examples/fluentvalidation-demo`](examples/fluentvalidation-demo) | El paquete NuGet FluentValidation real validando un objeto real, incluyendo un validador de rango numérico (`GreaterThanOrEqualTo`) despachado a través de una jerarquía de validadores base/derivada genérica |
+| [`examples/di-demo`](examples/di-demo) | El propio contenedor oficial `Microsoft.Extensions.DependencyInjection` de Microsoft resolviendo un servicio cuyo constructor depende de otro servicio registrado, sin modificar |
+| [`examples/permissions-demo`](examples/permissions-demo) | El mismo C# compilado corrido tres veces contra tres otorgamientos distintos de `Permissions` — denegado, solo-lectura-de-archivo, y completamente otorgado (releído de forma independiente desde Go para confirmar un archivo real, no una ilusión en memoria) |
+| [`benchmarks/`](benchmarks) | La suite completa de benchmarks de la Fase 4: siete workloads corridos a través de vmnet y Go nativo lado a lado, más tiempo de carga en frío, overhead de invocación de método, asignaciones/op, y tiempo de restauración de paquete |
 
 ## CLI
 

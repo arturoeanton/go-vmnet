@@ -24,6 +24,11 @@ caller-configurable — see the Roadmap section below):
   OS-level stack overflow.
 - **Array length** (`MaxArrayLength`, default 16 MiB elements): bounds a single `newarr` from
   requesting an unreasonably large allocation.
+- **String length** (`MaxStringBytes`, default 64 MiB, Fase 3.72): the same idea as `MaxArrayLength`
+  for a single string-producing call — checked *before* the allocation for the two known call sites
+  that can request an attacker-chosen size straight from a bare `int` argument (`new string(char,
+  int)`, `String.PadLeft`/`PadRight`), plus a general post-call check on every other native's result
+  as a safety net.
 - **Panic recovery at the API boundary**: any Go-level panic inside the interpreter (a bug in
   vmnet itself, not just interpreted code behaving unexpectedly) is recovered and surfaced as a Go
   `error` from `Assembly.Call`/etc., never a crash of the host process. A broken or actively
@@ -145,8 +150,6 @@ already have.
   nothing yet (Fase 3.59 only wires up `AllowFileRead`/`AllowFileWrite`); real
   `System.Net.Http`/`System.Net.Sockets` support (see "no network surface" above) would land behind
   `AllowNetwork` from day one.
-- `MaxStringBytes` — a bound on individual string allocation size, alongside the existing
-  `MaxArrayLength` — not yet implemented.
 - Real `System.Diagnostics.Process` support — not planned unless real corpus demand appears (the
   Fase 3.59 scan found none across all 19 tracked packages).
 - Configurable `Limits` (today's instruction/call-depth/stack-depth/array-length values are fixed

@@ -4,6 +4,11 @@ A pure-Go IL/CIL interpreter for running C# plugins — and a growing set of
 real NuGet packages — inside a Go program, with no .NET runtime installed
 on the host.
 
+**Current release: [v0.7.0](https://github.com/arturoeanton/go-vmnet/releases/tag/v0.7.0)** —
+see the [release notes](https://github.com/arturoeanton/go-vmnet/releases/tag/v0.7.0) for what's
+new, and [`docs/en/api-stability.md`](docs/en/api-stability.md) for the frozen public API and this
+pre-1.0 project's semver commitment.
+
 ## This runs a real JavaScript engine. Inside a Go binary. No CGo.
 
 ```go
@@ -38,20 +43,24 @@ Go, no compilation step beyond `go run`) and
 tiny compiled C# wrapper, for APIs that lean on C#-only sugar).
 
 ```txt
-Status: Fase 3.52 complete — real NuGet demos across Jint,
-Office/JSON libraries, and Dapper; multi-assembly loading,
-virtual/interface dispatch, reflection hardening, ADO.NET surface, and
-a compatibility checker.
+Status: Fase 3.74 complete — a real, deny-by-default Permissions/
+sandbox model with MaxStringBytes, a structured VMNET_* error model
+with real spec-format stack traces, a general expression-tree evaluator
+(Expression<T>.Compile()), a golden test suite audited against every
+documented requirement, a frozen public Go API with a real semver
+commitment, a real benchmark suite, and a method/token resolution cache
+(~35% lower per-call overhead).
 
 Current corpus: 19 real NuGet packages checked with transitive
-dependencies under netstandard-lite. Average clean-method coverage:
-~92.5% (see docs/en/COMPATIBILITY.md for the always-current per-package
-breakdown — checker %, real demo, and confidence kept deliberately
-separate).
+dependencies under netstandard-lite. 7 of 19 now clear a
+97%-individually-working bar (up from 5); simple average across the
+corpus: 95.8% (see docs/en/COMPATIBILITY.md for the always-current
+per-package breakdown — checker %, real demo, and confidence kept
+deliberately separate).
 
-Next: Fase 4 — production readiness: a real Permissions/sandbox model
-(see docs/en/security.md for today's honest threat model), benchmarks,
-compatibility matrix, CI, and release packaging.
+Next: the rest of Fase 4 — real Process/socket support (deliberately
+deferred, no real corpus demand found so far), a complete CLI command
+set, a cross-platform CI matrix, and a final top-level README pass.
 ```
 
 **Runtime-verified demos** — each one loads the real, unmodified package from nuget.org and
@@ -66,6 +75,9 @@ compares its output against real .NET:
 | [System.Text.Json](examples/system-text-json-demo) / [Newtonsoft.Json](examples/newtonsoft-json-demo) | Real JSON parsing |
 | [Dapper](examples/dapper-demo) | `Query`/`Execute` over a fake in-memory ADO.NET provider |
 | [Dapper + Microsoft.Data.Sqlite](examples/sqlite-demo) | The same real Dapper code over a real, Go-native SQLite provider — independently verified with the real `sqlite3` CLI |
+| [FluentValidation](examples/fluentvalidation-demo) | Real object validation, including a numeric range validator |
+| [Microsoft.Extensions.DependencyInjection](examples/di-demo) | Microsoft's own official DI container resolving real constructor injection |
+| [Permissions](examples/permissions-demo) | The deny-by-default `Permissions` gate — the same compiled C# run three times against three different capability grants |
 
 *[Léelo en español →](README.es.md)*
 
@@ -87,13 +99,14 @@ built for:
 Before you load a third-party assembly, `vmnet check` tells you exactly
 which methods will run and which won't — with a concrete reason for each
 gap — instead of failing midway through execution. Checked against 19
-real, popular NuGet packages today, averaging ~92.5% clean under vmnet's
-`netstandard-lite` profile — but the average isn't the number that
-matters: see [`docs/en/COMPATIBILITY.md`](docs/en/COMPATIBILITY.md) for
-the full per-package breakdown, which deliberately keeps the static
-checker percentage, whether a real running demo exists, and an honest
-confidence note separate for every single package, instead of collapsing
-them into one score.
+real, popular NuGet packages today, 7 of which already clear a
+97%-individually-working bar under vmnet's `netstandard-lite` profile —
+but no single number is the one that matters: see
+[`docs/en/COMPATIBILITY.md`](docs/en/COMPATIBILITY.md) for the full
+per-package breakdown, which deliberately keeps the static checker
+percentage, whether a real running demo exists, and an honest confidence
+note separate for every single package, instead of collapsing them into
+one score.
 
 The full technical specification is in [`docs/en/spec.md`](docs/en/spec.md).
 
@@ -140,12 +153,15 @@ The full technical specification is in [`docs/en/spec.md`](docs/en/spec.md).
 - **NuGet**: `vmnet add`/`restore`/`packages` resolve and download real
   packages from `api.nuget.org` (including transitive dependencies),
   cache them locally, and load them with `vm.LoadPackage`.
-- **Sandbox**: instruction/call-depth/stack-depth/array-length limits, and
-  a panic anywhere in interpreted code is recovered at the API boundary —
-  a broken or adversarial plugin can't crash the host process. This is a
-  **stability** boundary today, not yet a full trust boundary — see
-  [`docs/en/security.md`](docs/en/security.md) for the honest threat
-  model before running untrusted C# through vmnet.
+- **Sandbox**: instruction/call-depth/stack-depth/array-length/string-length
+  limits, a panic anywhere in interpreted code recovered at the API
+  boundary (a broken or adversarial plugin can't crash the host process),
+  and a real, deny-by-default `Permissions` gate (`AllowFileRead`/
+  `AllowFileWrite`) in front of every native that touches real disk I/O.
+  This is a **stability-plus-file-I/O** boundary today, not yet a full
+  trust boundary (no network/process-spawning surface exists at all yet,
+  by design) — see [`docs/en/security.md`](docs/en/security.md) for the
+  honest threat model before running untrusted C# through vmnet.
 
 See [`docs/en/ROADMAP.md`](docs/en/ROADMAP.md) for the full phase-by-phase
 history — including every real correctness bug found and fixed along the
@@ -218,6 +234,10 @@ Runnable, documented examples in [`examples/`](examples/):
 | [`examples/calculator`](examples/calculator) | An arithmetic/loop workload run through vmnet, native Go, and (optionally) real CoreCLR side by side, for a correctness-and-speed comparison |
 | [`examples/dapper-demo`](examples/dapper-demo) | The real Dapper NuGet package's own `SqlMapper.Query`/`Execute`, run against a minimal fake in-memory ADO.NET provider — no real database, no dotnet SDK needed at runtime |
 | [`examples/sqlite-demo`](examples/sqlite-demo) | The same real Dapper code running against vmnet's own real, Go-native `Microsoft.Data.Sqlite` provider — a genuine embedded SQLite `.db` file, independently re-opened and integrity-checked by the real `sqlite3` CLI afterward |
+| [`examples/fluentvalidation-demo`](examples/fluentvalidation-demo) | The real FluentValidation NuGet package validating a real object, including a numeric range validator (`GreaterThanOrEqualTo`) dispatched through a generic base/derived validator hierarchy |
+| [`examples/di-demo`](examples/di-demo) | Microsoft's own official `Microsoft.Extensions.DependencyInjection` container resolving a service whose constructor depends on another registered service, unmodified |
+| [`examples/permissions-demo`](examples/permissions-demo) | The same compiled C# run three times against three different `Permissions` grants — denied, file-read-only, and fully granted (independently re-read from Go to confirm a real file, not an in-memory illusion) |
+| [`benchmarks/`](benchmarks) | The full Fase 4 benchmark suite: seven workloads run through vmnet and native Go side by side, plus cold load time, method invoke overhead, allocations/op, and package restore time |
 
 ## CLI
 

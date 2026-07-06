@@ -27,6 +27,12 @@ fijos (todavía no configurables por el llamador — ver la sección de Roadmap 
   real a nivel de SO.
 - **Longitud de array** (`MaxArrayLength`, 16 MiB de elementos por defecto): acota que un solo
   `newarr` pida una asignación irrazonablemente grande.
+- **Longitud de string** (`MaxStringBytes`, 64 MiB por defecto, Fase 3.72): la misma idea que
+  `MaxArrayLength` pero para una sola llamada que produce un string — chequeado *antes* de la
+  asignación en los dos sitios de llamada conocidos que pueden pedir un tamaño elegido por el
+  atacante directamente desde un argumento `int` puro (`new string(char, int)`,
+  `String.PadLeft`/`PadRight`), más un chequeo general post-llamada sobre el resultado de cualquier
+  otro nativo como red de seguridad.
 - **Recuperación de pánico en el límite de la API**: cualquier pánico a nivel de Go dentro del
   intérprete (un bug del propio vmnet, no solo código interpretado comportándose de forma
   inesperada) se recupera y se expone como un `error` de Go desde `Assembly.Call`/etc., nunca como
@@ -156,8 +162,6 @@ dentro de la VM — independientemente de las capacidades que ya tenga la aplica
   protegen nada todavía (la Fase 3.59 solo conecta `AllowFileRead`/`AllowFileWrite`); soporte real
   de `System.Net.Http`/`System.Net.Sockets` (ver "todavía no hay superficie de red" arriba)
   llegaría protegido por `AllowNetwork` desde el primer día.
-- `MaxStringBytes` — un límite al tamaño de asignación de strings individuales, junto al ya
-  existente `MaxArrayLength` — todavía no implementado.
 - Soporte real de `System.Diagnostics.Process` — no planeado a menos que aparezca demanda real del
   corpus (el barrido de la Fase 3.59 no encontró ninguna en los 19 paquetes que se siguen).
 - `Limits` configurables (los valores actuales de instrucciones/profundidad de
