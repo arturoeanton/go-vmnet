@@ -111,10 +111,19 @@ As of this Fase, this project's git tags follow a `v0.0.3.<n>.faseNNN-<slug>` pa
 per-development-phase tracking, but **not a valid Go module semver tag** (too many numeric
 components, no `-prerelease`/`+build` separator Go's own module resolver recognizes). A Go program
 running `go get github.com/arturoeanton/go-vmnet@latest` today resolves to a pseudo-version off the
-latest commit on `main`, not a pinned release. Fase-numbered tags keep being created alongside
-real semver tags going forward (both can point at the same commit); this Fase's own commit is also
-tagged `v0.1.0` — the first tag a Go module consumer can actually `go get` by version number,
-marking this document's own frozen-surface snapshot as its starting point.
+latest commit on `main`, not a pinned release. Fase-numbered tags keep being created alongside real
+semver tags going forward (both can point at the same commit).
+
+Real semver tagging for this project actually began earlier than this document — `v0.6.0-alpha`
+(a real, published GitHub Release) predates the frozen-API snapshot above by several Fases. An
+earlier draft of this document tagged this Fase's own commit `v0.1.0`, not realizing a
+higher-numbered real release already existed; that tag was retracted before ever being used for a
+release, in favor of continuing the ALREADY-public `v0.6.0-alpha` line instead of introducing a
+second, contradictory, lower-numbered one. The first release built on this document's own frozen-
+surface snapshot is **`v0.7.0`** — a minor bump past `0.6.0-alpha` (every gap that release's own
+notes called out as blocking — no `Permissions` model, no `File`/`Process` BCL surface, no
+formalized benchmarks — is resolved as of this Fase), still short of `v1.0.0` since the Fase 4
+checklist genuinely has real items left (see `docs/en/ROADMAP.md`).
 
 ## What this document intentionally does NOT cover
 

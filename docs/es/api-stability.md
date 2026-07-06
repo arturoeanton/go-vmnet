@@ -119,10 +119,20 @@ válido de módulo Go** (demasiados componentes numéricos, sin el separador `-p
 que el propio resolvedor de módulos de Go reconoce). Un programa Go corriendo `go get
 github.com/arturoeanton/go-vmnet@latest` hoy resuelve a una pseudo-versión del último commit en
 `main`, no a un release fijado. Los tags numerados por Fase se siguen creando junto a tags semver
-reales de acá en adelante (ambos pueden apuntar al mismo commit); el propio commit de esta Fase
-también está tageado `v0.1.0` — el primer tag que un consumidor de módulo Go realmente puede
-`go get` por número de versión, marcando la propia instantánea de superficie-congelada de este
-documento como su punto de partida.
+reales de acá en adelante (ambos pueden apuntar al mismo commit).
+
+El tageo semver real para este proyecto en realidad empezó antes que este documento —
+`v0.6.0-alpha` (un Release de GitHub real y publicado) es anterior a la instantánea de API
+congelada de arriba por varias Fases. Un borrador anterior de este documento tageó el propio
+commit de esta Fase como `v0.1.0`, sin darse cuenta de que ya existía un release real con un
+número más alto; ese tag se retractó antes de usarse para un release, en favor de continuar la
+línea YA pública de `v0.6.0-alpha` en vez de introducir una segunda, contradictoria, con número
+más bajo. El primer release construido sobre la propia instantánea de superficie-congelada de este
+documento es **`v0.7.0`** — un bump de minor por encima de `0.6.0-alpha` (cada hueco que las
+propias notas de ese release señalaban como bloqueante — sin modelo `Permissions`, sin superficie
+BCL de `File`/`Process`, sin benchmarks formalizados — está resuelto a partir de esta Fase),
+todavía corto de `v1.0.0` ya que el checklist de la Fase 4 genuinamente tiene ítems reales
+pendientes (ver `docs/en/ROADMAP.md`).
 
 ## Qué este documento deliberadamente NO cubre
 

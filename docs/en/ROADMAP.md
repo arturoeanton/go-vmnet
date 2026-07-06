@@ -5992,6 +5992,14 @@ the same commit.**
   mutable-in-place accessor, not a constructor-time option). `api-stability.md`, not spec §6.1, is
   now the authoritative description of what's actually frozen.
 
+**Correction (found preparing the first real release, after this Fase):** this Fase's own
+`v0.1.0` tag didn't account for an ALREADY-existing, higher-numbered real semver release
+(`v0.6.0-alpha`, a genuine, published GitHub Release predating this Fase by several phases) — a
+plain oversight, not checked for at the time. `v0.1.0` was retracted (deleted, both locally and
+from the remote) before it was ever used for an actual release; the real version line continues
+from `v0.6.0-alpha` instead, starting with `v0.7.0`. See `docs/en/api-stability.md`'s own "On
+versioning today" section for the corrected account.
+
 ### How to verify Fase 3.71
 
 ```bash

@@ -6277,6 +6277,14 @@ numerado por Fase existente en el mismo commit.**
   en tiempo de construcción). `api-stability.md`, no la spec §6.1, es ahora la descripción
   autoritativa de lo que realmente está congelado.
 
+**Corrección (encontrada preparando el primer release real, después de esta Fase):** el propio
+tag `v0.1.0` de esta Fase no tuvo en cuenta un release semver real YA EXISTENTE y con número más
+alto (`v0.6.0-alpha`, un Release de GitHub genuino y publicado, anterior a esta Fase por varias
+fases) — un simple descuido, no chequeado en su momento. `v0.1.0` se retractó (borrado, tanto
+localmente como del remoto) antes de usarse para un release real; la línea de versión real
+continúa desde `v0.6.0-alpha` en cambio, empezando con `v0.7.0`. Ver la propia sección "Sobre el
+versionado hoy" de `docs/es/api-stability.md` para el relato corregido.
+
 ### Cómo verificar la Fase 3.71
 
 ```bash
