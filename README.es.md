@@ -251,6 +251,8 @@ Ejemplos corribles y documentados en [`examples/`](examples/):
 | [`examples/fluentvalidation-demo`](examples/fluentvalidation-demo) | El paquete NuGet FluentValidation real validando un objeto real, incluyendo un validador de rango numérico (`GreaterThanOrEqualTo`) despachado a través de una jerarquía de validadores base/derivada genérica |
 | [`examples/di-demo`](examples/di-demo) | El propio contenedor oficial `Microsoft.Extensions.DependencyInjection` de Microsoft resolviendo un servicio cuyo constructor depende de otro servicio registrado, sin modificar |
 | [`examples/permissions-demo`](examples/permissions-demo) | El mismo C# compilado corrido tres veces contra tres otorgamientos distintos de `Permissions` — denegado, solo-lectura-de-archivo, y completamente otorgado (releído de forma independiente desde Go para confirmar un archivo real, no una ilusión en memoria) |
+| [`examples/bind-demo`](examples/bind-demo) | El propio código Go generado por `vmnet bind`, llamado con funciones/métodos Go tipados en vez de literales de string de `Assembly.Call` |
+| [`examples/plugin-demo`](examples/plugin-demo) | Un plugin scaffoldeado desde `dotnet new vmnet-plugin`, con su starter generado reemplazado por una regla de negocio real, cargado vía `LoadFile` y llamado con `CallBytes`/`CallJSON` |
 | [`benchmarks/`](benchmarks) | La suite completa de benchmarks de la Fase 4: siete workloads corridos a través de vmnet y Go nativo lado a lado, más tiempo de carga en frío, overhead de invocación de método, asignaciones/op, y tiempo de restauración de paquete |
 
 ## CLI
@@ -275,6 +277,12 @@ fuentes/scripts externos) en vez de solo imprimir en la terminal — ver
 resolución entre assemblies y el ranking de "mejores candidatos de migración" de `vmnet analyze`, y
 §3.2 para la generación de código de `vmnet bind` (ver también
 [`examples/bind-demo`](examples/bind-demo)).
+
+¿Escribiendo un plugin desde cero en vez de llamar a un paquete existente? `dotnet new install
+./templates/vmnet-plugin && dotnet new vmnet-plugin -n BillingRules` scaffoldea un proyecto
+`Entry.Invoke` de `byte[]`-entra/`byte[]`-sale con la forma exacta para
+`Assembly.CallBytes`/`CallJSON` — ver [`docs/es/plugin-sdk.md`](docs/es/plugin-sdk.md) y
+[`examples/plugin-demo`](examples/plugin-demo).
 
 ## Arquitectura
 

@@ -6277,6 +6277,64 @@ cd examples/bind-demo && go run .
 ```
 
 ---
+## Fase 3.76 — the `dotnet new vmnet-plugin` plugin SDK, and a real `IndexOf` fix it found
+
+**Goal:** the fourth and final item of this product-features batch — a real `dotnet new` template
+so writing a vmnet plugin starts with one command instead of a blank `.csproj`, turning "the Go
+side already knows how to call a `byte[] X(byte[])` method" (`Assembly.CallBytes`/`CallJSON`,
+already part of the frozen API) into an actual scaffolding workflow.
+
+**Result: a real, installable template verified end-to-end (install → generate → build → load from
+Go → call with both `CallBytes` and `CallJSON`), plus a genuine, general interpreter bug in
+`String.IndexOf`/`LastIndexOf` found and fixed by building the template's own default output and
+running it for real, not a synthetic test case.**
+
+- **`templates/vmnet-plugin`**: a standard `dotnet new` template package (`.template.config/
+  template.json`, `sourceName: "PluginName"`) that scaffolds a `netstandard2.0` class library with
+  one file, `Entry.cs`, exposing `public static class Entry { public static byte[] Invoke(byte[]
+  input) { ... } }` — the exact contract `Assembly.CallBytes`/`CallJSON` already call directly.
+  `dotnet new vmnet-plugin -n BillingRules` renames the namespace, the `.csproj`, and every
+  `PluginName` reference to `BillingRules`, verified against the real `dotnet` CLI (`dotnet new
+  install`/`dotnet new vmnet-plugin -n ...`/`dotnet build`), not just read as template source.
+  - The generated `Entry.Invoke` starter is deliberately dependency-free: it hand-parses a single
+    `"name"` JSON string field via `IndexOf`/`Substring` rather than pulling in a JSON library, so a
+    freshly generated plugin builds with nothing beyond the .NET SDK itself.
+- **A genuine, general bug found and fixed**: running that starter for real, `s.IndexOf(needle,
+  StringComparison.Ordinal)` returned the wrong index (or threw a bogus `ArgumentOutOfRangeException`
+  on a short string) — `internal/bcl/system_string.go`'s `stringIndexOf`/`stringLastIndexOf` only
+  ever see a flat `[]runtime.Value` with no per-call signature metadata, so a trailing `KindI4`
+  argument was always treated as a start index, misreading `StringComparison.Ordinal`'s own raw
+  value (`4`) as "start searching at rune index 4." Fixed in
+  `internal/interpreter/calls.go`'s `convertCharArgsForNative` — which already threaded the call
+  site's own resolved `paramTypeNames` through for an analogous `char`-vs-`int` ambiguity (Fase
+  3.40) — with a new `stringComparisonSensitiveNatives` table that drops the trailing argument
+  entirely once `paramTypeNames` says it's really a `System.StringComparison`: vmnet has no culture
+  support anywhere (`CultureInfo`, `StartsWith`, `Equals`, ... are all ordinal-only already), so
+  there's nothing to convert the comparison-type argument to. New regression test:
+  `TestCheapWins/IndexOf_with_StringComparison` (`vmnet_test.go`, backed by a new
+  `CheapWins.IndexOfWithComparison` fixture method).
+- **`examples/plugin-demo`** (new, checked in): a second, filled-in copy of the same scaffold —
+  `BillingRules/Entry.cs` there replaces the starter's greeting with a small real business rule (an
+  8% flat tax line on `{"customer":"...", "amount":...}`), calling it from Go with both `CallBytes`
+  and `CallJSON`, showing the intended generate-then-customize path end to end.
+- See `docs/en/plugin-sdk.md` (new) for the full guide.
+
+### How to verify Fase 3.76
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+go test -run TestCheapWins -v .
+dotnet new install ./templates/vmnet-plugin
+dotnet new vmnet-plugin -n VerifyPlugin -o /tmp/verify-plugin && cd /tmp/verify-plugin && dotnet build -c Release && cd -
+dotnet new uninstall ./templates/vmnet-plugin
+cd examples/plugin-demo/BillingRules && dotnet build -c Release && cd ..
+go run .
+```
+
+---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 
 **Goal:** turn the functional engine into an adoptable product — reliable, documented, and

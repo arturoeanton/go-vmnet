@@ -93,6 +93,12 @@ benchmarks/bin/
 benchmarks/obj/
 benchmarks/.vmnet/
 
+# examples/plugin-demo/BillingRules is a real, standalone plugin project
+# (scaffolded from templates/vmnet-plugin) — Entry.cs/BillingRules.csproj
+# are committed source, its compiled BillingRules.dll is not.
+examples/plugin-demo/BillingRules/bin/
+examples/plugin-demo/BillingRules/obj/
+
 # macOS Finder metadata
 .DS_Store
 

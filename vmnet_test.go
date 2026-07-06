@@ -799,6 +799,22 @@ func TestCheapWins(t *testing.T) {
 		}
 	})
 
+	t.Run("IndexOf with StringComparison", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins", "IndexOfWithComparison", String(`{"name":"Ada"}`), String(`"name"`))
+		if err != nil {
+			t.Fatalf("IndexOfWithComparison() error = %v", err)
+		}
+		// Both the plain IndexOf(needle) and IndexOf(needle,
+		// StringComparison.Ordinal) overloads must find the real match at
+		// rune index 1 — before this fix, the StringComparison overload's
+		// raw enum value (Ordinal=4) was misread as a start index, always
+		// returning "1|4" and worse, throwing ArgumentOutOfRangeException
+		// on a receiver shorter than the enum's own raw value.
+		if got := out.Native().(string); got != "1|1" {
+			t.Errorf("IndexOfWithComparison() = %q, want %q", got, "1|1")
+		}
+	})
+
 	t.Run("Split/Join", func(t *testing.T) {
 		out, err := asm.Call("Vmnet.Fixtures.CheapWins", "SplitJoin", String("a,b,c"))
 		if err != nil {

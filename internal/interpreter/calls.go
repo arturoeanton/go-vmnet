@@ -377,6 +377,27 @@ var boolSensitiveNatives = map[string]bool{
 	"System.IO.TextWriter::WriteLine":   true,
 }
 
+// stringComparisonSensitiveNatives lists the two String natives with a
+// real, genuine ambiguity vmnet's flat args slice can't resolve on value
+// alone: IndexOf(string, int startIndex) and IndexOf(string,
+// StringComparison) both compile to the exact same shape (a receiver, the
+// search string, and one trailing KindI4 argument) — stringIndexOf/
+// stringLastIndexOf (internal/bcl/system_string.go) always treated that
+// trailing int as a start index, so IndexOf(value, StringComparison.
+// Ordinal) (raw value 4) got silently misread as "start searching at rune
+// index 4," either skipping a real earlier match or throwing a bogus
+// ArgumentOutOfRangeException on a short string. Found via a real vmnet
+// plugin template's own default Entry.cs calling exactly this overload.
+// Unlike charSensitive/boolSensitiveNatives above (which convert an
+// argument in place), this one DROPS the argument outright once
+// paramTypeNames says it's really a System.StringComparison, not an int
+// — vmnet has no culture support anywhere (CultureInfo, StartsWith, ...
+// are all ordinal-only already), so there's nothing to convert it to.
+var stringComparisonSensitiveNatives = map[string]bool{
+	"System.String::IndexOf":     true,
+	"System.String::LastIndexOf": true,
+}
+
 // convertCharArgsForNative converts args in place (on a copy, made lazily
 // only if a real conversion is needed) for a charSensitiveNatives/
 // boolSensitiveNatives entry. paramTypeNames indexes the call's own
@@ -386,7 +407,8 @@ var boolSensitiveNatives = map[string]bool{
 func convertCharArgsForNative(fullName string, args []runtime.Value, paramTypeNames []string) []runtime.Value {
 	charSensitive := charSensitiveNatives[fullName]
 	boolSensitive := boolSensitiveNatives[fullName]
-	if (!charSensitive && !boolSensitive) || len(paramTypeNames) == 0 {
+	comparisonSensitive := stringComparisonSensitiveNatives[fullName]
+	if (!charSensitive && !boolSensitive && !comparisonSensitive) || len(paramTypeNames) == 0 {
 		return args
 	}
 	out := args
@@ -397,8 +419,9 @@ func convertCharArgsForNative(fullName string, args []runtime.Value, paramTypeNa
 			copied = true
 		}
 	}
+	dropped := 0
 	for i, name := range paramTypeNames {
-		argIdx := i + 1
+		argIdx := i + 1 - dropped
 		if argIdx >= len(out) {
 			break
 		}
@@ -413,6 +436,11 @@ func convertCharArgsForNative(fullName string, args []runtime.Value, paramTypeNa
 			} else {
 				out[argIdx] = runtime.String("False")
 			}
+		}
+		if comparisonSensitive && name == "System.StringComparison" && out[argIdx].Kind == runtime.KindI4 {
+			ensureCopy()
+			out = append(out[:argIdx], out[argIdx+1:]...)
+			dropped++
 		}
 	}
 	return out

@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 
 namespace Vmnet.Fixtures
@@ -20,6 +21,22 @@ namespace Vmnet.Fixtures
             result += ";";
             result += s.Trim();
             return result;
+        }
+
+        // IndexOfWithComparison exercises the real IndexOf(string,
+        // StringComparison) overload — found broken while building the
+        // vmnet-plugin template's own default Entry.cs: vmnet's IndexOf
+        // native used to treat ANY trailing int argument as a start
+        // index, so IndexOf(needle, StringComparison.Ordinal) (Ordinal's
+        // own raw value, 4) got silently misread as "start searching at
+        // rune index 4" instead of being recognized as a comparison-type
+        // argument to ignore (see stringComparisonSensitiveNatives,
+        // internal/interpreter/calls.go). Both calls below must agree.
+        public static string IndexOfWithComparison(string s, string needle)
+        {
+            var plain = s.IndexOf(needle);
+            var ordinal = s.IndexOf(needle, StringComparison.Ordinal);
+            return plain + "|" + ordinal;
         }
 
         public static string SplitJoin(string csv)

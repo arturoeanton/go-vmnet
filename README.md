@@ -237,6 +237,8 @@ Runnable, documented examples in [`examples/`](examples/):
 | [`examples/fluentvalidation-demo`](examples/fluentvalidation-demo) | The real FluentValidation NuGet package validating a real object, including a numeric range validator (`GreaterThanOrEqualTo`) dispatched through a generic base/derived validator hierarchy |
 | [`examples/di-demo`](examples/di-demo) | Microsoft's own official `Microsoft.Extensions.DependencyInjection` container resolving a service whose constructor depends on another registered service, unmodified |
 | [`examples/permissions-demo`](examples/permissions-demo) | The same compiled C# run three times against three different `Permissions` grants — denied, file-read-only, and fully granted (independently re-read from Go to confirm a real file, not an in-memory illusion) |
+| [`examples/bind-demo`](examples/bind-demo) | `vmnet bind`'s own generated Go wrapper code, called with typed Go functions/methods instead of `Assembly.Call` string literals |
+| [`examples/plugin-demo`](examples/plugin-demo) | A plugin scaffolded from `dotnet new vmnet-plugin`, its generated starter replaced with a real business rule, loaded via `LoadFile` and called with `CallBytes`/`CallJSON` |
 | [`benchmarks/`](benchmarks) | The full Fase 4 benchmark suite: seven workloads run through vmnet and native Go side by side, plus cold load time, method invoke overhead, allocations/op, and package restore time |
 
 ## CLI
@@ -260,6 +262,11 @@ fonts/scripts) instead of only printing to the terminal — see
 [`docs/en/compatibility-profile.md`](docs/en/compatibility-profile.md) §3.1 for `vmnet analyze`'s
 own cross-assembly resolution and "best migration candidates" ranking, and §3.2 for `vmnet bind`'s
 code generation (see also [`examples/bind-demo`](examples/bind-demo)).
+
+Writing a plugin from scratch instead of calling into an existing package? `dotnet new install
+./templates/vmnet-plugin && dotnet new vmnet-plugin -n BillingRules` scaffolds a `byte[]`-in/
+`byte[]`-out `Entry.Invoke` project shaped for `Assembly.CallBytes`/`CallJSON` — see
+[`docs/en/plugin-sdk.md`](docs/en/plugin-sdk.md) and [`examples/plugin-demo`](examples/plugin-demo).
 
 ## Architecture
 

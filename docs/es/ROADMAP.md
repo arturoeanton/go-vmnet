@@ -6587,6 +6587,67 @@ cd examples/bind-demo && go run .
 
 ---
 
+## Fase 3.76 — el SDK de plugins `dotnet new vmnet-plugin`, y un arreglo real de `IndexOf` que encontró
+
+**Objetivo:** el cuarto y último ítem de este lote de features de producto — un template real de
+`dotnet new` para que escribir un plugin de vmnet empiece con un comando en vez de un `.csproj`
+vacío, convirtiendo "el lado Go ya sabe cómo llamar un método `byte[] X(byte[])`"
+(`Assembly.CallBytes`/`CallJSON`, ya parte de la API congelada) en un flujo de scaffolding real.
+
+**Resultado: un template real e instalable verificado de punta a punta (instalar → generar →
+compilar → cargar desde Go → llamar con `CallBytes` y `CallJSON`), más un bug genuino y general del
+intérprete en `String.IndexOf`/`LastIndexOf` encontrado y arreglado compilando el propio output por
+defecto del template y corriéndolo de verdad, no un caso de test sintético.**
+
+- **`templates/vmnet-plugin`**: un paquete de template estándar de `dotnet new`
+  (`.template.config/template.json`, `sourceName: "PluginName"`) que scaffoldea una librería de
+  clases `netstandard2.0` con un archivo, `Entry.cs`, exponiendo `public static class Entry {
+  public static byte[] Invoke(byte[] input) { ... } }` — exactamente el contrato que
+  `Assembly.CallBytes`/`CallJSON` ya llaman directamente. `dotnet new vmnet-plugin -n BillingRules`
+  renombra el namespace, el `.csproj`, y cada referencia a `PluginName` a `BillingRules`, verificado
+  contra el CLI real de `dotnet` (`dotnet new install`/`dotnet new vmnet-plugin -n ...`/`dotnet
+  build`), no solo leído como código fuente del template.
+  - El starter generado de `Entry.Invoke` es deliberadamente libre de dependencias: parsea a mano
+    un único campo string `"name"` de JSON vía `IndexOf`/`Substring` en vez de traer una librería
+    de JSON, así que un plugin recién generado compila sin nada más que el propio SDK de .NET.
+- **Un bug genuino y general encontrado y arreglado**: al correr ese starter de verdad,
+  `s.IndexOf(needle, StringComparison.Ordinal)` devolvía el índice equivocado (o lanzaba un
+  `ArgumentOutOfRangeException` falso en un string corto) — `stringIndexOf`/`stringLastIndexOf` de
+  `internal/bcl/system_string.go` solo ven una `[]runtime.Value` plana sin metadata de firma por
+  llamada, así que un argumento `KindI4` final siempre se trataba como índice de inicio, leyendo mal
+  el valor crudo propio de `StringComparison.Ordinal` (`4`) como "empezar a buscar en el índice de
+  rune 4". Arreglado en `convertCharArgsForNative` de `internal/interpreter/calls.go` — que ya
+  pasaba el propio `paramTypeNames` resuelto del sitio de llamada para una ambigüedad análoga
+  `char`-vs-`int` (Fase 3.40) — con una nueva tabla `stringComparisonSensitiveNatives` que descarta
+  el argumento final por completo una vez que `paramTypeNames` dice que realmente es un
+  `System.StringComparison`: vmnet no tiene soporte de cultura en ningún lado (`CultureInfo`,
+  `StartsWith`, `Equals`, ... ya son todos solo-ordinal), así que no hay nada a lo que convertir el
+  argumento de tipo de comparación. Nuevo test de regresión:
+  `TestCheapWins/IndexOf_with_StringComparison` (`vmnet_test.go`, respaldado por un nuevo método de
+  fixture `CheapWins.IndexOfWithComparison`).
+- **`examples/plugin-demo`** (nuevo, incluido en el repo): una segunda copia, ya completa, del mismo
+  scaffold — `BillingRules/Entry.cs` ahí reemplaza el saludo del starter con una regla de negocio
+  real chica (una línea de impuesto plano del 8% sobre `{"customer":"...", "amount":...}`),
+  llamándola desde Go con `CallBytes` y `CallJSON`, mostrando de punta a punta el camino previsto de
+  generar y luego personalizar.
+- Ver `docs/es/plugin-sdk.md` (nuevo) para la guía completa.
+
+### Cómo verificar la Fase 3.76
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+go test -run TestCheapWins -v .
+dotnet new install ./templates/vmnet-plugin
+dotnet new vmnet-plugin -n VerifyPlugin -o /tmp/verify-plugin && cd /tmp/verify-plugin && dotnet build -c Release && cd -
+dotnet new uninstall ./templates/vmnet-plugin
+cd examples/plugin-demo/BillingRules && dotnet build -c Release && cd ..
+go run .
+```
+
+---
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
 
 **Objetivo:** convertir el motor funcional en un producto adoptable, confiable, documentado y

@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json.schemas.microsoft.com/template-engine/2.1.0/template.json",
+  "author": "go-vmnet",
+  "classifications": ["Library", "vmnet"],
+  "identity": "GoVmnet.PluginTemplate",
+  "name": "vmnet plugin (byte[] in, byte[] out)",
+  "shortName": "vmnet-plugin",
+  "tags": {
+    "language": "C#",
+    "type": "project"
+  },
+  "sourceName": "PluginName",
+  "preferNameDirectory": true,
+  "primaryOutputs": [
+    { "path": "PluginName.csproj" }
+  ]
+}
