@@ -354,6 +354,76 @@ func (asm *Assembly) hasHardShapeMismatch(params []metadata.SigType, args []runt
 		if args[i].Kind == runtime.KindObject && p.Kind == metadata.SigValueType {
 			return true
 		}
+		// A real reference (KindObject — a JsValue-derived instance, a
+		// plugin object, ...) can never legitimately bind a numeric
+		// primitive parameter either — CIL has no implicit object-to-
+		// int/uint/etc conversion, and vmnet always represents an actual
+		// primitive value as the matching numeric Kind (Fase 1), never
+		// KindObject. Found running real Jint: ArrayInstance's own
+		// `internal JsValue Get(uint index)` (one param, SigU4)
+		// coincidentally has the same arity as the REAL call target,
+		// `ObjectInstance.Get(JsValue property)` (inherited — not even
+		// among ArrayInstance's own FindMethodDefCandidates results, so
+		// it's never a competing candidate here at all) — with no
+		// mismatch check catching a JsValue argument (KindObject) being
+		// handed to a uint-typed parameter, `Get(uint index)` "matched"
+		// with a low but positive score, and Machine.call's own ancestor
+		// walk (calls.go) stopped there instead of continuing up to the
+		// real virtual method — silently passing a property key JsValue
+		// (e.g. the string "0") to a parameter that treated it as an
+		// already-converted array index, corrupting every later read
+		// through it. Rejecting the mismatch here makes pickMethodOverload
+		// correctly report "not found" for ArrayInstance's own Get(uint),
+		// so the ancestor walk keeps going to the real match further up
+		// the chain.
+		switch p.Kind {
+		case metadata.SigBoolean, metadata.SigChar,
+			metadata.SigI1, metadata.SigU1, metadata.SigI2, metadata.SigU2,
+			metadata.SigI4, metadata.SigU4, metadata.SigI, metadata.SigU,
+			metadata.SigI8, metadata.SigU8, metadata.SigR4, metadata.SigR8:
+			if args[i].Kind == runtime.KindObject {
+				return true
+			}
+		}
+		// The reverse direction of the check just above: a raw numeric
+		// primitive argument (KindI4/I8/R4/R8 — vmnet's own representation
+		// for bool/char/int/long/float/double alike, Fase 1) can never
+		// legitimately bind a resolvable CLASS-typed parameter (SigClass)
+		// either. The only way a primitive value could ever reach a
+		// reference-typed parameter in real CIL is via an explicit `box`
+		// instruction ahead of the call site, which always turns it into a
+		// KindObject argument before it gets here — so a still-raw numeric
+		// Kind facing a SigClass parameter can only mean this candidate
+		// isn't the real target at all, never a legitimate boxing case
+		// (`object`/an unconstrained interface constraint resolves as
+		// SigObject, a different metadata.SigKind value paramTypeName
+		// never even tries to resolve — see its own doc comment — so this
+		// never misfires on a genuine boxing-compatible parameter). Found
+		// running real Jint: `Engine.GetValue(object value, bool
+		// returnReferenceToPool)` (the real target for `engine.GetValue(
+		// obj3, returnReferenceToPool: false)`, JintMemberExpression.
+		// EvaluateInternal) lost this exact tie to the unrelated public
+		// `Engine.GetValue(JsValue scope, JsValue property)` overload: the
+		// first parameter's assignable-subtype bonus (JsString is a
+		// JsValue) outscored the correct candidate's own coarse match, with
+		// nothing at all rejecting the second parameter — a raw KindI4
+		// `false` argument silently "matching" a `JsValue property`
+		// parameter it can never actually satisfy. Since `GetValue(JsValue,
+		// JsValue)` doesn't even have a `bool` parameter to notice the
+		// mismatch against, letting the wrong overload run treated `false`
+		// as if it were the SECOND JsValue argument, corrupting every
+		// property lookup that followed (found via `'hello'.toUpperCase()`:
+		// the resulting Reference's own ReferencedName ended up holding
+		// that stray boolean instead of the real property-name JsValue,
+		// crashing deep inside Engine.GetValue(Reference, bool) with a
+		// null-field read on a value that was never a JsValue to begin
+		// with).
+		switch args[i].Kind {
+		case runtime.KindI4, runtime.KindI8, runtime.KindR4, runtime.KindR8:
+			if p.Kind == metadata.SigClass {
+				return true
+			}
+		}
 		// A real array argument (KindArray) is never a delegate: vmnet's
 		// own KindFunc is the only shape a real delegate value ever
 		// takes (runtime.Func's doc comment). A class-typed parameter
@@ -532,6 +602,7 @@ func (asm *Assembly) pickMethodOverload(typeRID uint32, methodName string, args 
 	}
 	bestIdx := -1
 	bestScore := math.MinInt // any candidate whose arity matches must win over "no candidate found" (bestIdx == -1) — a real match's total score can go negative (e.g. a confirmed type-name mismatch's -3 penalty with no compensating positive), which a 0-ish starting threshold would incorrectly treat as "worse than nothing" and silently fall through to the arity-mismatch fallback (rids[0]) instead (found the hard way: this exact bug re-triggered the same infinite-.ctor-recursion class as the original overload-resolution fix, on Jint's real PropertyDescriptor, which has both a 1-arg struct-typed ctor and a 1-arg self-typed copy ctor).
+	confirmedWrong := false  // set when a candidate reaches hasHardShapeMismatch specifically (as opposed to merely failing the coarse arity filter) — see its own check below for why this must block the "no match, try rids[0] anyway" fallback at the bottom of this function.
 	for i, row := range rows {
 		sig, err := asm.md.ParseMethodSigCached(row.Signature)
 		if err != nil {
@@ -552,6 +623,7 @@ func (asm *Assembly) pickMethodOverload(typeRID uint32, methodName string, args 
 			continue
 		}
 		if asm.hasHardShapeMismatch(sig.Params, declared) {
+			confirmedWrong = true
 			continue
 		}
 		score := 0
@@ -582,10 +654,43 @@ func (asm *Assembly) pickMethodOverload(typeRID uint32, methodName string, args 
 			// A confirmed call-site match short-circuits the whole
 			// per-parameter score with a bonus no coarse-Kind or subtype
 			// match could ever match or beat.
-			if j < len(paramTypeNames) && paramTypeNames[j] != "" {
-				if name, ok := paramTypeName(asm.md, p); ok && name == paramTypeNames[j] {
-					score += 1000
-					continue
+			// paramTypeNames is positionally aligned to the ORIGINAL call
+			// site's OWN resolved target method (ir.Call.ParamTypeNames,
+			// captured once at IR-build time against whichever specific
+			// overload Roslyn's own compiler already committed to) — so
+			// position j only means "the same logical parameter" when
+			// THIS candidate's own arity matches that original method's
+			// arity too. Comparing paramTypeNames[j] against a
+			// DIFFERENT-arity candidate's own parameter at the same
+			// index compares two unrelated parameter slots that just
+			// happen to share a position number, not the same argument —
+			// found via a real, load-bearing case running real Jint:
+			// Function.SetFunctionName's own `this.UnwrapJsValue(
+			// _nameDescriptor)` (an instance call, one real parameter,
+			// declared type "PropertyDescriptor") resolved via this same
+			// by-name virtual-dispatch machinery against BOTH the real
+			// target (ObjectInstance's instance UnwrapJsValue(
+			// PropertyDescriptor), one param) and an unrelated, same-
+			// named STATIC UnwrapJsValue(PropertyDescriptor, JsValue)
+			// overload (two params) — coincidentally ALSO declaring
+			// "PropertyDescriptor" as ITS OWN first parameter. Without
+			// this guard, that coincidence alone won the static
+			// overload the identical +1000 exact-match bonus the real
+			// instance target earned, and its second parameter's own
+			// small positive score then let it out-score the real match
+			// by a couple of points — silently passing the receiver
+			// itself (a ScriptFunction) as "desc" instead of the real
+			// PropertyDescriptor value, corrupting every read through
+			// it. Guarding on arity here doesn't just fix the tie: it
+			// makes the tie impossible to begin with, since a
+			// different-arity candidate can never re-use the original
+			// call site's own positional type names at all.
+			if len(sig.Params) == len(paramTypeNames) {
+				if j < len(paramTypeNames) && paramTypeNames[j] != "" {
+					if name, ok := paramTypeName(asm.md, p); ok && name == paramTypeNames[j] {
+						score += 1000
+						continue
+					}
 				}
 			}
 			if name, ok := paramTypeName(asm.md, p); ok {
@@ -625,7 +730,12 @@ func (asm *Assembly) pickMethodOverload(typeRID uint32, methodName string, args 
 						score -= 3
 					}
 				}
-			} else if j < len(paramTypeNames) && paramTypeNames[j] == "" {
+			} else if len(sig.Params) == len(paramTypeNames) && j < len(paramTypeNames) && paramTypeNames[j] == "" {
+				// Same arity guard as the +1000 exact-match bonus above —
+				// position j is only "the same logical parameter" the call
+				// site actually declared when this candidate's own arity
+				// matches paramTypeNames' own length.
+				//
 				// Both the call site's own declared parameter type (baked
 				// into the call/newobj instruction's own MemberRef/MethodDef
 				// signature — sigParamTypeNames uses the exact same
@@ -668,6 +778,26 @@ func (asm *Assembly) pickMethodOverload(typeRID uint32, methodName string, args 
 		}
 	}
 	if bestIdx < 0 {
+		if confirmedWrong {
+			// At least one candidate reached hasHardShapeMismatch and was
+			// explicitly, confidently rejected there — a much stronger
+			// signal than "arity didn't even line up," and one the
+			// name-only fallback below must never override. Found
+			// running real Jint: ArrayInstance's own `Get(uint index)`
+			// used to win this exact fallback for a call site that was
+			// really invoking the inherited `ObjectInstance.Get(JsValue
+			// property)` (never even among ArrayInstance's own
+			// FindMethodDefCandidates results, so it can't compete here
+			// at all) — hasHardShapeMismatch correctly rejects a JsValue
+			// argument against Get(uint)'s own uint parameter, but the
+			// old unconditional "still return rids[0] anyway" fallback
+			// silently returned it as "found" regardless, so Machine.
+			// call's own ancestor walk (calls.go) never got the "not
+			// found here" signal it needed to keep looking up to the
+			// real match. Returning a genuine error here instead lets
+			// that walk continue past this type entirely.
+			return 0, metadata.MethodDefRow{}, fmt.Errorf("metadata: %q: every arity-matching candidate failed a hard shape check against the call site's %d argument(s)", methodName, len(args))
+		}
 		// No candidate's arity matched the call site at all — fall back
 		// to the first (old, name-only) behavior rather than hard-
 		// failing; better to try something plausible than refuse
@@ -777,6 +907,31 @@ func paramTypeName(md *metadata.Metadata, p metadata.SigType) (string, bool) {
 			return "", false
 		}
 		return name, true
+	case metadata.SigChar, metadata.SigBoolean:
+		// Mirrors internal/ir/builder.go's sigParamTypeNames, which
+		// already names these two specific primitives ("System.Char"/
+		// "System.Boolean") for exactly this reason (char and bool both
+		// collapse to the same KindI4 runtime.Value as a plain int32,
+		// spec §17.1, with nothing else to tell them apart) — but until
+		// now only the CALL SITE side of the exact-match comparison
+		// named them; a CANDIDATE's own same-shaped primitive parameter
+		// always fell through to "unresolvable" here, so the +1000
+		// exact-match bonus below could never fire for this case at
+		// all, no matter how it was captured. Found running real Jint:
+		// JsString.Create has FOUR same-arity overloads collapsing to
+		// this exact ambiguity (string, char, int, uint) — StringPrototype.
+		// CharAt's own `JsString.Create(jsString[(int)num])` (a real
+		// `char` argument, statically resolved to `Create(char)` by the
+		// compiler) kept losing this tie to `Create(int)` (no positive
+		// signal ever favored the correct char overload over int/uint,
+		// which score identically against a raw KindI4 argument),
+		// silently converting the character's own numeric code point to
+		// its decimal STRING form instead of the intended one-character
+		// string (e.g. 'abc'.charAt(1) returned "98", not "b").
+		if p.Kind == metadata.SigChar {
+			return "System.Char", true
+		}
+		return "System.Boolean", true
 	default:
 		return "", false
 	}

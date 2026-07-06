@@ -6,10 +6,12 @@ harder than a one-line `"1 + 2"`: `var`/`let`/`const` (including a single
 statement declaring three variables at once), nested object/array
 literals with property and index access, arithmetic/comparison/ternary/
 logical operators, `Math.*` built-ins, a real structured JSON document
-passed in from the Go host and evaluated against, and a heavier
-computational loop — via a small compiled C# wrapper
-(`JintAdvancedWrapper.cs` in this directory) that drives `Engine.Evaluate`/
-`Engine.SetValue` directly.
+passed in from the Go host and evaluated against, a heavier computational
+loop, function declarations/closures/recursion/arrow functions, array
+growth (`.push`/`.sort`/`.slice`/`.reverse`/`.filter`/`.reduce`), and
+string methods (`.toUpperCase`/`.trim`/`.charAt`/`.indexOf`) — via a small
+compiled C# wrapper (`JintAdvancedWrapper.cs` in this directory) that
+drives `Engine.Evaluate`/`Engine.SetValue` directly.
 
 Needs network access to nuget.org (to restore Jint) and a local `dotnet`
 SDK (to compile the wrapper — vmnet only runs already-compiled IL, it
@@ -26,16 +28,17 @@ Expected output:
 RunSuite() = 28
 EvaluateWithData(order total) = 39
 Loop(2000) = 2.664667e+09
+RunFunctionsArraysAndStrings() = 55,3,42,1,3,5,8,9,3,5,9,8,5,3,1,5,8,9,26,HELLO WORLD,padded,H,6
 ```
 
-## What building this found: six real bugs fixed, three real gaps documented
+## What building this found: eight real bugs fixed, one real gap still open
 
 Building this demo's first drafts (closures, arrow-function callbacks on
 array methods, a recursive Fibonacci, an ES6 class hierarchy, `sort`/
 `slice`/`concat`/`reverse`, template literals, `JSON.stringify`, a named
 function invoked from Go) meant running real Jint/Esprima code paths no
 previous example in this project had exercised. Six real, narrow BCL gaps
-were found and fixed along the way:
+were found and fixed early on:
 
 - `System.Char::GetHashCode` didn't exist at all (Esprima's own tokenizer
   keys character-class lookup tables by `char`).
@@ -65,48 +68,63 @@ were found and fixed along the way:
 
 All six are real, regression-tested fixes (`tests/fixtures/csharp/
 Arrays.cs`, `CheapWins.cs`, `Structs.cs`; see `docs/en/ROADMAP.md` for the
-full account) — this demo's own script exercises every one of them (the
-multi-declarator `var` statement alone needs the `Nullable<T>` fix; the
-loop and object construction need the rest).
+full account) — this demo's own `RunSuite`/`EvaluateWithData`/`Loop`
+scripts exercise every one of them (the multi-declarator `var` statement
+alone needs the `Nullable<T>` fix; the loop and object construction need
+the rest).
 
-Three deeper, genuinely still-open gaps were found and root-caused, but
-**not** fixed — each one is a wall hit from a different real feature, not
-a single narrow miss:
+Three deeper gaps were found and root-caused after that — function
+declarations, array growth, and string methods all failed outright. Fase
+3.77 (`docs/en/ROADMAP.md`) fixed the two that turned out to share a root
+cause and account for the large majority of what was broken:
 
-- **Any JS `function`** (named, anonymous, or arrow — even one never
-  called) fails while Jint builds the function object itself. Root cause:
-  `Function.SetFunctionName`'s own `_nameDescriptor` field (declared type
-  `PropertyDescriptor`, a reference type) ends up holding a reference to
-  the function object itself instead of `null`, so the next read passes
-  the wrong object into `ObjectInstance.UnwrapJsValue(PropertyDescriptor,
-  ...)`, which then fails looking up `_flags` on it. `buildType` itself
-  was checked and is NOT the problem — every `PropertyDescriptor` subclass
-  (`AllForbiddenDescriptor`, `LazyPropertyDescriptor`, `GetSetProperty
-  Descriptor+ThrowerPropertyDescriptor`) builds with the correct,
-  correctly-inherited `_flags`/`_value` fields. The bug is a field
-  aliasing/identity issue somewhere in how `Jint.Native.Function.
-  ScriptFunction` gets constructed, not in vmnet's general type-building
-  machinery.
-- **Array growth** (`.push`, `.slice()`, `.sort()`, `.concat()`,
-  `.reverse()` on a copy) fails with `"compare on mismatched value kinds
-  (7, 1)"` (`KindObject` vs `KindI4`) — something in Jint's own internal
-  array-storage growth path boxes or compares a value incorrectly. A
-  plain array literal, indexing, and `.length` all work fine; it's
-  specifically growing/copying an array's backing storage that doesn't.
-- **String methods** (`.split`, `.trim`, `.charAt`, chained
-  `.toUpperCase()`), template literals, and `JSON.stringify` all fail —
-  two different ways. String methods hit a `Jint.Native.JsValue._type`
-  null-reference (a different bug from the array one above). Template
-  literals and `JSON.stringify` hit an unimplemented `sizeof` IL opcode
-  inside `System.SpanHelpers.CopyTo` — a real, general gap: `sizeof` on
-  an open generic type parameter needs a per-instantiation memory-layout
-  size vmnet's type-erased `Value` model doesn't track anywhere today,
-  not something fixable by adding one native.
+- **Any JS `function`** (named, anonymous, or arrow) used to fail while
+  Jint built the function object itself. Root cause: `assembly.go`'s
+  overload-resolution heuristic (`pickMethodOverload`) reused the ORIGINAL
+  call site's own resolved parameter type names positionally against a
+  same-named candidate of a DIFFERENT arity, so `Function.
+  SetFunctionName`'s real, one-argument instance call to `UnwrapJsValue`
+  lost the tie to an unrelated two-argument static overload that
+  coincidentally shared its first parameter's type name.
+- **Array growth** (`.push`, `.sort()`, `.slice()`, `.reverse()` on a
+  copy) and **most string methods** (`.toUpperCase()`, `.trim()`,
+  `.charAt()`, `.indexOf()`, `.filter()`/`.reduce()` callbacks) all
+  shared the SAME actual root cause, once traced all the way through:
+  `Engine.GetValue(object, bool)` — the real target for every property
+  lookup on a non-reference JS value — kept losing its own overload tie
+  to the unrelated public `Engine.GetValue(JsValue, JsValue)`, silently
+  passing a stray `bool` argument where a real property-name `JsValue`
+  was expected. Fixed via two changes: a new `hasHardShapeMismatch` check
+  (a raw numeric-primitive argument can never legitimately bind a
+  resolvable class-typed parameter — CIL always emits an explicit `box`
+  first) and teaching `paramTypeName` to resolve `char`/`bool` parameters
+  by name too (needed separately for `JsString.Create`'s own four
+  same-arity overloads — `'abc'.charAt(1)` used to return `"98"`, the
+  numeric code point as a string, instead of `"b"`). Getting past that
+  overload tie also surfaced a second, smaller gap: the plain `unbox` CIL
+  opcode (distinct from `unbox.any`, already supported) had no
+  translation at all — `Engine.GetValue`'s own `((Completion)value).Value`
+  needs it to read a field directly off a boxed struct. All three fixes
+  are regression-tested (`tests/fixtures/csharp/OverloadTieBreak2.cs`,
+  `PrimitiveClassShapeMismatch.cs`, `CharOverloadPick.cs`,
+  `UnboxOpcodeTest.cs`).
 
-See `docs/en/ROADMAP.md`'s own entry for this demo for the complete,
-citable account of all nine findings (six fixed, three open), including
-exact error text and the precise script fragment each one reproduces
-with.
+One real gap remains, narrower than it first looked: **`.concat()`/
+`.map()`, template literals, and `JSON.stringify` on anything but a
+single-digit number** still hit an unimplemented `sizeof` IL opcode
+inside `System.SpanHelpers.CopyTo` whenever the operation needs a
+multi-character `Span<T>` write (a two-digit number's own decimal
+formatting, a multi-character `.join` separator, ...) — a real, general
+gap: `sizeof` on an open generic type parameter needs a per-instantiation
+memory-layout size vmnet's type-erased `Value` model doesn't track
+anywhere today, not something fixable by adding one native.
+`.filter()`/`.reduce()`/single-character `.join(',')` all take a
+different code path that doesn't need it — `RunFunctionsArraysAndStrings`
+above sticks to those.
+
+See `docs/en/ROADMAP.md`'s own entries for this demo for the complete,
+citable account of every finding (eight fixed, one open), including exact
+error text and the precise script fragment each one reproduces with.
 
 ## Why the loop runs 2,000 iterations, not 100,000
 

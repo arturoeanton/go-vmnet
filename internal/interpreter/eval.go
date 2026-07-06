@@ -787,6 +787,17 @@ func (m *Machine) runFrame(frame *Frame, method *runtime.Method, depth int, inst
 				frame.push(runtime.Null())
 			}
 
+		case ir.Unbox:
+			// See ir.Unbox's own doc comment: vmnet's boxing is already a
+			// representation no-op (the value on the stack is already the
+			// real KindStruct), so all this needs is an addressable copy
+			// for the following ldfld/ldflda/instance call to dereference
+			// — same "box a transient value, return a ref to it" pattern
+			// spanGetItem (internal/bcl) already uses for a similar need.
+			v := frame.pop()
+			tmp := v
+			frame.push(runtime.RefTo(&tmp))
+
 		case ir.CastClass:
 			v := frame.pop()
 			if v.Kind == runtime.KindNull || m.isAssignableTo(v, in.TypeFullName) {

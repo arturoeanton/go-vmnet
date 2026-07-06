@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo-go-vmnet.png" alt="go-vmnet logo" width="180">
+</p>
+
 # vmnet
 
 A pure-Go IL/CIL interpreter for running C# plugins — and a growing set of

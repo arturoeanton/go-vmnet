@@ -6428,6 +6428,110 @@ cd examples/jint-advanced-demo && dotnet build -c Release && go run .
 ```
 
 ---
+## Fase 3.78 — going back for two of Fase 3.77's three open gaps: real function objects, array growth, and most string methods
+
+**Goal:** root-cause and fix (not just document) the "any JS `function` fails" and "array growth/
+string methods fail" gaps Fase 3.77 left open, since together they blocked the large majority of
+everyday JavaScript.
+
+**Result: both gaps traced to the same class of bug — vmnet's own by-name overload-resolution
+heuristic (`pickMethodOverload`, `assembly.go`) misrouting a real Jint call to an unrelated,
+coincidentally-same-shaped sibling method — plus one missing CIL opcode (`unbox`) the fix then
+exposed. Four real, root-caused fixes; the third open gap (`sizeof` on an open generic type
+parameter) turned out narrower than first thought, but is still genuinely unfixed.**
+
+- **Function declarations/closures/recursion/arrow functions — fixed.** `Function.
+  SetFunctionName`'s own `this.UnwrapJsValue(_nameDescriptor)` (an instance call, one real
+  parameter) kept losing its overload tie to an unrelated static two-parameter
+  `UnwrapJsValue(PropertyDescriptor, JsValue)` overload, because `pickMethodOverload`'s exact-match
+  bonus reused the ORIGINAL call site's own positionally-captured `paramTypeNames` against a
+  DIFFERENT-arity candidate's own parameters — position `j` only means "the same logical
+  parameter" when the candidate's own arity matches the arity `paramTypeNames` was captured
+  against; a different-arity candidate re-using it is comparing two unrelated parameter slots that
+  just happen to share a position number. Fixed by guarding both the `+1000` exact-match bonus and
+  the `+6` "both sides unresolved" bonus with `len(sig.Params) == len(paramTypeNames)`.
+- **Array growth (`.push`/`.sort`/`.slice`/`.reverse`/`.filter`/`.reduce`) and most string methods
+  (`.toUpperCase`/`.toLowerCase`/`.trim`/`.charAt`/`.indexOf`) — fixed**, all tracing to the SAME
+  root cause once followed all the way through: `Engine.GetValue(object value, bool
+  returnReferenceToPool)` — the real target for every property lookup Jint does on a non-reference
+  JS value — kept losing its own overload tie to the unrelated public `Engine.GetValue(JsValue
+  scope, JsValue property)`. The first parameter's assignable-subtype bonus (any `JsValue`
+  subclass argument scores against a `JsValue`-typed parameter) outscored the correct candidate,
+  and nothing rejected the second parameter at all: a raw `false` (`KindI4`, never boxed) argument
+  silently "matched" a `JsValue property` parameter it could never actually satisfy — corrupting
+  the resulting `Reference`'s own `ReferencedName` with a stray boolean instead of the real
+  property-name `JsValue`, which then crashed deep inside the OTHER `Engine.GetValue(Reference,
+  bool)` overload with a null-field read on a value that was never a `JsValue` to begin with
+  (`"Jint.Native.JsValue._type"`). Fixed with a new `hasHardShapeMismatch` check: a raw
+  numeric-primitive argument (`KindI4`/`I8`/`R4`/`R8`) can never legitimately bind a resolvable
+  class-typed (`SigClass`) parameter, since real CIL always emits an explicit `box` before handing
+  a primitive to a reference-typed parameter — if it's still a raw primitive Kind by the time it
+  reaches here, the call was never really targeting this candidate.
+  - Getting past this overload tie surfaced a second, narrower bug in the SAME fallback path:
+    `pickMethodOverload`'s "no candidate's arity matched, fall back to `rids[0]` anyway" branch
+    fired even when a candidate WAS confidently rejected via `hasHardShapeMismatch` (a much
+    stronger signal than merely failing the arity filter) — silently returning the known-wrong
+    candidate instead of reporting "not found" and letting the caller's ancestor walk (`calls.go`)
+    keep looking. Found via `ArrayInstance`'s own `Get(uint index)` winning this fallback for a
+    call site that really wanted the inherited `ObjectInstance.Get(JsValue property)`. Fixed by
+    tracking a `confirmedWrong` flag and returning a genuine error instead of the stale fallback
+    when it's set.
+  - `internal/bcl/system_span.go`'s `spanToStringValue` also needed to handle an array-backed
+    `Span<char>` (previously only string-backed spans converted), needed by Jint's own internally
+    vendored `System.Text.ValueStringBuilder` (`Array.prototype.join`'s own implementation) — an
+    array-backed span's `.ToString()` was falling through to a generic "print the raw backing
+    array" placeholder (`"<array[N]>"`) instead of the real joined string.
+  - `'abc'.charAt(1)` surfaced a THIRD, narrower bug once the above were fixed: it returned `"98"`
+    (the character's own numeric code point, printed as a decimal string) instead of `"b"`.
+    `JsString.Create` has four same-arity overloads (`string`/`char`/`int`/`uint`) that all
+    collapse to the exact same coarse shape at runtime (`char` and `int` are both `runtime.KindI4`,
+    spec §17.1) — `paramTypeName` (the candidate-side half of the exact-match bonus) only ever
+    resolved `SigClass`/`SigValueType`/`SigGenericInst`, never primitives, even though
+    `internal/ir/builder.go`'s `sigParamTypeNames` (the call-site-side half) already named
+    `char`/`bool` parameters ("System.Char"/"System.Boolean") for exactly this reason. Fixed by
+    extending `paramTypeName` to resolve `SigChar`/`SigBoolean` too, so the existing exact-match
+    machinery can finally apply to this case.
+  - Fixing the `GetValue(object, bool)` overload tie above also surfaced a completely separate,
+    missing CIL opcode: plain `unbox` (distinct from `unbox.any`, already a no-op — vmnet's
+    `runtime.Value` already stores a boxed value type in its final, unboxed `KindStruct` shape, so
+    `unbox.any` needs no representation change at all). `((Completion)value).Value` — `Completion`
+    is a real Jint struct — compiles to `unbox Completion; ldfld Completion::Value`, reading a
+    field directly off a managed pointer to the boxed data without a full copy; vmnet had no
+    translation for plain `unbox` at all. Fixed in `internal/ir/ir.go`/`builder.go` (a new `Unbox`
+    IR instruction) and `internal/interpreter/eval.go` (pushes a managed pointer to an addressable
+    copy of the popped value — the same "box a transient value, return a ref to it" pattern
+    `internal/bcl`'s `spanGetItem` already uses).
+  - All four fixes are regression-tested against real C# fixtures reproducing each exact shape
+    (`tests/fixtures/csharp/OverloadTieBreak2.cs`'s three fixtures for the different-arity guard,
+    the primitive-vs-class hard-shape-mismatch check, and the `confirmedWrong` fallback;
+    `PrimitiveClassShapeMismatch.cs`; `CharOverloadPick.cs`; `UnboxOpcodeTest.cs`;
+    `SpanCharArrayToString.cs`) — each one confirmed to fail without its fix and pass with it.
+- **One gap remains, narrower than Fase 3.77 first found it**: `.concat()`/`.map()`, template
+  literals, and `JSON.stringify` on anything but a single-digit number all still hit the
+  previously-documented unimplemented `sizeof` opcode inside `System.SpanHelpers.CopyTo` — but
+  ONLY when the operation needs a multi-CHARACTER `Span<T>` write (a two-digit number's own decimal
+  formatting, a multi-character `.join` separator, ...); `.filter()`/`.reduce()`/single-character
+  `.join(',')` all take a different code path that never needs it, and now work. Still a real,
+  general gap (a per-instantiation memory-layout size vmnet's type-erased `Value` model has no way
+  to track at all), not something one more native can close.
+- **`examples/jint-advanced-demo`** updated: a new `RunFunctionsArraysAndStrings` method (and
+  corresponding Go call in `main.go`) exercises every one of the newly-fixed features in one script
+  — recursion, a closure, an arrow function, array growth, and string methods — while its own
+  comments now document the ONE remaining gap precisely (rather than the previous three).
+
+### How to verify Fase 3.78
+
+```bash
+dotnet build tests/fixtures/csharp/Fixtures.csproj -c Release
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+go test -run "TestOverloadTieBreak2|TestPrimitiveClassShapeMismatch|TestCharOverloadPick|TestUnboxOpcode|TestSpanCharArrayToString" -v .
+cd examples/jint-advanced-demo && dotnet build -c Release && go run .
+```
+
+---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 
 **Goal:** turn the functional engine into an adoptable product — reliable, documented, and

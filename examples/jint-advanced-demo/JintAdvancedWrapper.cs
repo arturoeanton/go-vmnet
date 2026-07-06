@@ -7,40 +7,38 @@ namespace VmnetJintAdvancedDemo
     // variables at once), nested object/array literals with property and
     // index access, arithmetic/comparison/ternary/logical operators,
     // Math.* built-ins, real structured data passed in from the Go host,
-    // and a heavier computational loop — all real, unmodified Jint 3.1.3
-    // IL running inside vmnet, no CGo, no dotnet runtime anywhere this
-    // Go binary actually runs.
+    // a heavier computational loop, function declarations/closures/
+    // recursion/arrow functions, array growth (push/sort/slice/reverse/
+    // filter/reduce), and string methods (toUpperCase/trim/charAt/
+    // indexOf) — all real, unmodified Jint 3.1.3 IL running inside
+    // vmnet, no CGo, no dotnet runtime anywhere this Go binary actually
+    // runs.
     //
-    // What this deliberately does NOT use, and why: building this file's
-    // own first drafts found that several whole classes of real,
-    // otherwise-idiomatic JavaScript don't work yet under this Jint
-    // version running inside vmnet — not narrow one-off gaps, but
-    // consistent, reproducible walls hit from multiple different angles:
+    // What this still deliberately does NOT use, and why: building this
+    // file's first drafts found three whole classes of real,
+    // otherwise-idiomatic JavaScript that didn't work under this Jint
+    // version running inside vmnet at all — Fase 3.77 root-caused and
+    // fixed the two that blocked the most (function-object construction,
+    // and an overload-resolution heuristic that misrouted several
+    // internal Jint calls whenever a same-arity sibling method happened
+    // to collapse to the same coarse runtime shape — see docs/en/
+    // ROADMAP.md's Fase 3.77 entry for the full account, including the
+    // `unbox` CIL opcode it also newly implements). One real gap remains,
+    // narrower than first thought but still open: `.concat`/`.map` and
+    // `JSON.stringify` on anything but a single-digit number both need a
+    // multi-character `Span&lt;T&gt;` write, which needs the real `sizeof`
+    // CIL opcode on an open generic type parameter — a per-instantiation
+    // memory layout vmnet's type-erased Value model has no way to answer
+    // at all today. `RunFunctionsArraysAndStrings` below sticks to the
+    // methods that don't need it (`.filter`/`.reduce`/single-char
+    // `.join(',')`, ...).
     //
-    //   - Any JS `function` (named, anonymous, or arrow — even one never
-    //     called) fails while Jint builds the function object itself,
-    //     root-caused to a real field-aliasing bug in how vmnet
-    //     constructs `Jint.Native.Function.ScriptFunction`.
-    //   - Array growth (`.push`, `.slice`, `.sort`, `.concat`, `.reverse`
-    //     on a copy) fails with "compare on mismatched value kinds",
-    //     something in Jint's own internal array-storage growth path.
-    //   - String methods (`.split`, `.trim`, `.charAt`, chained
-    //     `.toUpperCase()`), template literals, and `JSON.stringify`
-    //     all fail, two different ways — a JsValue field null-reference,
-    //     and an unimplemented `sizeof` IL opcode inside
-    //     `System.SpanHelpers.CopyTo` (a real, general gap: `sizeof` on
-    //     an open generic type parameter needs a per-instantiation
-    //     memory layout size vmnet's type-erased Value model doesn't
-    //     track at all today).
-    //
-    // See docs/en/ROADMAP.md's own "found, not fixed" note for the full
-    // account of all three, and this directory's own README for what
-    // that means for real Jint usage today. Six other, narrower bugs
-    // found along the way ARE fixed (String/RuntimeHelpers.GetHashCode,
-    // Char.IsSurrogate/IsSurrogatePair, Nullable&lt;T&gt; defaulting to
-    // the wrong runtime shape for a plugin-defined generic value type,
-    // two missing Array natives, and List&lt;T&gt;.Capacity) — see the
-    // same ROADMAP entry.
+    // Six other, narrower bugs found along the way ARE fixed
+    // (String/RuntimeHelpers.GetHashCode, Char.IsSurrogate/
+    // IsSurrogatePair, Nullable&lt;T&gt; defaulting to the wrong runtime
+    // shape for a plugin-defined generic value type, two missing Array
+    // natives, and List&lt;T&gt;.Capacity) — see the same ROADMAP file's
+    // earlier Fase entries.
     public static class JintAdvancedWrapper
     {
         // RunSuite executes one script combining var/let/const (including
@@ -131,6 +129,73 @@ namespace VmnetJintAdvancedDemo
                 sum;
             ");
             return result.AsNumber();
+        }
+
+        // RunFunctionsArraysAndStrings exercises exactly the features
+        // this file's own top comment used to list as "deliberately not
+        // used, because they don't work yet" — named function
+        // declarations, closures, recursion, and arrow functions; array
+        // growth (push/sort/slice/reverse/filter/reduce); and string
+        // methods (toUpperCase/trim/charAt/indexOf) — all fixed by three
+        // real root-caused bugs in assembly.go's overload-resolution
+        // heuristic and the `unbox` CIL opcode (see docs/en/ROADMAP.md's
+        // Fase 3.77 entry for the full account).
+        //
+        // Two things this deliberately still avoids, and why: `.concat`/
+        // `.map` and `JSON.stringify` on anything but a single-digit
+        // number both still hit a genuinely different, unfixed gap — a
+        // multi-character `Span<T>` write (a multi-char `.join` separator,
+        // a two-digit number's own decimal formatting, ...) needs the real
+        // `sizeof` CIL opcode on an open generic type parameter, which
+        // vmnet's type-erased Value model has no per-instantiation memory
+        // layout to answer at all. `.filter`/`.reduce`/single-char
+        // `.join(',')` all take a different, unaffected code path — this
+        // demo sticks to those.
+        public static string RunFunctionsArraysAndStrings()
+        {
+            var engine = new Engine();
+            var script = @"
+                // Named function declaration, plain recursion.
+                function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }
+
+                // Closure: makeCounter's own `count` local outlives the
+                // call that created it, captured by the function it
+                // returns.
+                function makeCounter() {
+                    var count = 0;
+                    return function () { count += 1; return count; };
+                }
+                var counter = makeCounter();
+                counter();
+                counter();
+
+                // Arrow function.
+                var doubleIt = (x) => x * 2;
+
+                // Array growth: push onto a literal, sort in place, slice
+                // a copy, reverse a copy, filter, reduce.
+                var nums = [5, 3, 8, 1];
+                nums.push(9);
+                nums.sort();
+                var sliced = nums.slice(1, 3);
+                var reversed = nums.slice().reverse();
+                var big = nums.filter(function (x) { return x > 3; });
+                var total = nums.reduce(function (a, b) { return a + b; }, 0);
+
+                // String methods.
+                var text = 'Hello World';
+                var upper = text.toUpperCase();
+                var trimmed = '  padded  '.trim();
+                var firstLetter = text.charAt(0);
+                var whereWorld = text.indexOf('World');
+
+                fib(10) + ',' + counter() + ',' + doubleIt(21) + ',' +
+                    nums.join(',') + ',' + sliced.join(',') + ',' + reversed.join(',') + ',' +
+                    big.join(',') + ',' + total + ',' +
+                    upper + ',' + trimmed + ',' + firstLetter + ',' + whereWorld;
+            ";
+            var result = engine.Evaluate(script);
+            return result.AsString();
         }
     }
 }

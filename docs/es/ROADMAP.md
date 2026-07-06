@@ -6752,6 +6752,125 @@ cd examples/jint-advanced-demo && dotnet build -c Release && go run .
 ```
 
 ---
+## Fase 3.78 — volviendo por dos de las tres brechas abiertas de la Fase 3.77: objetos función reales, crecimiento de arrays y la mayoría de los métodos de string
+
+**Objetivo:** encontrar la causa raíz y arreglar (no solo documentar) las brechas "cualquier
+`function` de JS falla" y "el crecimiento de arrays/los métodos de string fallan" que la Fase 3.77
+dejó abiertas, ya que juntas bloqueaban la gran mayoría del JavaScript cotidiano.
+
+**Resultado: ambas brechas se rastrearon a la misma clase de bug — la propia heurística de
+resolución de overloads por nombre de vmnet (`pickMethodOverload`, `assembly.go`) redirigiendo
+mal una llamada real de Jint hacia un método hermano no relacionado que coincidentemente tenía la
+misma forma — más un opcode CIL faltante (`unbox`) que el arreglo terminó exponiendo. Cuatro
+arreglos reales con causa raíz encontrada; la tercera brecha abierta (`sizeof` sobre un parámetro
+de tipo genérico abierto) resultó ser más angosta de lo que se pensaba, pero sigue genuinamente sin
+arreglar.**
+
+- **Declaraciones de función/closures/recursión/funciones flecha — arregladas.** El propio
+  `this.UnwrapJsValue(_nameDescriptor)` de `Function.SetFunctionName` (una llamada de instancia,
+  un parámetro real) seguía perdiendo su empate de overload contra un overload estático de dos
+  parámetros no relacionado, `UnwrapJsValue(PropertyDescriptor, JsValue)`, porque el bonus de
+  coincidencia exacta de `pickMethodOverload` reutilizaba los `paramTypeNames` capturados
+  posicionalmente del sitio de llamada ORIGINAL contra los parámetros de un candidato de una
+  ARIDAD DISTINTA — la posición `j` solo significa "el mismo parámetro lógico" cuando la aridad del
+  propio candidato coincide con la aridad contra la que se capturó `paramTypeNames`; un candidato
+  de aridad distinta que lo reutiliza está comparando dos posiciones de parámetro no relacionadas
+  que solo coinciden en compartir un número de posición. Arreglado agregando una guarda
+  `len(sig.Params) == len(paramTypeNames)` tanto al bonus de coincidencia exacta de `+1000` como al
+  bonus de "ambos lados sin resolver" de `+6`.
+- **El crecimiento de arrays (`.push`/`.sort`/`.slice`/`.reverse`/`.filter`/`.reduce`) y la mayoría
+  de los métodos de string (`.toUpperCase`/`.toLowerCase`/`.trim`/`.charAt`/`.indexOf`) —
+  arreglados**, todos rastreados a la MISMA causa raíz una vez seguidos hasta el final:
+  `Engine.GetValue(object value, bool returnReferenceToPool)` — el objetivo real de toda búsqueda
+  de propiedad que Jint hace sobre un valor JS que no es una referencia — seguía perdiendo su
+  propio empate de overload contra el público `Engine.GetValue(JsValue scope, JsValue property)`,
+  no relacionado. El bonus de subtipo asignable del primer parámetro (cualquier argumento
+  subclase de `JsValue` puntúa contra un parámetro tipado `JsValue`) superaba al candidato
+  correcto, y nada rechazaba el segundo parámetro en absoluto: un argumento `false` crudo
+  (`KindI4`, nunca boxeado) "coincidía" silenciosamente con un parámetro `JsValue property` que
+  nunca podría satisfacer realmente — corrompiendo el propio `ReferencedName` del `Reference`
+  resultante con un booleano perdido en vez del `JsValue` real del nombre de la propiedad, lo cual
+  después crasheaba en las profundidades del OTRO overload `Engine.GetValue(Reference, bool)` con
+  una lectura de campo nulo sobre un valor que nunca fue un `JsValue` para empezar
+  (`"Jint.Native.JsValue._type"`). Arreglado con un nuevo chequeo en `hasHardShapeMismatch`: un
+  argumento numérico primitivo crudo (`KindI4`/`I8`/`R4`/`R8`) nunca puede legítimamente enlazar
+  con un parámetro de clase resoluble (`SigClass`), ya que el CIL real siempre emite un `box`
+  explícito antes de entregar un primitivo a un parámetro de tipo referencia — si sigue siendo un
+  Kind primitivo crudo para cuando llega hasta acá, la llamada nunca apuntaba de verdad a este
+  candidato.
+  - Superar este empate de overload expuso un segundo bug, más angosto, en la MISMA ruta de
+    fallback: la rama de `pickMethodOverload` "ningún candidato coincidió en aridad, caer de todos
+    modos a `rids[0]`" se disparaba incluso cuando un candidato HABÍA sido rechazado con confianza
+    vía `hasHardShapeMismatch` (una señal mucho más fuerte que simplemente fallar el filtro de
+    aridad) — devolviendo silenciosamente el candidato ya sabido incorrecto en vez de reportar "no
+    encontrado" y dejar que la caminata de ancestros del llamador (`calls.go`) siguiera buscando.
+    Encontrado vía el propio `Get(uint index)` de `ArrayInstance` ganando este fallback para un
+    sitio de llamada que en realidad quería el heredado `ObjectInstance.Get(JsValue property)`.
+    Arreglado rastreando una bandera `confirmedWrong` y devolviendo un error genuino en vez del
+    fallback obsoleto cuando está activa.
+  - El propio `spanToStringValue` de `internal/bcl/system_span.go` también necesitaba manejar un
+    `Span<char>` respaldado por array (antes solo los spans respaldados por string se convertían),
+    necesario para el propio `System.Text.ValueStringBuilder` vendorizado internamente por Jint (la
+    propia implementación de `Array.prototype.join`) — el `.ToString()` de un span respaldado por
+    array caía a un placeholder genérico de "imprimir el array crudo de respaldo"
+    (`"<array[N]>"`) en vez del string realmente unido.
+  - `'abc'.charAt(1)` expuso un TERCER bug, más angosto, una vez arreglados los anteriores:
+    devolvía `"98"` (el propio código de punto numérico del carácter, impreso como string decimal)
+    en vez de `"b"`. `JsString.Create` tiene cuatro overloads de la misma aridad
+    (`string`/`char`/`int`/`uint`) que colapsan todas a la misma forma gruesa en tiempo de
+    ejecución (`char` e `int` son ambos `runtime.KindI4`, spec §17.1) — `paramTypeName` (la mitad
+    del lado candidato del bonus de coincidencia exacta) solo resolvía
+    `SigClass`/`SigValueType`/`SigGenericInst`, nunca primitivos, aun cuando el propio
+    `sigParamTypeNames` de `internal/ir/builder.go` (la mitad del lado del sitio de llamada) ya
+    nombraba los parámetros `char`/`bool` ("System.Char"/"System.Boolean") por esta misma razón.
+    Arreglado extendiendo `paramTypeName` para también resolver `SigChar`/`SigBoolean`, de modo que
+    la maquinaria de coincidencia exacta ya existente finalmente pueda aplicarse a este caso.
+  - Arreglar el empate de overload de `GetValue(object, bool)` de arriba también expuso un opcode
+    CIL completamente distinto que faltaba: el `unbox` plano (distinto de `unbox.any`, ya un no-op
+    — el propio `runtime.Value` de vmnet ya guarda un tipo valor boxeado en su forma final,
+    desboxeada, `KindStruct`, así que `unbox.any` no necesita ningún cambio de representación).
+    `((Completion)value).Value` — `Completion` es un struct real de Jint — compila a `unbox
+    Completion; ldfld Completion::Value`, leyendo un campo directamente desde un puntero
+    administrado a los datos boxeados sin necesitar una copia completa; vmnet no tenía ninguna
+    traducción para el `unbox` plano. Arreglado en `internal/ir/ir.go`/`builder.go` (una nueva
+    instrucción IR `Unbox`) e `internal/interpreter/eval.go` (empuja un puntero administrado a una
+    copia direccionable del valor desapilado — el mismo patrón de "boxear un valor transitorio,
+    devolver una referencia a él" que ya usa `spanGetItem` de `internal/bcl`).
+  - Los cuatro arreglos tienen tests de regresión contra fixtures C# reales que reproducen cada
+    forma exacta (`tests/fixtures/csharp/OverloadTieBreak2.cs`'s tres fixtures para la guarda de
+    aridad distinta, el chequeo de shape-mismatch primitivo-vs-clase, y el fallback
+    `confirmedWrong`; `PrimitiveClassShapeMismatch.cs`; `CharOverloadPick.cs`;
+    `UnboxOpcodeTest.cs`; `SpanCharArrayToString.cs`) — cada uno confirmado a fallar sin su
+    arreglo y pasar con él.
+- **Una brecha queda abierta, más angosta de lo que la Fase 3.77 encontró primero**:
+  `.concat()`/`.map()`, los template literals, y `JSON.stringify` sobre cualquier cosa que no sea
+  un número de un solo dígito siguen chocando con el opcode `sizeof` no implementado ya documentado
+  dentro de `System.SpanHelpers.CopyTo` — pero SOLO cuando la operación necesita una escritura de
+  `Span<T>` de más de un carácter (el propio formateo decimal de un número de dos dígitos, un
+  separador de `.join` de más de un carácter, ...); `.filter()`/`.reduce()`/`.join(',')` de un solo
+  carácter toman todas una ruta de código distinta que nunca lo necesita, y ahora funcionan. Sigue
+  siendo una brecha real y general (un tamaño de layout de memoria por instanciación que el modelo
+  `Value` con borrado de tipos de vmnet no tiene forma de rastrear en absoluto), no algo que un
+  native más pueda cerrar.
+- **`examples/jint-advanced-demo`** actualizado: un nuevo método `RunFunctionsArraysAndStrings` (y
+  la llamada correspondiente en Go en `main.go`) ejercita cada una de las funcionalidades recién
+  arregladas en un solo script — recursión, un closure, una función flecha, crecimiento de arrays,
+  y métodos de string — mientras sus propios comentarios ahora documentan la ÚNICA brecha restante
+  con precisión (en vez de las tres anteriores).
+
+### Cómo verificar la Fase 3.78
+
+```bash
+dotnet build tests/fixtures/csharp/Fixtures.csproj -c Release
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+go test -run "TestOverloadTieBreak2|TestPrimitiveClassShapeMismatch|TestCharOverloadPick|TestUnboxOpcode|TestSpanCharArrayToString" -v .
+cd examples/jint-advanced-demo && dotnet build -c Release && go run .
+```
+
+---
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
 
 **Objetivo:** convertir el motor funcional en un producto adoptable, confiable, documentado y

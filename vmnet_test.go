@@ -2394,6 +2394,145 @@ func TestOverloadTieBreak_NullArgumentAgainstObjectVsClassParam(t *testing.T) {
 	}
 }
 
+// TestOverloadTieBreak2_DifferentArityParamTypeNamesGuard regresses Fase
+// 3.77: pickMethodOverload's paramTypeNames-based exact-match bonus must
+// not be applied when a candidate's own arity differs from the original
+// call site's resolved arity, since position j then no longer means "the
+// same logical parameter" — see tests/fixtures/csharp/
+// OverloadTieBreak2.cs's own doc comment for the real Jint
+// Function.SetFunctionName/UnwrapJsValue bug this mirrors (there, an
+// instance UnwrapJsValue(PropertyDescriptor) call was wrongly resolved
+// to the unrelated static UnwrapJsValue(PropertyDescriptor, JsValue)
+// overload).
+func TestOverloadTieBreak2_DifferentArityParamTypeNamesGuard(t *testing.T) {
+	asm := loadFixture(t)
+
+	out, err := asm.Call("Vmnet.Fixtures.OverloadTieBreak2", "DifferentArityTest")
+	if err != nil {
+		t.Fatalf("DifferentArityTest() error = %v", err)
+	}
+	if got := out.Native().(string); got != "instance:a:b" {
+		t.Errorf("DifferentArityTest() = %q, want %q (picked the wrong-arity static overload)", got, "instance:a:b")
+	}
+}
+
+// TestOverloadTieBreak2_PrimitiveVsObjectHardShapeMismatch regresses Fase
+// 3.77: hasHardShapeMismatch must reject a reference (KindObject)
+// argument against a numeric-primitive-typed parameter, so an unrelated
+// same-arity sibling method never wins by default when the real virtual
+// target lives up the ancestor chain — see tests/fixtures/csharp/
+// OverloadTieBreak2.cs's own doc comment for the real Jint
+// ArrayInstance.Get(uint)/ObjectInstance.Get(JsValue) bug this mirrors.
+func TestOverloadTieBreak2_PrimitiveVsObjectHardShapeMismatch(t *testing.T) {
+	asm := loadFixture(t)
+
+	out, err := asm.Call("Vmnet.Fixtures.OverloadTieBreak2", "PrimitiveShapeMismatchTest")
+	if err != nil {
+		t.Fatalf("PrimitiveShapeMismatchTest() error = %v", err)
+	}
+	if got := out.Native().(string); got != "base:d:o" {
+		t.Errorf("PrimitiveShapeMismatchTest() = %q, want %q (picked the unrelated primitive-typed sibling)", got, "base:d:o")
+	}
+}
+
+// TestOverloadTieBreak2_ConfirmedWrongFallback regresses Fase 3.77:
+// pickMethodOverload's last-resort "no candidate scored" fallback must
+// not return rids[0] when every arity-matching candidate was confirmed
+// wrong via a hard shape mismatch — it must report "not found" instead,
+// so the caller's ancestor walk keeps looking up to the real virtual
+// target. See tests/fixtures/csharp/OverloadTieBreak2.cs's own doc
+// comment for the real Jint bug this mirrors.
+func TestOverloadTieBreak2_ConfirmedWrongFallback(t *testing.T) {
+	asm := loadFixture(t)
+
+	out, err := asm.Call("Vmnet.Fixtures.OverloadTieBreak2", "ConfirmedWrongFallbackTest")
+	if err != nil {
+		t.Fatalf("ConfirmedWrongFallbackTest() error = %v", err)
+	}
+	if got := out.Native().(string); got != "base2:d:k1:k2" {
+		t.Errorf("ConfirmedWrongFallbackTest() = %q, want %q (fell back to the wrong candidate instead of reporting not-found)", got, "base2:d:k1:k2")
+	}
+}
+
+// TestSpanCharArrayToString_ArrayBackedSpan regresses Fase 3.77:
+// spanToStringValue (internal/bcl/system_span.go) must convert an
+// array-backed Span<char>'s content to a real string, not just a
+// string-sliced one — see tests/fixtures/csharp/
+// SpanCharArrayToString.cs's own doc comment for the real Jint
+// ValueStringBuilder._chars bug this mirrors.
+func TestSpanCharArrayToString_ArrayBackedSpan(t *testing.T) {
+	asm := loadFixture(t)
+
+	out, err := asm.Call("Vmnet.Fixtures.SpanCharArrayToString", "Run")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got := out.Native().(string); got != "hi!" {
+		t.Errorf("Run() = %q, want %q (array-backed Span<char>.ToString() didn't convert its content)", got, "hi!")
+	}
+}
+
+// TestPrimitiveClassShapeMismatch_BoolAgainstClassParam regresses Fase
+// 3.77: hasHardShapeMismatch must reject a raw numeric-primitive
+// argument (a bool, still KindI4 — CIL always emits an explicit `box`
+// before handing a primitive to a reference-typed parameter, so an
+// un-boxed primitive can never legitimately reach one) against a
+// resolvable class-typed (SigClass) parameter, so an unrelated same-arity
+// sibling never wins by default when the real virtual target lives up
+// the ancestor chain — see tests/fixtures/csharp/
+// PrimitiveClassShapeMismatch.cs's own doc comment for the real Jint
+// Engine.GetValue(object,bool)/GetValue(JsValue,JsValue) bug this
+// mirrors.
+func TestPrimitiveClassShapeMismatch_BoolAgainstClassParam(t *testing.T) {
+	asm := loadFixture(t)
+
+	out, err := asm.Call("Vmnet.Fixtures.PrimitiveClassShapeMismatchTest", "Run")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got := out.Native().(string); got != "base:d:k:True" {
+		t.Errorf("Run() = %q, want %q (picked the unrelated two-reference-parameter sibling)", got, "base:d:k:True")
+	}
+}
+
+// TestCharOverloadPick_ParamTypeNameResolvesCharAndBool regresses Fase
+// 3.77: paramTypeName must resolve SigChar/SigBoolean candidate
+// parameters to "System.Char"/"System.Boolean" so the exact-match bonus
+// can disambiguate same-arity overloads differing only in a primitive
+// type (char vs int vs uint, all runtime.KindI4) — see tests/fixtures/
+// csharp/CharOverloadPick.cs's own doc comment for the real Jint
+// JsString.Create bug this mirrors.
+func TestCharOverloadPick_ParamTypeNameResolvesCharAndBool(t *testing.T) {
+	asm := loadFixture(t)
+
+	out, err := asm.Call("Vmnet.Fixtures.CharOverloadPick", "Run")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got := out.Native().(string); got != "char:b" {
+		t.Errorf("Run() = %q, want %q (picked the wrong same-arity primitive overload)", got, "char:b")
+	}
+}
+
+// TestUnboxOpcode_FieldOffBoxedStruct regresses Fase 3.77: the plain
+// `unbox` opcode (distinct from `unbox.any`, already a Nop) must push a
+// managed pointer to a boxed value type's data so a following ldfld can
+// read a field directly off it, without needing a full copy — see
+// tests/fixtures/csharp/UnboxOpcodeTest.cs's own doc comment for the real
+// Jint Engine.GetValue(object,bool)'s own `((Completion)value).Value`
+// pattern this mirrors.
+func TestUnboxOpcode_FieldOffBoxedStruct(t *testing.T) {
+	asm := loadFixture(t)
+
+	out, err := asm.Call("Vmnet.Fixtures.UnboxOpcodeTest", "Run")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got := out.Native().(int32); got != 42 {
+		t.Errorf("Run() = %d, want 42", got)
+	}
+}
+
 // TestCustomAttributes covers Fase 3.63's new real System.Reflection.
 // CustomAttributeData/CustomAttributeExtensions.GetCustomAttribute<T>
 // subsystem — see tests/fixtures/csharp/CustomAttributeTest.cs's own doc

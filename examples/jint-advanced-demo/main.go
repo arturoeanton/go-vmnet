@@ -4,20 +4,19 @@
 // declaring three variables at once), nested object/array literals with
 // property and index access, arithmetic/comparison/ternary/logical
 // operators, Math.* built-ins, real structured data passed in from the
-// Go host, and a heavier computational loop — all running as real,
-// unmodified Jint IL inside vmnet, with no CGo and no dotnet runtime
-// installed anywhere this Go binary actually runs.
+// Go host, a heavier computational loop, function declarations/closures/
+// recursion/arrow functions, array growth (push/sort/slice/reverse/
+// filter/reduce), and string methods (toUpperCase/trim/charAt/indexOf)
+// — all running as real, unmodified Jint IL inside vmnet, with no CGo
+// and no dotnet runtime installed anywhere this Go binary actually runs.
 //
-// This deliberately avoids three whole classes of otherwise-idiomatic
-// JavaScript this exact Jint version doesn't run yet under vmnet: any
-// `function` at all (a real bug in Jint's own function-object
-// construction), array growth (`.push`/`.slice`/`.sort`/`.concat`), and
-// string methods/template literals/`JSON.stringify` (two more distinct
-// bugs, one of them a genuinely deep `sizeof`-on-an-open-generic gap).
-// Building this demo's own first drafts found and root-caused all
-// three — see docs/en/ROADMAP.md's own "found, not fixed" note and this
-// directory's own README for the full account — plus six other,
-// narrower bugs this demo DID find and get fixed along the way.
+// One real gap remains open: `.concat`/`.map` and `JSON.stringify` on
+// anything but a single-digit number still need a multi-character
+// `Span[T]` write, which needs the real `sizeof` CIL opcode on an open
+// generic type parameter — a genuinely deep gap, not a narrow miss. See
+// docs/en/ROADMAP.md's Fase 3.77 entry for the full account of what got
+// fixed to make everything else above work, and this directory's own
+// README for what's still open.
 package main
 
 import (
@@ -90,4 +89,14 @@ func main() {
 		log.Fatalf("Loop(2000): %v", err)
 	}
 	fmt.Println("Loop(2000) =", sum.Native())
+
+	// Function declarations, closures, recursion, arrow functions, array
+	// growth, and string methods — every one of these used to fail
+	// running under this exact Jint version inside vmnet; Fase 3.77 fixed
+	// the root cause (see docs/en/ROADMAP.md).
+	features, err := wrapperAsm.Call("VmnetJintAdvancedDemo.JintAdvancedWrapper", "RunFunctionsArraysAndStrings")
+	if err != nil {
+		log.Fatalf("RunFunctionsArraysAndStrings: %v", err)
+	}
+	fmt.Println("RunFunctionsArraysAndStrings() =", features.Native())
 }

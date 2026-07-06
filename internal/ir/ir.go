@@ -345,6 +345,23 @@ type InitObj struct{ TypeFullName string }
 type IsInst struct{ TypeFullName string }
 type CastClass struct{ TypeFullName string }
 
+// Unbox implements the plain `unbox` opcode (spec §III.4.32) — distinct
+// from `unbox.any` (already a Nop, builder.go's own doc comment: vmnet's
+// runtime.Value already stores a boxed value type in its final,
+// already-unboxed KindStruct shape, so "unboxing" it needs no
+// representation change). Plain `unbox` instead pushes a MANAGED POINTER
+// to the value type's data (spec: "controlled-mutability managed
+// pointer"), used when the caller needs a byref for a further ldfld/
+// ldflda/instance-method-call on the value type in place, without a
+// copy — e.g. `((Completion)value).Value` where Completion is a struct
+// compiles to `unbox Completion; ldfld Completion::Value` directly off
+// the resulting pointer, not `unbox.any Completion` (which would copy).
+// Found running real Jint: Engine.GetValue(object, bool)'s own
+// `((Completion)value).Value` read. Same correctness gap unbox.any
+// already documents (no target-type verification — TypeFullName is kept
+// only for a future check, not used yet).
+type Unbox struct{ TypeFullName string }
+
 // LoadTypeToken implements ldtoken (spec §III.4.16) when its operand is a
 // type token — the `typeof(T)` pattern, always compiled as `ldtoken T` +
 // `call System.Type::GetTypeFromHandle(RuntimeTypeHandle)`. vmnet skips

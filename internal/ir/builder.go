@@ -355,6 +355,17 @@ func Build(instrs []il.Instruction, md *metadata.Metadata, retVoid bool, ehClaus
 			// Correctness gap: unbox.any doesn't verify the target type.
 			out = append(out, Nop{})
 
+		case "unbox":
+			// See Unbox's own doc comment: unlike unbox.any (a Nop, just
+			// above), this needs a real managed-pointer wrapper so a
+			// following ldfld/ldflda/instance call can dereference it.
+			token := instr.Operand.(uint32)
+			typeFullName, err := resolveTypeTokenOrGeneric(md, token)
+			if err != nil {
+				return nil, nil, fmt.Errorf("ir: unbox at IL offset %d: %w", instr.Offset, err)
+			}
+			out = append(out, Unbox{TypeFullName: typeFullName})
+
 		case "throw":
 			out = append(out, Throw{})
 

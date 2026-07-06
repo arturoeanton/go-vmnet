@@ -441,23 +441,51 @@ func spanToString(args []runtime.Value) (runtime.Value, error) {
 // System.Object::ToString dispatch (system_object.go) — real compiled IL
 // for ReadOnlySpan<char>.ToString() goes through the latter path
 // (confirmed against real IL, Fase 3.12), same as StringBuilder before
-// it. Only char-backed (string-backed) spans get a meaningful ToString;
-// anything else returns false so the caller falls back to a generic
-// representation.
+// it. Handles both real backing shapes a char-typed Span/ReadOnlySpan
+// actually has: string-backed (sliced straight out of a real vmnet
+// string, e.g. `"hello".AsSpan(1, 3)`) and array-backed (built directly
+// over a real `char[]`, e.g. `new Span<char>(buffer)` — found running
+// real Jint: its own internal, vendored `System.Text.ValueStringBuilder`
+// (used by Array.prototype.join, among others) backs its `_chars` field
+// with exactly this shape, and its own `ToString()` is
+// `_chars.Slice(0, _pos).ToString()`; only the string-backed case being
+// handled meant this always fell through to the generic "unhelpful CLR
+// default" below, which for an array-backed value literally means
+// printing the raw backing array — every ValueStringBuilder-based
+// result (Array.prototype.join's own return value included) came out
+// as vmnet's own "<array[N]>" debug placeholder instead of the real
+// joined string). Anything else (a non-char element type, or a backing
+// shape neither case covers) returns false so the caller falls back to
+// a generic representation.
 func spanToStringValue(s *runtime.Struct) (string, bool) {
 	if s.Type != spanType && s.Type != readOnlySpanType {
 		return "", false
 	}
 	backing := s.Fields[0]
-	if backing.Kind != runtime.KindString {
-		return "", false
-	}
 	start, length := int(s.Fields[1].I4), int(s.Fields[2].I4)
-	runes := []rune(backing.Str)
-	if start < 0 || length < 0 || start+length > len(runes) {
+	switch backing.Kind {
+	case runtime.KindString:
+		runes := []rune(backing.Str)
+		if start < 0 || length < 0 || start+length > len(runes) {
+			return "", false
+		}
+		return string(runes[start : start+length]), true
+	case runtime.KindArray:
+		if backing.Arr == nil || start < 0 || length < 0 || start+length > len(backing.Arr.Elems) {
+			return "", false
+		}
+		elems := backing.Arr.Elems[start : start+length]
+		runes := make([]rune, len(elems))
+		for i, e := range elems {
+			if e.Kind != runtime.KindI4 {
+				return "", false
+			}
+			runes[i] = rune(e.I4)
+		}
+		return string(runes), true
+	default:
 		return "", false
 	}
-	return string(runes[start : start+length]), true
 }
 
 func spanToArray(args []runtime.Value) (runtime.Value, error) {
