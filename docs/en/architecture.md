@@ -788,7 +788,6 @@ greeting, calling it from Go with both `CallBytes` and `CallJSON`. See
 `docs/en/plugin-sdk.md` (new).
 
 As of this writing, Fase 3.76 is the latest phase on `main`. The latest
-tagged release is `v0.7.0` — the interpreter core, the checker, and the
-frozen public API, through Fase 3.74 (see `docs/en/api-stability.md`);
-Fase 3.75-3.76 land after that tag and are not yet part of a numbered
-release.
+tagged release is `v0.8.0`, which bundles Fase 3.75-3.76's CLI tooling on
+top of `v0.7.0`'s interpreter core, checker, and frozen public API (see
+`docs/en/api-stability.md`).

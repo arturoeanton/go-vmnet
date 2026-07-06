@@ -7,12 +7,11 @@ real execution pipeline: a compatibility checker, a whole-directory
 migration analyzer, a Go wrapper code generator, and a plugin scaffolding
 SDK — see [CLI and tooling](#cli-and-tooling) below.
 
-**Current release: [v0.7.0](https://github.com/arturoeanton/go-vmnet/releases/tag/v0.7.0)** —
-covers the interpreter core, the checker, and the frozen public API (see
-[`docs/en/api-stability.md`](docs/en/api-stability.md) for the semver commitment). Fase 3.75-3.76
-landed on `main` since that tag — HTML compatibility reports, `vmnet analyze`, `vmnet bind`, and the
-`dotnet new vmnet-plugin` SDK described below — see
-[`docs/en/ROADMAP.md`](docs/en/ROADMAP.md) for the exact commits and per-Fase tags.
+**Current release: [v0.8.0](https://github.com/arturoeanton/go-vmnet/releases/tag/v0.8.0)** — adds
+HTML compatibility reports, `vmnet analyze`, `vmnet bind`, and the `dotnet new vmnet-plugin` SDK
+described below on top of `v0.7.0`'s interpreter core, checker, and frozen public API (see
+[`docs/en/api-stability.md`](docs/en/api-stability.md) for the semver commitment and
+[`docs/en/ROADMAP.md`](docs/en/ROADMAP.md) for the exact commits and per-Fase tags).
 
 ## This runs a real JavaScript engine. Inside a Go binary. No CGo.
 

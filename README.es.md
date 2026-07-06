@@ -9,12 +9,11 @@ migración de directorios completos, un generador de código Go, y un SDK de
 scaffolding de plugins — ver [CLI y herramientas](#cli-y-herramientas) más
 abajo.
 
-**Release actual: [v0.7.0](https://github.com/arturoeanton/go-vmnet/releases/tag/v0.7.0)** — cubre
-el núcleo del intérprete, el checker, y la API pública congelada (ver
-[`docs/es/api-stability.md`](docs/es/api-stability.md) para el compromiso de semver). Las Fases
-3.75-3.76 llegaron a `main` después de ese tag — reportes HTML de compatibilidad, `vmnet analyze`,
-`vmnet bind`, y el SDK `dotnet new vmnet-plugin` descriptos más abajo — ver
-[`docs/es/ROADMAP.md`](docs/es/ROADMAP.md) para los commits y tags por Fase exactos.
+**Release actual: [v0.8.0](https://github.com/arturoeanton/go-vmnet/releases/tag/v0.8.0)** — agrega
+reportes HTML de compatibilidad, `vmnet analyze`, `vmnet bind`, y el SDK `dotnet new vmnet-plugin`
+descriptos más abajo, sobre el núcleo del intérprete, el checker, y la API pública congelada de
+`v0.7.0` (ver [`docs/es/api-stability.md`](docs/es/api-stability.md) para el compromiso de semver y
+[`docs/es/ROADMAP.md`](docs/es/ROADMAP.md) para los commits y tags por Fase exactos).
 
 ## Esto corre un motor de JavaScript real. Dentro de un binario Go. Sin CGo.
 

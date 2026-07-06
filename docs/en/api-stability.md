@@ -85,7 +85,10 @@ landed on `main` after `v0.7.0` without touching this surface at all: the new co
 either in `cmd/vmnet` (new subcommands, covered informally, not by this document) or in two new
 `internal/*` packages (`internal/migrate`, `internal/bind`, added to the list above). The root
 package gained zero new exported symbols across both Fases — confirmed directly against
-`go doc -all .` — so this snapshot needs no revision because of them.
+`go doc -all .` — so this snapshot needs no revision because of them. Both Fases shipped together
+as **`v0.8.0`**, a minor bump past `v0.7.0` reflecting the real new CLI capability even though the
+frozen Go surface above is unchanged — consistent with this document's own rule that a
+minor-equivalent release may add, never break.
 
 ## The semver commitment
 
@@ -131,8 +134,9 @@ release, in favor of continuing the ALREADY-public `v0.6.0-alpha` line instead o
 second, contradictory, lower-numbered one. The first release built on this document's own frozen-
 surface snapshot is **`v0.7.0`** — a minor bump past `0.6.0-alpha` (every gap that release's own
 notes called out as blocking — no `Permissions` model, no `File`/`Process` BCL surface, no
-formalized benchmarks — is resolved as of this Fase), still short of `v1.0.0` since the Fase 4
-checklist genuinely has real items left (see `docs/en/ROADMAP.md`).
+formalized benchmarks — is resolved as of this Fase). **`v0.8.0`** follows it with Fase 3.75-3.76's
+CLI tooling (see above) on the exact same frozen surface. Both are still short of `v1.0.0` since the
+Fase 4 checklist genuinely has real items left (see `docs/en/ROADMAP.md`).
 
 ## What this document intentionally does NOT cover
 

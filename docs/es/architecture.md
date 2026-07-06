@@ -823,7 +823,6 @@ reemplazando el saludo del starter, llamándola desde Go con `CallBytes`
 y `CallJSON`. Ver `docs/es/plugin-sdk.md` (nuevo).
 
 A la fecha de esta escritura, Fase 3.76 es la última fase en `main`. El
-último release taggeado es `v0.7.0` — el núcleo del intérprete, el
-checker, y la API pública congelada, hasta Fase 3.74 (ver
-`docs/es/api-stability.md`); Fase 3.75-3.76 llegan después de ese tag y
-todavía no son parte de un release numerado.
+último release taggeado es `v0.8.0`, que empaqueta las herramientas de CLI
+de las Fases 3.75-3.76 sobre el núcleo del intérprete, el checker, y la
+API pública congelada de `v0.7.0` (ver `docs/es/api-stability.md`).

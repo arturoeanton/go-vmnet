@@ -89,7 +89,10 @@ nuevo que agregaron vive o bien en `cmd/vmnet` (subcomandos nuevos, cubiertos de
 por este documento) o en dos paquetes `internal/*` nuevos (`internal/migrate`, `internal/bind`,
 agregados a la lista de arriba). El paquete raíz no ganó ningún símbolo exportado nuevo en ninguna
 de las dos Fases — confirmado directamente contra `go doc -all .` — así que esta instantánea no
-necesita revisión por su causa.
+necesita revisión por su causa. Ambas Fases salieron juntas como **`v0.8.0`**, un bump de minor por
+encima de `v0.7.0` que refleja la capacidad de CLI nueva real aunque la superficie Go congelada de
+arriba no cambió — consistente con la propia regla de este documento de que un release
+minor-equivalente puede agregar, nunca romper.
 
 ## El compromiso de semver
 
@@ -140,9 +143,10 @@ línea YA pública de `v0.6.0-alpha` en vez de introducir una segunda, contradic
 más bajo. El primer release construido sobre la propia instantánea de superficie-congelada de este
 documento es **`v0.7.0`** — un bump de minor por encima de `0.6.0-alpha` (cada hueco que las
 propias notas de ese release señalaban como bloqueante — sin modelo `Permissions`, sin superficie
-BCL de `File`/`Process`, sin benchmarks formalizados — está resuelto a partir de esta Fase),
-todavía corto de `v1.0.0` ya que el checklist de la Fase 4 genuinamente tiene ítems reales
-pendientes (ver `docs/en/ROADMAP.md`).
+BCL de `File`/`Process`, sin benchmarks formalizados — está resuelto a partir de esta Fase).
+**`v0.8.0`** lo sigue con las herramientas de CLI de las Fases 3.75-3.76 (ver arriba) sobre la misma
+superficie congelada exacta. Ambos todavía están cortos de `v1.0.0` ya que el checklist de la Fase 4
+genuinamente tiene ítems reales pendientes (ver `docs/en/ROADMAP.md`).
 
 ## Qué este documento deliberadamente NO cubre
 
