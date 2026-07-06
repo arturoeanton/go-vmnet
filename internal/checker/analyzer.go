@@ -601,29 +601,53 @@ var interfaceDispatchTargets = map[string]bool{
 	"System.Collections.IEnumerator::Reset":                   true,
 	"System.Collections.Generic.ICollection`1::Add":           true,
 	"System.Collections.Generic.ICollection`1::get_Count":     true,
-	"System.Collections.ICollection::get_Count":               true,
-	"System.Collections.IList::Add":                           true,
-	"System.Collections.IList::get_Item":                      true,
-	"System.Collections.IList::set_Item":                      true,
+	// IsReadOnly (Fase 3.74, found via System.Text.Json's own generic
+	// collection-converter internals) — a real List`1/Dictionary`2/
+	// HashSet`1 receiver's own get_IsReadOnly (alwaysFalseBool,
+	// system_collections.go/system_hashset.go) resolves identically
+	// whichever of these three interface names the call site happens to
+	// be declared against.
+	"System.Collections.Generic.ICollection`1::get_IsReadOnly": true,
+	"System.Collections.IList::get_IsReadOnly":                 true,
+	"System.Collections.IDictionary::get_IsReadOnly":           true,
+	"System.Collections.ICollection::get_Count":                true,
+	"System.Collections.IList::Add":                            true,
+	"System.Collections.IList::get_Item":                       true,
+	"System.Collections.IList::set_Item":                       true,
 	// IList::Clear resolves against a concrete List`1/ArrayList receiver
 	// exactly like Add/get_Item/set_Item above (both already register a
 	// real "...List`1::Clear"/"ArrayList::Clear" native — system_
 	// collections.go); this entry was simply missing before Fase 3.52,
 	// misreporting a real, already-working call as unsupported.
-	"System.Collections.IList::Clear":                             true,
-	"System.Collections.Generic.IDictionary`2::set_Item":          true,
-	"System.Collections.Generic.IDictionary`2::get_Item":          true,
-	"System.Collections.Generic.IDictionary`2::TryGetValue":       true,
-	"System.Collections.Generic.IDictionary`2::ContainsKey":       true,
-	"System.Collections.Generic.IDictionary`2::Add":               true,
-	"System.Collections.Generic.IDictionary`2::Remove":            true,
-	"System.Collections.Generic.IDictionary`2::get_Keys":          true,
-	"System.Collections.Generic.IList`1::get_Item":                true,
-	"System.Collections.Generic.IList`1::set_Item":                true,
-	"System.Collections.Generic.IReadOnlyList`1::get_Item":        true,
-	"System.Collections.Generic.IReadOnlyCollection`1::get_Count": true,
-	"System.Collections.Generic.IEqualityComparer`1::Equals":      true,
-	"System.Collections.Generic.IEqualityComparer`1::GetHashCode": true,
+	"System.Collections.IList::Clear":                       true,
+	"System.Collections.Generic.IDictionary`2::set_Item":    true,
+	"System.Collections.Generic.IDictionary`2::get_Item":    true,
+	"System.Collections.Generic.IDictionary`2::TryGetValue": true,
+	"System.Collections.Generic.IDictionary`2::ContainsKey": true,
+	"System.Collections.Generic.IDictionary`2::Add":         true,
+	"System.Collections.Generic.IDictionary`2::Remove":      true,
+	"System.Collections.Generic.IDictionary`2::get_Keys":    true,
+	// IReadOnlyDictionary`2 (Fase 3.74) — a real Dictionary`2 (the
+	// overwhelming majority of receivers reaching this interface, in
+	// practice) implements both IDictionary`2 and IReadOnlyDictionary`2
+	// via the exact same real get_Item/TryGetValue/ContainsKey/get_Keys/
+	// get_Values methods; the runtime's own ancestor walk (Machine.call)
+	// redirects either interface's call-site name to the receiver's real
+	// concrete Dictionary`2 type identically — found auditing ClosedXML's
+	// own real corpus, whose IL calls into IReadOnlyDictionary`2 far more
+	// than IDictionary`2, an accident of which interface reference type a
+	// given local/parameter happened to be declared against.
+	"System.Collections.Generic.IReadOnlyDictionary`2::get_Item":    true,
+	"System.Collections.Generic.IReadOnlyDictionary`2::TryGetValue": true,
+	"System.Collections.Generic.IReadOnlyDictionary`2::ContainsKey": true,
+	"System.Collections.Generic.IReadOnlyDictionary`2::get_Keys":    true,
+	"System.Collections.Generic.IReadOnlyDictionary`2::get_Values":  true,
+	"System.Collections.Generic.IList`1::get_Item":                  true,
+	"System.Collections.Generic.IList`1::set_Item":                  true,
+	"System.Collections.Generic.IReadOnlyList`1::get_Item":          true,
+	"System.Collections.Generic.IReadOnlyCollection`1::get_Count":   true,
+	"System.Collections.Generic.IEqualityComparer`1::Equals":        true,
+	"System.Collections.Generic.IEqualityComparer`1::GetHashCode":   true,
 	// A LINQ GroupBy/OrderBy result is a real, working native
 	// (bcl.NativeGrouping/NativeOrdered, Fase 3.44/3.45) reached through
 	// exactly this same runtime redirection — `group.Key`/a direct

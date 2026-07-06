@@ -20,6 +20,17 @@ func init() {
 	register("System.Threading.Interlocked::Increment", true, interlockedIncrement)
 	register("System.Threading.Interlocked::Decrement", true, interlockedDecrement)
 	register("System.Threading.Interlocked::Add", true, interlockedAdd)
+	// MemoryBarrier (Fase 3.74, found via System.Text.Json's own
+	// lock-free lazy-initialization paths): a real no-op here, same
+	// "no real multi-core memory model to order against" reasoning as
+	// this whole file's own doc comment on CompareExchange — a Machine
+	// never runs two goroutines inside the same call chain concurrently,
+	// so there is no reordering for a fence to prevent.
+	register("System.Threading.Interlocked::MemoryBarrier", false, interlockedMemoryBarrier)
+}
+
+func interlockedMemoryBarrier(args []runtime.Value) (runtime.Value, error) {
+	return runtime.Value{}, nil
 }
 
 func interlockedCompareExchange(args []runtime.Value) (runtime.Value, error) {

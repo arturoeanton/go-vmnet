@@ -60,6 +60,7 @@ func init() {
 	register("System.Collections.Generic.HashSet`1::Remove", true, hashSetRemove)
 	register("System.Collections.Generic.HashSet`1::Clear", false, hashSetClear)
 	register("System.Collections.Generic.HashSet`1::get_Count", true, hashSetCount)
+	register("System.Collections.Generic.HashSet`1::get_IsReadOnly", true, alwaysFalseBool)
 	register("System.Collections.Generic.HashSet`1::GetEnumerator", true, hashSetGetEnumerator)
 	register("System.Collections.Generic.HashSet`1+Enumerator::MoveNext", true, hashSetEnumeratorMoveNext)
 	register("System.Collections.Generic.HashSet`1+Enumerator::get_Current", true, hashSetEnumeratorGetCurrent)

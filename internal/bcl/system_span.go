@@ -106,6 +106,13 @@ func init() {
 	// general pointer-arithmetic implementation vmnet has no way to
 	// support anyway (no raw memory model).
 	registerValueTypeCtor("System.ReadOnlySpan`1", readOnlySpanCtor)
+	// `var span = new ReadOnlySpan<T>(...);`/`Span<T>` assigned straight
+	// to a local compiles to `ldloca`+`call instance .ctor`, not
+	// `newobj` — same real gap system_collections.go's own
+	// KeyValuePair`2::.ctor registration already documents and fixes for
+	// that type; found auditing every registerValueTypeCtor entry for a
+	// missing in-place counterpart (Fase 3.74).
+	register("System.ReadOnlySpan`1::.ctor", false, readOnlySpanCtorInPlace)
 	// Span<T> has the exact same real constructor overloads as
 	// ReadOnlySpan<T> (Fase 3.41, found via a real, load-bearing case:
 	// System.Text.Json's own JsonReaderHelper stackalloc's a scratch
@@ -116,6 +123,7 @@ func init() {
 	// with no backing array at all, breaking every native (Encoding.
 	// GetBytes, ...) that writes through it.
 	registerValueTypeCtor("System.Span`1", spanCtor)
+	register("System.Span`1::.ctor", false, spanCtorInPlace)
 
 	for _, prefix := range []string{"System.Span`1", "System.ReadOnlySpan`1"} {
 		register(prefix+"::get_Length", true, spanLength)
@@ -154,6 +162,37 @@ func readOnlySpanCtor(args []runtime.Value) (*runtime.Struct, error) {
 
 func spanCtor(args []runtime.Value) (*runtime.Struct, error) {
 	return spanCtorAs(spanType, "Span<T>", args)
+}
+
+// readOnlySpanCtorInPlace/spanCtorInPlace back the ldloca+call.ctor
+// construction shape — args[0] is a KindRef to the already-allocated
+// struct slot; stripping it and delegating to the shared newobj-path
+// logic above is safe even for the (void*, int) overload, whose own
+// first REAL argument also happens to be a KindRef (a managed pointer):
+// args[0] is always the receiver in this calling convention, args[1:]
+// are the real constructor arguments regardless of their own Kind.
+func readOnlySpanCtorInPlace(args []runtime.Value) (runtime.Value, error) {
+	if len(args) == 0 || args[0].Kind != runtime.KindRef || args[0].Ref == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: ReadOnlySpan<T> constructor called without a receiver")
+	}
+	s, err := readOnlySpanCtor(args[1:])
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	*args[0].Ref = runtime.StructVal(s)
+	return runtime.Value{}, nil
+}
+
+func spanCtorInPlace(args []runtime.Value) (runtime.Value, error) {
+	if len(args) == 0 || args[0].Kind != runtime.KindRef || args[0].Ref == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: Span<T> constructor called without a receiver")
+	}
+	s, err := spanCtor(args[1:])
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	*args[0].Ref = runtime.StructVal(s)
+	return runtime.Value{}, nil
 }
 
 // spanCtorAs backs both Span<T> and ReadOnlySpan<T>'s real constructor

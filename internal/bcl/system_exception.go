@@ -84,6 +84,16 @@ func init() {
 		// a plugin that constructs or catches one directly still compiles
 		// and behaves like any other exception here.
 		"System.InsufficientExecutionStackException",
+		// System.Collections.Generic.KeyNotFoundException/System.
+		// OutOfMemoryException (Fase 3.74) — real corpus code
+		// (ClosedXML, System.Text.Json) constructs/catches both
+		// explicitly in more than one place, even though vmnet itself
+		// never throws either one on its own (no real fixed heap
+		// ceiling to exceed the way real .NET's GC does, and this
+		// native's own dictionary getters don't construct
+		// KeyNotFoundException directly today).
+		"System.Collections.Generic.KeyNotFoundException",
+		"System.OutOfMemoryException",
 	} {
 		registerCtor(name, newExceptionCtor(name))
 		// A plugin's own exception subclass (`class MyException :
@@ -123,6 +133,11 @@ func init() {
 	register("System.ArgumentException::get_ParamName", true, exceptionGetParamName)
 	register("System.ArgumentNullException::get_ParamName", true, exceptionGetParamName)
 	register("System.ArgumentOutOfRangeException::get_ParamName", true, exceptionGetParamName)
+	// Exception.Source (Fase 3.74) — a plain, freely settable string; see
+	// ManagedException.Source's own doc comment for why vmnet never
+	// auto-populates it the way the real CLR does at throw time.
+	register("System.Exception::get_Source", true, exceptionGetSource)
+	register("System.Exception::set_Source", false, exceptionSetSource)
 
 	// System.AggregateException: Task/Parallel's own multi-fault wrapper.
 	// Not part of the shared newExceptionCtor loop above — its
@@ -323,6 +338,31 @@ func exceptionGetParamName(args []runtime.Value) (runtime.Value, error) {
 		return runtime.Value{}, fmt.Errorf("bcl: receiver is not an Exception")
 	}
 	return runtime.String(ex.ParamName), nil
+}
+
+func exceptionGetSource(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 1 || args[0].Kind != runtime.KindObject || args[0].Obj == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Exception.get_Source expects a receiver")
+	}
+	ex, ok := args[0].Obj.Native.(*runtime.ManagedException)
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: receiver is not an Exception")
+	}
+	return runtime.String(ex.Source), nil
+}
+
+func exceptionSetSource(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 2 || args[0].Kind != runtime.KindObject || args[0].Obj == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Exception.set_Source expects a receiver and a value")
+	}
+	ex, ok := args[0].Obj.Native.(*runtime.ManagedException)
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: receiver is not an Exception")
+	}
+	if args[1].Kind == runtime.KindString {
+		ex.Source = args[1].Str
+	}
+	return runtime.Value{}, nil
 }
 
 // exceptionGetData lazily allocates ex.Data's backing dictionary on first

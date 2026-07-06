@@ -14,6 +14,7 @@ func init() {
 	register("System.Array::Resize", false, arrayResize)
 	register("System.Array::IndexOf", true, arrayIndexOf)
 	register("System.Array::Copy", false, arrayCopy)
+	register("System.Array::CopyTo", false, arrayCopyTo)
 	register("System.Array::Clone", true, arrayClone)
 	register("System.Array::get_Length", true, arrayGetLength)
 	register("System.Array::GetLength", true, arrayGetLengthDim)
@@ -198,6 +199,28 @@ func arrayCopy(args []runtime.Value) (runtime.Value, error) {
 		return runtime.Value{}, &runtime.ManagedException{TypeName: "System.ArgumentOutOfRangeException", Message: "Array.Copy: index or length out of range"}
 	}
 	copy(dst[dstIdx:dstIdx+length], src[srcIdx:srcIdx+length])
+	return runtime.Value{}, nil
+}
+
+// arrayCopyTo backs the instance CopyTo(Array destinationArray, int
+// destinationIndex) (Fase 3.74, found via System.Text.Json's own
+// PooledByteBufferWriter): copies the WHOLE receiver array starting at
+// destinationIndex — real .NET's own CopyTo(Array, long) overload
+// collapses to the same shape here (vmnet has no real 64-bit array
+// index distinct from int32).
+func arrayCopyTo(args []runtime.Value) (runtime.Value, error) {
+	if len(args) != 3 ||
+		args[0].Kind != runtime.KindArray || args[0].Arr == nil ||
+		args[1].Kind != runtime.KindArray || args[1].Arr == nil ||
+		args[2].Kind != runtime.KindI4 {
+		return runtime.Value{}, fmt.Errorf("bcl: Array.CopyTo expects (Array destinationArray, int destinationIndex)")
+	}
+	src, dst := args[0].Arr.Elems, args[1].Arr.Elems
+	dstIdx := int(args[2].I4)
+	if dstIdx < 0 || dstIdx+len(src) > len(dst) {
+		return runtime.Value{}, &runtime.ManagedException{TypeName: "System.ArgumentOutOfRangeException", Message: "Array.CopyTo: destination array too small"}
+	}
+	copy(dst[dstIdx:dstIdx+len(src)], src)
 	return runtime.Value{}, nil
 }
 

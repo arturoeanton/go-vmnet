@@ -58,6 +58,17 @@ type ManagedException struct {
 	// constructor overload wasn't the one used.
 	ParamName string
 
+	// Source is real Exception.Source (Fase 3.74) — a plain, freely
+	// settable string (the name of the assembly/application that raised
+	// it, in real .NET), "" until either the constructing code or a
+	// catch handler explicitly sets it via `set_Source`. vmnet has no
+	// real assembly-identity concept precise enough to auto-populate
+	// this the way the real CLR does at throw time, so it stays exactly
+	// what real code itself wrote into it — found via System.Text.Json's
+	// own exception-enrichment helpers, which read back a Source they
+	// just set themselves, never one vmnet would need to invent.
+	Source string
+
 	// InnerExceptions is System.AggregateException's own real plural
 	// fault list — set only by bcl.aggregateExceptionCtor/Flatten, nil for
 	// every other exception type (which only ever has Inner, singular).

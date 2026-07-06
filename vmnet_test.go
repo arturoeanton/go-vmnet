@@ -607,6 +607,122 @@ func TestBoxUnboxRoundTrip(t *testing.T) {
 	})
 }
 
+// TestCheckerHardening is the Fase 3.74 golden test for the natives added
+// while pushing ClosedXML/System.Text.Json over the checker's own 97%
+// bar (docs/en/COMPATIBILITY.md): IReadOnlyDictionary`2 dispatch,
+// ArraySegment`1, Array.CopyTo, Exception.Source, KeyNotFoundException,
+// and List`1/Dictionary`2/HashSet`1's own IsReadOnly.
+func TestCheckerHardening(t *testing.T) {
+	asm := loadFixture(t)
+
+	t.Run("IReadOnlyDictionary<K,V> dispatches to a real Dictionary<K,V>", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheckerHardeningTest", "ReadOnlyDictionaryDispatch")
+		if err != nil {
+			t.Fatalf("ReadOnlyDictionaryDispatch() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 109 {
+			t.Errorf("ReadOnlyDictionaryDispatch() = %d, want 109", got)
+		}
+	})
+
+	t.Run("ArraySegment<T> round-trips array/offset/count", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheckerHardeningTest", "ArraySegmentRoundTrip")
+		if err != nil {
+			t.Fatalf("ArraySegmentRoundTrip() error = %v", err)
+		}
+		// whole.Count=5, slice.Count=3, slice.Offset=1, slice.Array[1]=20
+		if got := out.Native().(int32); got != 29 {
+			t.Errorf("ArraySegmentRoundTrip() = %d, want 29", got)
+		}
+	})
+
+	t.Run("Array.CopyTo", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheckerHardeningTest", "ArrayCopyTo")
+		if err != nil {
+			t.Fatalf("ArrayCopyTo() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 6 {
+			t.Errorf("ArrayCopyTo() = %d, want 6", got)
+		}
+	})
+
+	t.Run("Exception.Source round-trips", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheckerHardeningTest", "ExceptionSourceRoundTrip")
+		if err != nil {
+			t.Fatalf("ExceptionSourceRoundTrip() error = %v", err)
+		}
+		if got := out.Native().(string); got != "Vmnet.Fixtures" {
+			t.Errorf("ExceptionSourceRoundTrip() = %q, want %q", got, "Vmnet.Fixtures")
+		}
+	})
+
+	t.Run("KeyNotFoundException throw/catch", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheckerHardeningTest", "KeyNotFoundExceptionCatch")
+		if err != nil {
+			t.Fatalf("KeyNotFoundExceptionCatch() error = %v", err)
+		}
+		if got := out.Native().(int32); got == 0 {
+			t.Errorf("KeyNotFoundExceptionCatch() = %d, want nonzero", got)
+		}
+	})
+
+	t.Run("List/Dictionary/HashSet are never read-only", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheckerHardeningTest", "CollectionsAreNotReadOnly")
+		if err != nil {
+			t.Fatalf("CollectionsAreNotReadOnly() error = %v", err)
+		}
+		if got := out.Native().(int32); got == 0 {
+			t.Errorf("CollectionsAreNotReadOnly() = %d, want nonzero", got)
+		}
+	})
+
+	// The four value types below are constructed directly into a local
+	// variable (`var x = new Foo(...)`) — real Roslyn compiles this to
+	// `ldloca`+`call instance .ctor`, not `newobj`, a genuinely different
+	// shape from the same constructor reached as a standalone expression.
+	// Found (and fixed, alongside ArraySegment<T> above) auditing every
+	// registerValueTypeCtor entry for a missing in-place counterpart.
+	t.Run("Guid constructed into a local variable", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheckerHardeningTest", "GuidLocalAssign")
+		if err != nil {
+			t.Fatalf("GuidLocalAssign() error = %v", err)
+		}
+		if got := out.Native().(int32); got == 0 {
+			t.Errorf("GuidLocalAssign() = %d, want nonzero", got)
+		}
+	})
+
+	t.Run("ReadOnlySpan<T> constructed into a local variable", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheckerHardeningTest", "ReadOnlySpanLocalAssign")
+		if err != nil {
+			t.Fatalf("ReadOnlySpanLocalAssign() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 3 {
+			t.Errorf("ReadOnlySpanLocalAssign() = %d, want 3", got)
+		}
+	})
+
+	t.Run("Span<T> constructed into a local variable", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheckerHardeningTest", "SpanLocalAssign")
+		if err != nil {
+			t.Fatalf("SpanLocalAssign() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 2 {
+			t.Errorf("SpanLocalAssign() = %d, want 2", got)
+		}
+	})
+
+	t.Run("CancellationToken constructed into a local variable", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheckerHardeningTest", "CancellationTokenLocalAssign")
+		if err != nil {
+			t.Fatalf("CancellationTokenLocalAssign() error = %v", err)
+		}
+		if got := out.Native().(int32); got == 0 {
+			t.Errorf("CancellationTokenLocalAssign() = %d, want nonzero", got)
+		}
+	})
+}
+
 // TestMathAbsAndGuid is the spec §28.5 "System.Math.Abs"/"System.Guid"
 // golden test — both natives already existed (internal/bcl/
 // system_math.go, internal/bcl/system_guid.go) but neither had a

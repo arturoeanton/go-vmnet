@@ -24,6 +24,13 @@ var guidType = runtime.NewValueType(
 func init() {
 	registerValueType(guidType)
 	registerValueTypeCtor("System.Guid", guidCtor)
+	// `var g = new Guid(...);` assigned straight to a local compiles to
+	// `ldloca`+`call instance .ctor`, not `newobj` — same real gap
+	// system_collections.go's own KeyValuePair`2::.ctor registration
+	// already documents and fixes for that type; found auditing every
+	// registerValueTypeCtor entry for a missing in-place counterpart
+	// (Fase 3.74).
+	register("System.Guid::.ctor", false, guidCtorInPlace)
 	register("System.Guid::NewGuid", true, guidNewGuid)
 	register("System.Guid::ToString", true, guidToString)
 	register("System.Guid::Equals", true, guidEquals)
@@ -62,6 +69,20 @@ func guidCtor(args []runtime.Value) (*runtime.Struct, error) {
 		s = strings.ToLower(strings.TrimSpace(args[0].Str))
 	}
 	return &runtime.Struct{Type: guidType, Fields: []runtime.Value{runtime.String(s)}}, nil
+}
+
+// guidCtorInPlace mirrors guidCtor for the ldloca+call.ctor shape —
+// args[0] is a KindRef to the already-allocated struct slot.
+func guidCtorInPlace(args []runtime.Value) (runtime.Value, error) {
+	if len(args) == 0 || args[0].Kind != runtime.KindRef || args[0].Ref == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: Guid constructor called without a receiver")
+	}
+	s, err := guidCtor(args[1:])
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	*args[0].Ref = runtime.StructVal(s)
+	return runtime.Value{}, nil
 }
 
 func asGuidString(v runtime.Value) (string, bool) {

@@ -1,6 +1,8 @@
 package bcl
 
 import (
+	"fmt"
+
 	"github.com/arturoeanton/go-vmnet/internal/runtime"
 )
 
@@ -102,6 +104,13 @@ func init() {
 
 	registerValueType(cancellationTokenType)
 	registerValueTypeCtor("System.Threading.CancellationToken", cancellationTokenCtor)
+	// `var token = new CancellationToken(...);` assigned straight to a
+	// local compiles to `ldloca`+`call instance .ctor`, not `newobj` —
+	// same real gap system_collections.go's own KeyValuePair`2::.ctor
+	// registration already documents and fixes for that type; found
+	// auditing every registerValueTypeCtor entry for a missing in-place
+	// counterpart (Fase 3.74).
+	register("System.Threading.CancellationToken::.ctor", false, cancellationTokenCtorInPlace)
 	register("System.Threading.CancellationToken::get_None", true, cancellationTokenNone)
 	register("System.Threading.CancellationToken::get_IsCancellationRequested", true, cancellationTokenIsCancellationRequested)
 	// CanBeCanceled: real semantics is "could this token EVER transition
@@ -215,6 +224,21 @@ func cancellationTokenCtor(args []runtime.Value) (*runtime.Struct, error) {
 		s.Fields[0] = cancelStateValue(&cancelState{cancelled: true})
 	}
 	return s, nil
+}
+
+// cancellationTokenCtorInPlace mirrors cancellationTokenCtor for the
+// ldloca+call.ctor shape — args[0] is a KindRef to the already-allocated
+// struct slot.
+func cancellationTokenCtorInPlace(args []runtime.Value) (runtime.Value, error) {
+	if len(args) == 0 || args[0].Kind != runtime.KindRef || args[0].Ref == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: CancellationToken constructor called without a receiver")
+	}
+	s, err := cancellationTokenCtor(args[1:])
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	*args[0].Ref = runtime.StructVal(s)
+	return runtime.Value{}, nil
 }
 
 func cancellationTokenNone(args []runtime.Value) (runtime.Value, error) {

@@ -93,8 +93,23 @@ func init() {
 		"System.Collections.IList::get_Item",
 		"System.Collections.IList::set_Item",
 		"System.Collections.IList::Clear",
+		// IsReadOnly (Fase 3.74) — see analyzer.go's own
+		// interfaceDispatchTargets doc comment on these same three
+		// entries for why all three are needed.
+		"System.Collections.Generic.ICollection`1::get_IsReadOnly",
+		"System.Collections.IList::get_IsReadOnly",
+		"System.Collections.IDictionary::get_IsReadOnly",
 		"System.Collections.Generic.IReadOnlyList`1::get_Item",
 		"System.Collections.Generic.IReadOnlyCollection`1::get_Count",
+		// IReadOnlyDictionary`2 (Fase 3.74) — mirrors IDictionary`2 just
+		// above; see analyzer.go's own interfaceDispatchTargets doc
+		// comment for why both need an entry (a real Dictionary`2
+		// implements both interfaces via the same real methods).
+		"System.Collections.Generic.IReadOnlyDictionary`2::get_Item",
+		"System.Collections.Generic.IReadOnlyDictionary`2::TryGetValue",
+		"System.Collections.Generic.IReadOnlyDictionary`2::ContainsKey",
+		"System.Collections.Generic.IReadOnlyDictionary`2::get_Keys",
+		"System.Collections.Generic.IReadOnlyDictionary`2::get_Values",
 		"System.Collections.Generic.IEqualityComparer`1::Equals",
 		"System.Collections.Generic.IEqualityComparer`1::GetHashCode",
 		"System.Char::",
@@ -197,7 +212,13 @@ func init() {
 		"System.Array::ForEach",
 		"System.Array::TrueForAll",
 		"System.Array::ConvertAll",
+		"System.Array::CopyTo",
 		"System.Array+ArrayEnumerator::",
+		// System.Buffer/System.ArraySegment`1 (Fase 3.74) — see
+		// system_span.go's own Buffer.BlockCopy doc comment and the new
+		// system_arraysegment.go for why/how both are natively backed.
+		"System.Buffer::",
+		"System.ArraySegment`1::",
 		"System.Globalization.CultureInfo::",
 		"System.Globalization.TextInfo::",
 		"System.TimeZoneInfo::",
@@ -232,6 +253,12 @@ func init() {
 		"System.NotImplementedException",
 		"System.ApplicationException",
 		"System.ObjectDisposedException",
+		// System.Collections.Generic.KeyNotFoundException/System.
+		// OutOfMemoryException (Fase 3.74) — see system_exception.go's
+		// own registerCtor loop doc comment for why real corpus code
+		// (ClosedXML, System.Text.Json) constructs/catches both.
+		"System.Collections.Generic.KeyNotFoundException",
+		"System.OutOfMemoryException",
 		"System.Data.DataException",
 		// System.Data/System.Data.Common (Fase 3.52) — Dapper's own
 		// SqlMapper (and any other ADO.NET-based micro-ORM) does its real
@@ -261,6 +288,17 @@ func init() {
 		"System.Environment::get_ProcessorCount",
 		"System.Double::",
 		"System.Threading.Interlocked::",
+		// System.Threading.CancellationToken/CancellationTokenSource/
+		// CancellationTokenRegistration (Fase 3.74) — real natives have
+		// existed since well before this Fase (system_
+		// cancellationtoken.go's own doc comment cites 7 of the 19
+		// tracked packages using them), but no profile entry ever
+		// allowlisted any of them; a real caller hit
+		// "out-of-profile" ever since despite being genuinely
+		// resolvable.
+		"System.Threading.CancellationToken::",
+		"System.Threading.CancellationTokenSource::",
+		"System.Threading.CancellationTokenRegistration::",
 		"System.WeakReference::",
 		"System.WeakReference`1::",
 		"System.StringComparer::",

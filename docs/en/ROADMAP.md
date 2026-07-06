@@ -6119,6 +6119,88 @@ cd benchmarks && go run .  # compare rule-engine/method-invoke-overhead/allocs n
 ```
 
 ---
+## Fase 3.74 — pushing more packages over the checker's own 97% bar, and a real class-of-bug fix
+
+**Goal:** the third and final item of Priority 3 — push more of the 19-package corpus over the
+97%-individually working target (`docs/en/COMPATIBILITY.md`), starting from the packages sitting
+closest to it (`ClosedXML` 96.7%, `System.Text.Json` 96.5%).
+
+**Result: 7 of 19 packages now clear 97% (up from 5), broad improvement across most of the rest of
+the corpus, and — investigating why a new native didn't work as expected — a genuinely new, general
+bug found and fixed affecting every BCL value type constructed directly into a local variable.**
+
+- **`IReadOnlyDictionary\`2` allowlisted, both for the runtime AND the checker** — a real
+  `Dictionary\`2` receiver already dispatches an `IReadOnlyDictionary\`2`-declared call site
+  correctly today (the same by-name ancestor walk `IDictionary\`2`'s own already-allowlisted
+  entries rely on), but neither `internal/checker/analyzer.go`'s `interfaceDispatchTargets` nor
+  `internal/checker/profile.go`'s `bclPrefixes` had ever been told so — every real
+  `IReadOnlyDictionary\`2::get_Item`/`TryGetValue`/`ContainsKey`/`get_Keys`/`get_Values` call site
+  was flagged despite genuinely working. Verified with a real, standalone round-trip test
+  (`ro["a"] + ro["b"] + TryGetValue + ContainsKey + foreach Keys + foreach Values`, real answer
+  109) before trusting the fix. This single pair of entries accounted for the largest share of what
+  ClosedXML/System.Text.Json had flagged.
+- **New natives**: `System.ArraySegment\`1` (ctor, `get_Array`/`get_Offset`/`get_Count` — the same
+  real `(_array, _offset, _count)` field-name convention `system_span.go`'s own `Span<T>`/
+  `ReadOnlySpan<T>` already established), `Array.CopyTo` (the instance counterpart of the
+  already-registered static `Array.Copy`), `Exception.Source` (get/set, a new `ManagedException.
+  Source` field), `System.Collections.Generic.KeyNotFoundException`/`System.OutOfMemoryException`
+  (added to the shared exception-ctor registration loop), `List\`1`/`Dictionary\`2`/`HashSet\`1`'s
+  own `get_IsReadOnly` (always `false` — none of vmnet's native mutable collections are ever really
+  read-only), and `Interlocked.MemoryBarrier` (a real no-op — no multi-core memory model to fence
+  against). Checker-side: `ICollection\`1`/`IList`/`IDictionary`'s own `get_IsReadOnly` allowlisted
+  the same way `IReadOnlyDictionary\`2` was, plus a `System.Buffer`/`System.ArraySegment\`1` profile
+  prefix (`Buffer.BlockCopy` already had a real native since Fase 3.41 but no profile entry either).
+- **A genuinely new, general bug found and fixed**: adding `ArraySegment<T>`'s constructor via the
+  established `registerValueTypeCtor` pattern alone didn't work — `var seg = new
+  ArraySegment<int>(arr);` (constructing a value type directly into a local variable) kept failing
+  with an unrelated "type not found" error. Root-caused via real IL disassembly: Roslyn compiles a
+  value type constructed straight into a local as `ldloca` + `call instance .ctor` — a plain
+  instance-method call on the local's own address — NOT `newobj`, which is the ONLY shape
+  `Machine.newObj`'s own `bcl.LookupValueTypeCtor` dispatch (the one `registerValueTypeCtor`
+  populates) ever gets consulted from. `System.Collections.Generic.KeyValuePair\`2` already had a
+  separate, plain `bcl.Lookup`-registered `"...KeyValuePair\`2::.ctor"` in-place variant for exactly
+  this reason (Fase unknown, predating this investigation) — but auditing every OTHER
+  `registerValueTypeCtor` entry for the same missing counterpart found FOUR more real, previously
+  unnoticed gaps: `System.Guid`, `System.ReadOnlySpan\`1`, `System.Span\`1`, and `System.Threading.
+  CancellationToken` — meaning `var g = new Guid(...)`/`var span = new ReadOnlySpan<T>(...)`/`var
+  token = new CancellationToken(...)` assigned directly to a local variable have been silently
+  broken this whole time, simply never caught because no real corpus code or existing test happened
+  to hit this exact construction shape for any of these four types. All four fixed with the same
+  in-place-ctor-registration pattern, each verified with a real round-trip test.
+- **`System.Threading.CancellationToken`/`CancellationTokenSource`/`CancellationTokenRegistration`
+  had NO checker-profile allowlist entry at all**, discovered by the new fixture test above hitting
+  an "out-of-profile" finding for a type with real, working natives since well before this Fase
+  (`system_cancellationtoken.go`'s own doc comment cites 7 of the 19 tracked packages using it:
+  Polly, MediatR, CsvHelper, FluentValidation, Dapper, ...). Fixed with three new prefix entries —
+  this alone measurably improved Dapper, Polly, Serilog, MediatR, and CsvHelper's own checker
+  percentages, none of which needed any new native at all.
+- **Corpus-wide result**: `DocumentFormat.OpenXml` 100.0% (unchanged), `NPOI` 97.9% → 98.2%,
+  `System.Text.Json` 96.5% → **98.1%**, `FluentValidation` 98.1% → 98.1% (24 flagged, down from 25),
+  `Humanizer.Core` 97.9% → 98.3%, `Ardalis.GuardClauses` 97.5% → 98.6%, `ClosedXML` 96.7% →
+  **97.5%** (the last two newly crossing the 97% bar), plus broad improvement across the rest of the
+  corpus (Dapper 94.5%→95.4%, Newtonsoft.Json 85.6%→89.2%, Polly 95.5%→96.3%, YamlDotNet
+  94.9%→96.2%, Serilog 92.1%→95.8%, CsvHelper 93.7%→94.2%, MediatR 93.0%→95.5%). Simple average
+  across the corpus: 94.45% → 95.8%; methods-weighted average: ~97.8% → ~98.4%. See
+  `docs/en/COMPATIBILITY.md` for the full, current per-package table.
+- **Ten new regression tests** (`tests/fixtures/csharp/CheckerHardening.cs`,
+  `TestCheckerHardening` in `vmnet_test.go`): `IReadOnlyDictionary\`2` dispatch, `ArraySegment<T>`
+  round-trip, `Array.CopyTo`, `Exception.Source` round-trip, `KeyNotFoundException` throw/catch,
+  `List`/`Dictionary`/`HashSet`'s own `IsReadOnly`, and the four newly-fixed local-variable
+  construction shapes (`Guid`, `ReadOnlySpan<T>`, `Span<T>`, `CancellationToken`).
+
+### How to verify Fase 3.74
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+go test -run "TestCheckerHardening" -v .
+go run ./cmd/vmnet check package closedxml@0.105.0
+go run ./cmd/vmnet check package system.text.json@8.0.5
+```
+
+---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 
 **Goal:** turn the functional engine into an adoptable product — reliable, documented, and

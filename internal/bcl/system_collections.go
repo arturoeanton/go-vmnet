@@ -185,6 +185,16 @@ func init() {
 	register("System.Collections.Generic.List`1::.ctor", false, listCtorInPlace)
 	register("System.Collections.Generic.List`1::Add", false, listAdd)
 	register("System.Collections.Generic.List`1::get_Count", true, listCount)
+	// IsReadOnly (Fase 3.74, found via System.Text.Json's own generic
+	// collection-converter internals — ICollectionOfTConverter<T,
+	// TElement>.CreateCollection and siblings check IsReadOnly on the
+	// concrete List<T>/Dictionary<K,V>/HashSet<T> they just constructed
+	// themselves before populating it): always false — real .NET's own
+	// List<T>/Dictionary<K,V>/HashSet<T> are never read-only instances
+	// (unlike, say, a ReadOnlyCollection<T> wrapper, which vmnet doesn't
+	// model this property on at all since no real corpus caller checks
+	// IsReadOnly on one).
+	register("System.Collections.Generic.List`1::get_IsReadOnly", true, alwaysFalseBool)
 	register("System.Collections.Generic.List`1::get_Item", true, listGetItem)
 	register("System.Collections.Generic.List`1::set_Item", false, listSetItem)
 	register("System.Collections.Generic.List`1::ToArray", true, listToArray)
@@ -225,6 +235,7 @@ func init() {
 	register("System.Collections.Generic.Dictionary`2::get_Count", true, dictCount)
 	register("System.Collections.Generic.Dictionary`2::Clear", false, dictClear)
 	register("System.Collections.Generic.Dictionary`2::Remove", true, dictRemove)
+	register("System.Collections.Generic.Dictionary`2::get_IsReadOnly", true, alwaysFalseBool)
 	registerValueTypeCtor("System.Collections.Generic.KeyValuePair`2", keyValuePairCtor)
 	register("System.Collections.Generic.Dictionary`2::GetEnumerator", true, dictGetEnumerator)
 	register("System.Collections.Generic.Dictionary`2+Enumerator::MoveNext", true, dictEnumeratorMoveNext)
@@ -989,6 +1000,13 @@ func dictCtorInPlace(args []runtime.Value) (runtime.Value, error) {
 // than allocating a fresh Object); every real overload (capacity, an
 // IEnumerable<T> to copy from) is ignored beyond the receiver itself,
 // same documented scope dictCtorInPlace already accepts for Dictionary`2.
+// alwaysFalseBool backs every real `IsReadOnly`-style getter registered
+// here directly, on List`1/Dictionary`2/HashSet`1 — none of vmnet's
+// mutable native collections are ever really read-only (Fase 3.74).
+func alwaysFalseBool(args []runtime.Value) (runtime.Value, error) {
+	return runtime.Bool(false), nil
+}
+
 func listCtorInPlace(args []runtime.Value) (runtime.Value, error) {
 	if len(args) == 0 || args[0].Kind != runtime.KindObject || args[0].Obj == nil {
 		return runtime.Value{}, fmt.Errorf("bcl: List`1 constructor called without a receiver")
