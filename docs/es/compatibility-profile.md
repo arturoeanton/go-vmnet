@@ -177,6 +177,94 @@ una brecha real. `deps` está pensado para ser el grafo de dependencias transiti
 paquete (p. ej. vía `internal/nuget.Resolver`), no solo sus dependencias directas — ese es
 justamente el punto del mecanismo.
 
+### 3.1 Reportes HTML, y `vmnet analyze` para todo un sistema legacy
+
+Tanto `vmnet check` como `vmnet check package` también aceptan `--html=<archivo>`, escribiendo el
+mismo `Report` exacto — cada estadística, cada finding — como una única página HTML autocontenida
+(sin fuentes, scripts, ni hojas de estilo externas; el propio `RenderHTML` de
+`internal/checker/html.go`) en vez de, o junto con, la salida en texto plano. Una forma rápida de
+pasarle un resultado de compatibilidad a alguien que no va a leer un dump de terminal:
+
+```
+vmnet check --html=report.html mylib.dll
+vmnet check package --html=report.html --profile=netstandard-lite fluentvalidation@11.9.2
+```
+
+Un tercer subcomando, `vmnet analyze <dir>`, corre el mismo checker contra **cada** `.dll`
+encontrado bajo un directorio (recursivamente) — la herramienta para "qué partes de toda una
+aplicación .NET legacy ya podría correr bajo vmnet", no un paquete a la vez:
+
+```
+vmnet analyze ./legacy-dotnet/bin [--profile=...] [--html=migration.html]
+```
+
+`internal/migrate.AnalyzeDirectory` trata a cada otro `.dll` encontrado en el mismo escaneo como
+una dependencia del mismo directorio para `AnalyzeWithDeps` — una carpeta `bin/` legacy real envía
+sus propias dependencias privadas una al lado de la otra, así que un tipo definido en un assembly y
+usado desde otro resuelve de la misma forma en que lo haría en tiempo de ejecución real, en vez de
+reportarse mal como una llamada externa no soportada solo porque se inspeccionó un solo archivo a
+la vez. Un archivo que no es un assembly .NET legible (solo nativo, corrupto, no es realmente un
+archivo PE) se salta y se reporta claramente, no se descarta en silencio — un archivo malo nunca
+aborta todo el escaneo.
+
+El resumen en texto plano agrega los propios totales de cada assembly, más dos rollups que un
+reporte de un solo assembly no tiene uso para:
+
+- **Bloqueado por categoría** — cada `FindingKind` propio de un finding cuenta como su propio
+  bucket (Reflection, Async/Task, P/Invoke, ...), *excepto* `KindUnsupportedMethod`, que en cambio
+  se re-agrupa por el namespace real de BCL de su propio target de llamada no resuelto
+  (`System.Data.SqlClient.SqlConnection::Open` se vuelve un conteo de `System.Data`) — "método BCL
+  no soportado" solo, es cierto de cientos de brechas no relacionadas y no dice nada sobre qué
+  parte de la BCL necesita realmente un candidato de migración dado.
+- **Mejores candidatos de migración** — cada entrada de `Report.PerType` a través de cada assembly
+  escaneado (un desglose que `AnalyzeWithDeps` ya calcula como un subproducto natural de su propio
+  loop por método), rankeada por la propia proporción de métodos limpios de ESE tipo, no el
+  promedio de todo el assembly — un tipo con solo 3 métodos analizados se excluye (muy poca señal
+  como para significar algo), y la lista se limita a 25 entradas. Un porcentaje alto del assembly
+  completo todavía puede esconder tipos individuales que están completamente bloqueados, y
+  viceversa; rankear por tipo es lo que realmente responde "qué clase debería portar primero".
+
+### 3.2 `vmnet bind` — generar wrappers Go idiomáticos en vez de leer un reporte del checker
+
+El checker y `vmnet analyze` responden "esto va a correr". `vmnet bind` responde la siguiente
+pregunta — "cómo lo llamo desde Go sin escribir a mano literales de string
+`Assembly.Call("Namespace.Tipo", "Método", ...)`":
+
+```
+vmnet bind <dll> --out=<dir> [--package=<nombre>]
+vmnet bind package <id>@<versión> --out=<dir> [--package=<nombre>]
+```
+
+`internal/bind.BuildModel` recorre la tabla TypeDef del assembly objetivo de la misma forma que el
+checker, pero conserva los constructores y métodos públicos de cada tipo público, no anidado, que
+no sea interfaz ni enum, en vez de solo marcar opcodes. Cada método se clasifica de forma
+independiente:
+
+- **Exactamente un overload real, con todo tipo de parámetro y retorno mapeado** (los primitivos
+  numéricos, `string`, `bool`, `byte[]`, u otro tipo enlazado de la misma corrida) → una firma Go
+  precisa y tipada. `SimpleMath.Add(int, int) int` se convierte en `func
+  SimpleMathStatic_Add(asm *vmnet.Assembly, a, b int32) (int32, error)` — sin boxing de
+  `vmnet.Value` en el sitio de llamada.
+- **Cualquier otro caso** — un conjunto de overloads real, o una firma que usa un tipo que el
+  generador todavía no mapea (genéricos, delegates, un tipo por referencia sin enlazar) — igual
+  genera un método, solo que con una firma genérica `func (...vmnet.Value) (vmnet.Value, error)` y
+  un comentario explicando por qué. Nada se descarta en silencio del output.
+- Los accessors `get_X`/`set_X` generados por el compilador se convierten en `GetX`/`SetX`, no en
+  una traducción literal, con guion bajo, del nombre de miembro IL.
+
+`internal/bind.Model.Generate` arma el código Go directamente (no `text/template` — la lógica
+condicional por tipo de miembro se lee más claro como Go plano), y luego lo valida con
+`go/format.Source` — el mismo motor que usa `gofmt` — antes de escribir nada a disco. Un bug del
+generador aparece de inmediato como un error de formateo, nunca como Go roto escrito
+silenciosamente a un archivo.
+
+Esto se verificó contra dos targets reales durante el desarrollo: el assembly de fixtures propio
+de este proyecto (`examples/bind-demo`, incluido en el repo — ver el README de ese ejemplo), y el
+paquete real, sin modificar, `Jint` 3.1.3 descargado en vivo desde nuget.org, que produjo 111 tipos
+enlazados incluyendo un wrapper `jint.NewEngine(asm)` / `engine.Evaluate(...)` funcional que
+corrió JavaScript real correctamente (`"1 + 2"` evaluó a `"3"` a través del código generado, sin
+pegamento escrito a mano).
+
 ## 4. La forma del Report
 
 `internal/checker/report.go` define:
@@ -189,6 +277,17 @@ type Report struct {
 	MethodsFlagged  int
 	Findings        []Finding
 	Status          Status
+
+	// PerType desglosa los mismos dos totales por tipo declarante
+	// ("Namespace.Tipo"), un subproducto del mismo loop por método —
+	// esto es lo que la lista "best migration candidates" de `vmnet
+	// analyze` rankea, ver §3.1.
+	PerType map[string]*TypeReport
+}
+
+type TypeReport struct {
+	MethodsAnalyzed int
+	MethodsFlagged  int
 }
 
 type Finding struct {

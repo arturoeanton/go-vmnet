@@ -41,6 +41,21 @@ type Report struct {
 	MethodsFlagged  int
 	Findings        []Finding
 	Status          Status
+
+	// PerType breaks MethodsAnalyzed/MethodsFlagged down by declaring
+	// type ("Namespace.Type", the same qualified name Finding.Method's
+	// own "Type::Method" prefix uses) — a natural byproduct of the same
+	// per-method loop AnalyzeWithDeps already runs, kept here so a
+	// caller can rank individual TYPES by their own clean-method ratio
+	// (e.g. `vmnet analyze`'s own "best migration candidates" list)
+	// without re-walking the assembly's metadata a second time.
+	PerType map[string]*TypeReport
+}
+
+// TypeReport is one TypeDef's own slice of a Report's totals.
+type TypeReport struct {
+	MethodsAnalyzed int
+	MethodsFlagged  int
 }
 
 func (r *Report) finalize() {

@@ -169,6 +169,89 @@ negative, not a real gap. `deps` is meant to be the package's **full** transitiv
 (e.g. via `internal/nuget.Resolver`), not just its direct dependencies — that's the whole point of
 the mechanism.
 
+### 3.1 HTML reports, and `vmnet analyze` for a whole legacy system
+
+Both `vmnet check` and `vmnet check package` also accept `--html=<file>`, writing the exact same
+`Report` — every stat, every finding — as a single, self-contained HTML page (no external fonts,
+scripts, or stylesheets; `internal/checker/html.go`'s own `RenderHTML`) instead of, or alongside,
+the plain-text output. A quick way to hand a compatibility result to someone who isn't going to
+read a terminal dump:
+
+```
+vmnet check --html=report.html mylib.dll
+vmnet check package --html=report.html --profile=netstandard-lite fluentvalidation@11.9.2
+```
+
+A third subcommand, `vmnet analyze <dir>`, runs the same checker against **every** `.dll` found
+under a directory (recursively) — the tool for "which parts of a whole legacy .NET application
+could I already run under vmnet," not just one package at a time:
+
+```
+vmnet analyze ./legacy-dotnet/bin [--profile=...] [--html=migration.html]
+```
+
+`internal/migrate.AnalyzeDirectory` treats every other `.dll` found in the same scan as a
+same-directory dependency for `AnalyzeWithDeps` — a real legacy `bin/` folder ships its own private
+dependencies side by side, so a type defined in one assembly and used from another resolves the
+same way it would at real runtime, instead of being misreported as an unsupported external call
+just because only one file was inspected at a time. A file that isn't a readable .NET assembly
+(native-only, corrupted, not actually a PE file) is skipped and reported plainly, not silently
+dropped — one bad file never aborts the whole scan.
+
+The plain-text summary aggregates every assembly's own totals, plus two rollups a single-assembly
+report has no use for:
+
+- **Blocked by category** — every finding's own `FindingKind` counts as its own bucket (Reflection,
+  Async/Task, P/Invoke, ...), *except* `KindUnsupportedMethod`, which is re-bucketed by the real BCL
+  namespace of its own unresolved call target instead (`System.Data.SqlClient.SqlConnection::Open`
+  becomes a `System.Data` count) — "unsupported BCL method" alone is true of hundreds of unrelated
+  gaps and says nothing about which part of the BCL a given migration candidate actually needs.
+- **Best migration candidates** — every `Report.PerType` entry across every scanned assembly (a
+  breakdown `AnalyzeWithDeps` already computes as a natural byproduct of its own per-method loop),
+  ranked by that ONE TYPE's own clean-method ratio, not the whole assembly's average — a type with
+  only 3 methods analyzed is excluded (too little signal to mean anything), and the list is capped
+  at 25 entries. A high overall assembly percentage can still hide individual types that are fully
+  blocked, and vice versa; ranking by type is what actually answers "which class should I port
+  first."
+
+### 3.2 `vmnet bind` — generating idiomatic Go wrappers instead of reading a checker report
+
+The checker and `vmnet analyze` both answer "will this run." `vmnet bind` answers the next
+question — "how do I call it from Go without writing `Assembly.Call("Namespace.Type", "Method",
+...)` string literals by hand":
+
+```
+vmnet bind <dll> --out=<dir> [--package=<name>]
+vmnet bind package <id>@<version> --out=<dir> [--package=<name>]
+```
+
+`internal/bind.BuildModel` walks the target assembly's TypeDef table the same way the checker
+does, but keeps every public, non-nested, non-interface, non-enum type's public constructors and
+methods instead of just flagging opcodes. Each method is classified independently:
+
+- **Exactly one real overload, every parameter and return type mapped** (the numeric primitives,
+  `string`, `bool`, `byte[]`, or another bound type from the same run) → a precise, typed Go
+  signature. `SimpleMath.Add(int, int) int` becomes `func SimpleMathStatic_Add(asm *vmnet.Assembly,
+  a, b int32) (int32, error)` — no `vmnet.Value` boxing at the call site.
+- **Anything else** — a real overload set, or a signature using a type the generator doesn't map
+  (generics, delegates, an unbound reference type) — still gets a generated method, just with a
+  generic `func (...vmnet.Value) (vmnet.Value, error)` signature and a doc comment explaining why.
+  Nothing is silently dropped from the output.
+- `get_X`/`set_X` compiler-generated property accessors become `GetX`/`SetX`, not a literal,
+  underscore-preserving translation of the IL member name.
+
+`internal/bind.Model.Generate` builds the Go source directly (not `text/template` — the
+conditional logic per member kind reads more clearly as plain Go), then validates it through
+`go/format.Source` — the same engine `gofmt` uses — before writing anything to disk. A generator
+bug surfaces immediately as a formatted-source error, never as broken Go silently written to a
+file.
+
+This was verified against two real targets during development: this project's own fixture
+assembly (`examples/bind-demo`, checked in — see that example's own README), and the real,
+unmodified `Jint` 3.1.3 package downloaded live from nuget.org, which produced 111 bound types
+including a working `jint.NewEngine(asm)` / `engine.Evaluate(...)` wrapper that correctly ran real
+JavaScript (`"1 + 2"` evaluated to `"3"` through the generated code, no hand-written glue).
+
 ## 4. The Report shape
 
 `internal/checker/report.go` defines:
@@ -181,6 +264,17 @@ type Report struct {
 	MethodsFlagged  int
 	Findings        []Finding
 	Status          Status
+
+	// PerType breaks the same two totals down by declaring type
+	// ("Namespace.Type"), a byproduct of the same per-method loop —
+	// this is what `vmnet analyze`'s "best migration candidates" list
+	// ranks by, see §3.1.
+	PerType map[string]*TypeReport
+}
+
+type TypeReport struct {
+	MethodsAnalyzed int
+	MethodsFlagged  int
 }
 
 type Finding struct {

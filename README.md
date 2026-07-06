@@ -245,12 +245,21 @@ Runnable, documented examples in [`examples/`](examples/):
 vmnet inspect <dll>                                    # metadata summary
 vmnet il <dll> <Type.Method>                            # decoded IL for one method
 vmnet run <dll> <Type.Method> '<json-array-of-args>'    # execute it
-vmnet check [--profile=minimal|rules|netstandard-lite] <dll>
-vmnet check package [--profile=...] <id>@<version>       # check a NuGet package without adding it
+vmnet check [--profile=minimal|rules|netstandard-lite] [--html=<file>] <dll>
+vmnet check package [--profile=...] [--html=<file>] <id>@<version>  # check a NuGet package without adding it
+vmnet analyze <dir> [--profile=...] [--html=<file>]     # scan a whole legacy .NET bin/ folder, ranked migration candidates
+vmnet bind <dll> --out=<dir> [--package=<name>]         # generate idiomatic, typed Go wrappers
+vmnet bind package <id>@<version> --out=<dir> [--package=<name>]
 vmnet add <id>[@<version>]
 vmnet restore
 vmnet packages
 ```
+
+`--html=<file>` writes the same result as a single, self-contained HTML page (no external
+fonts/scripts) instead of only printing to the terminal — see
+[`docs/en/compatibility-profile.md`](docs/en/compatibility-profile.md) §3.1 for `vmnet analyze`'s
+own cross-assembly resolution and "best migration candidates" ranking, and §3.2 for `vmnet bind`'s
+code generation (see also [`examples/bind-demo`](examples/bind-demo)).
 
 ## Architecture
 

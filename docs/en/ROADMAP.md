@@ -6209,6 +6209,74 @@ go run ./cmd/vmnet check package system.text.json@8.0.5
 ```
 
 ---
+## Fase 3.75 — HTML compatibility reports, `vmnet analyze`, and `vmnet bind`
+
+**Goal:** three product-facing features on top of the existing checker, each answering a real
+adoption question the plain-text report and low-level `Assembly.Call` API don't: "show this to
+someone who won't read a terminal dump," "which parts of a whole legacy .NET application could I
+already run," and "let me call this from Go without hand-typing method-name strings."
+
+**Result: all three shipped, verified end-to-end against real assemblies and a real, live NuGet
+package — none of it is `internal/`-only plumbing with no CLI surface.**
+
+- **`--html=<file>` on `vmnet check` and `vmnet check package`** (`internal/checker/html.go`,
+  new): renders the exact same `Report` — every stat, every finding — as a single, self-contained
+  HTML page via `html/template` (chosen specifically because real C# generic method names contain
+  `<`/`>`/`` ` ``, which `html/template`'s auto-escaping handles safely and raw string concatenation
+  would not). Dark dashboard theme, no external fonts/scripts/CDN — one file, works offline.
+- **`vmnet analyze <dir>`** (`internal/migrate`, new package): runs the checker against every
+  `.dll` found recursively under a directory, treating every other `.dll` in the same scan as a
+  same-directory dependency for `AnalyzeWithDeps` — mirroring how a real legacy `bin/` folder ships
+  its own private dependencies side by side, so a call from one assembly into another resolves the
+  same way it would at real runtime. Adds two rollups no single-assembly report has a use for:
+  "blocked by category" (every finding's own kind, except unsupported-BCL-method findings, which
+  get re-bucketed by the real BCL namespace of the unresolved call target — `System.Data.SqlClient.
+  SqlConnection::Open` counts under `System.Data`), and "best migration candidates" (every scanned
+  type ranked by its OWN clean-method ratio via the new `Report.PerType` field, not the whole
+  assembly's average — a high overall percentage can still hide individual types that are fully
+  blocked, and vice versa). A file that isn't a readable .NET assembly is skipped and reported, not
+  a fatal error — one bad file never aborts the whole scan. See `docs/en/compatibility-profile.md`
+  §3.1.
+- **`vmnet bind <dll>|package <id>@<version> --out=<dir>`** (`internal/bind`, new package):
+  generates idiomatic, typed Go wrapper code straight from a real assembly's own metadata — no
+  `Assembly.Call("Namespace.Type", "Method", ...)` string literals at the call site. A method with
+  exactly one real overload and only mapped types gets a precise Go signature; anything else
+  (overloaded, or an unmapped type — generics, delegates) still gets a generated method with a
+  generic `(...vmnet.Value) (vmnet.Value, error)` signature and an explanatory comment, never
+  silently dropped. `get_X`/`set_X` accessors become `GetX`/`SetX`. Generated source is validated
+  through `go/format.Source` (the same engine `gofmt` uses) before ever touching disk. See
+  `docs/en/compatibility-profile.md` §3.2 and `examples/bind-demo` (checked in, generated from this
+  project's own fixture assembly).
+  - Verified against the real, unmodified `Jint` 3.1.3 package downloaded live from nuget.org: 111
+    bound types generated, and a working `jint.NewEngine(asm)` / `engine.Evaluate("1 + 2", "")`
+    wrapper correctly evaluated real JavaScript end-to-end (`"3"`), no hand-written glue.
+  - Two real generator bugs found and fixed via that same real-package testing, not synthetic
+    cases: (1) a real Jint compiler-generated member name contained a literal `$` character that a
+    denylist-based identifier sanitizer didn't account for, crashing `go/format.Source` —
+    `sanitizeIdent` was rewritten as an ASCII-letter/digit whitelist instead, with a `dedupeIdent`
+    guard against the resulting higher collision rate; (2) `get_Name`/`set_Name` sanitized to
+    `Get_Name`/`Set_Name` (underscore preserved) instead of `GetName`/`SetName` — fixed by
+    special-casing the `get_`/`set_` prefix before sanitizing, rather than sanitizing the raw,
+    underscored IL member name.
+- **`Report.PerType`** (`internal/checker/report.go`): a new `map[string]*TypeReport` field,
+  populated as a natural byproduct of `AnalyzeWithDeps`'s existing per-method loop — the piece
+  `vmnet analyze`'s ranking needed that a per-assembly-only report couldn't provide.
+
+### How to verify Fase 3.75
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+go test ./internal/checker/... ./internal/migrate/... ./internal/bind/... -v
+go run ./cmd/vmnet check --html=/tmp/report.html tests/fixtures/csharp/bin/Release/netstandard2.0/Vmnet.Fixtures.dll
+go run ./cmd/vmnet analyze tests/fixtures/csharp/bin/Release/netstandard2.0
+go run ./cmd/vmnet bind tests/fixtures/csharp/bin/Release/netstandard2.0/Vmnet.Fixtures.dll --out=examples/bind-demo/generated --package=fixtures
+cd examples/bind-demo && go run .
+```
+
+---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 
 **Goal:** turn the functional engine into an adoptable product — reliable, documented, and

@@ -259,12 +259,22 @@ Ejemplos corribles y documentados en [`examples/`](examples/):
 vmnet inspect <dll>                                    # resumen de metadata
 vmnet il <dll> <Type.Method>                            # IL decodificado de un método
 vmnet run <dll> <Type.Method> '<json-array-of-args>'    # ejecutarlo
-vmnet check [--profile=minimal|rules|netstandard-lite] <dll>
-vmnet check package [--profile=...] <id>@<version>       # chequear un paquete NuGet sin agregarlo
+vmnet check [--profile=minimal|rules|netstandard-lite] [--html=<archivo>] <dll>
+vmnet check package [--profile=...] [--html=<archivo>] <id>@<version>  # chequear un paquete NuGet sin agregarlo
+vmnet analyze <dir> [--profile=...] [--html=<archivo>]  # escanea toda una carpeta bin/ .NET legacy, con candidatos de migración rankeados
+vmnet bind <dll> --out=<dir> [--package=<nombre>]       # genera wrappers Go idiomáticos y tipados
+vmnet bind package <id>@<version> --out=<dir> [--package=<nombre>]
 vmnet add <id>[@<version>]
 vmnet restore
 vmnet packages
 ```
+
+`--html=<archivo>` escribe el mismo resultado como una única página HTML autocontenida (sin
+fuentes/scripts externos) en vez de solo imprimir en la terminal — ver
+[`docs/es/compatibility-profile.md`](docs/es/compatibility-profile.md) §3.1 para la propia
+resolución entre assemblies y el ranking de "mejores candidatos de migración" de `vmnet analyze`, y
+§3.2 para la generación de código de `vmnet bind` (ver también
+[`examples/bind-demo`](examples/bind-demo)).
 
 ## Arquitectura
 

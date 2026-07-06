@@ -6512,6 +6512,81 @@ go run ./cmd/vmnet check package system.text.json@8.0.5
 
 ---
 
+## Fase 3.75 — reportes HTML de compatibilidad, `vmnet analyze`, y `vmnet bind`
+
+**Objetivo:** tres features de cara al producto sobre el checker existente, cada una respondiendo
+una pregunta real de adopción que el reporte en texto plano y la API de bajo nivel `Assembly.Call`
+no responden: "mostrar esto a alguien que no va a leer un dump de terminal", "qué partes de toda
+una aplicación .NET legacy ya podría correr", y "dejame llamar esto desde Go sin tipear a mano
+strings de nombres de método."
+
+**Resultado: las tres se entregaron, verificadas de punta a punta contra assemblies reales y un
+paquete NuGet real y en vivo — nada de esto es plumbing solo-`internal/` sin superficie de CLI.**
+
+- **`--html=<archivo>` en `vmnet check` y `vmnet check package`** (`internal/checker/html.go`,
+  nuevo): renderiza el mismo `Report` exacto — cada estadística, cada finding — como una única
+  página HTML autocontenida vía `html/template` (elegido específicamente porque los nombres reales
+  de métodos genéricos de C# contienen `<`/`>`/`` ` ``, que el auto-escaping de `html/template`
+  maneja de forma segura y la concatenación cruda de strings no). Tema oscuro de dashboard, sin
+  fuentes/scripts/CDN externos — un solo archivo, funciona offline.
+- **`vmnet analyze <dir>`** (`internal/migrate`, paquete nuevo): corre el checker contra cada
+  `.dll` encontrado recursivamente bajo un directorio, tratando cada otro `.dll` del mismo escaneo
+  como una dependencia del mismo directorio para `AnalyzeWithDeps` — imitando cómo una carpeta
+  `bin/` legacy real trae sus propias dependencias privadas al lado, así que una llamada de un
+  assembly a otro resuelve de la misma forma que lo haría en runtime real. Agrega dos rollups que un
+  reporte de un solo assembly no tiene uso para: "bloqueado por categoría" (el tipo de cada finding,
+  excepto los findings de método BCL no soportado, que se re-agrupan por el namespace BCL real del
+  target de llamada no resuelto — `System.Data.SqlClient.SqlConnection::Open` cuenta bajo
+  `System.Data`), y "mejores candidatos de migración" (cada tipo escaneado rankeado por su PROPIO
+  ratio de métodos limpios vía el nuevo campo `Report.PerType`, no el promedio de todo el assembly —
+  un porcentaje general alto todavía puede esconder tipos individuales totalmente bloqueados, y
+  viceversa). Un archivo que no es un assembly .NET legible se saltea y se reporta, no es un error
+  fatal — un archivo malo nunca aborta todo el escaneo. Ver `docs/es/compatibility-profile.md`
+  §3.1.
+- **`vmnet bind <dll>|package <id>@<versión> --out=<dir>`** (`internal/bind`, paquete nuevo):
+  genera código Go idiomático y tipado directamente de la metadata propia de un assembly real — sin
+  literales de string `Assembly.Call("Namespace.Tipo", "Método", ...)` en el sitio de llamada. Un
+  método con exactamente un overload real y solo tipos mapeados obtiene una firma Go precisa;
+  cualquier otro caso (con overload, o un tipo no mapeado — genéricos, delegates) igual obtiene un
+  método generado con una firma genérica `(...vmnet.Value) (vmnet.Value, error)` y un comentario
+  explicativo, nunca se descarta en silencio. Los accessors `get_X`/`set_X` se convierten en
+  `GetX`/`SetX`. El código generado se valida con `go/format.Source` (el mismo motor que usa
+  `gofmt`) antes de tocar disco. Ver `docs/es/compatibility-profile.md` §3.2 y
+  `examples/bind-demo` (incluido en el repo, generado desde el propio assembly de fixtures de este
+  proyecto).
+  - Verificado contra el paquete real, sin modificar, `Jint` 3.1.3 descargado en vivo desde
+    nuget.org: 111 tipos enlazados generados, y un wrapper `jint.NewEngine(asm)` /
+    `engine.Evaluate("1 + 2", "")` funcional evaluó JavaScript real de punta a punta (`"3"`), sin
+    pegamento escrito a mano.
+  - Dos bugs reales del generador encontrados y arreglados vía esa misma prueba con paquete real,
+    no casos sintéticos: (1) un nombre de miembro real generado por el compilador de Jint contenía
+    un carácter `$` literal que un sanitizador de identificadores basado en lista negra no
+    contemplaba, haciendo fallar `go/format.Source` — `sanitizeIdent` se reescribió como una lista
+    blanca de letras/dígitos ASCII, con una protección `dedupeIdent` contra la mayor tasa de
+    colisión resultante; (2) `get_Name`/`set_Name` se sanitizaban a `Get_Name`/`Set_Name` (guion
+    bajo preservado) en vez de `GetName`/`SetName` — arreglado poniendo un caso especial para el
+    prefijo `get_`/`set_` antes de sanitizar, en vez de sanitizar el nombre de miembro IL crudo, con
+    guion bajo.
+- **`Report.PerType`** (`internal/checker/report.go`): un nuevo campo `map[string]*TypeReport`,
+  poblado como subproducto natural del loop por método ya existente de `AnalyzeWithDeps` — la pieza
+  que el ranking de `vmnet analyze` necesitaba y que un reporte solo-por-assembly no podía dar.
+
+### Cómo verificar la Fase 3.75
+
+```bash
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+go test ./internal/checker/... ./internal/migrate/... ./internal/bind/... -v
+go run ./cmd/vmnet check --html=/tmp/report.html tests/fixtures/csharp/bin/Release/netstandard2.0/Vmnet.Fixtures.dll
+go run ./cmd/vmnet analyze tests/fixtures/csharp/bin/Release/netstandard2.0
+go run ./cmd/vmnet bind tests/fixtures/csharp/bin/Release/netstandard2.0/Vmnet.Fixtures.dll --out=examples/bind-demo/generated --package=fixtures
+cd examples/bind-demo && go run .
+```
+
+---
+
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
 
 **Objetivo:** convertir el motor funcional en un producto adoptable, confiable, documentado y

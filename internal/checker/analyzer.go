@@ -37,7 +37,7 @@ func Analyze(f *pe.File, md *metadata.Metadata, profile Profile) *Report {
 // the package's full transitive dependency graph (e.g. via
 // internal/nuget.Resolver), not just its direct dependencies.
 func AnalyzeWithDeps(f *pe.File, md *metadata.Metadata, deps []*metadata.Metadata, profile Profile) *Report {
-	report := &Report{Profile: profile}
+	report := &Report{Profile: profile, PerType: map[string]*TypeReport{}}
 	if asm, err := md.Assembly(1); err == nil {
 		report.AssemblyName = asm.Name
 	}
@@ -80,9 +80,17 @@ func AnalyzeWithDeps(f *pe.File, md *metadata.Metadata, deps []*metadata.Metadat
 			fullName := typeName + "::" + row.Name
 			report.MethodsAnalyzed++
 
+			tr := report.PerType[typeName]
+			if tr == nil {
+				tr = &TypeReport{}
+				report.PerType[typeName] = tr
+			}
+			tr.MethodsAnalyzed++
+
 			findings := analyzeMethod(f, md, deps, fullName, row, profile)
 			if len(findings) > 0 {
 				report.MethodsFlagged++
+				tr.MethodsFlagged++
 				report.Findings = append(report.Findings, findings...)
 			}
 		}

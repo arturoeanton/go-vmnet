@@ -7,12 +7,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	vmnet "github.com/arturoeanton/go-vmnet"
+	"github.com/arturoeanton/go-vmnet/internal/bind"
 	"github.com/arturoeanton/go-vmnet/internal/checker"
 	"github.com/arturoeanton/go-vmnet/internal/il"
 	"github.com/arturoeanton/go-vmnet/internal/metadata"
+	"github.com/arturoeanton/go-vmnet/internal/migrate"
 	"github.com/arturoeanton/go-vmnet/internal/nuget"
 	"github.com/arturoeanton/go-vmnet/internal/pe"
 )
@@ -33,6 +37,10 @@ func main() {
 		err = runRun(os.Args[2:])
 	case "check":
 		err = runCheck(os.Args[2:])
+	case "analyze":
+		err = runAnalyze(os.Args[2:])
+	case "bind":
+		err = runBind(os.Args[2:])
 	case "add":
 		err = runAdd(os.Args[2:])
 	case "restore":
@@ -54,8 +62,11 @@ func usage() {
   vmnet inspect <dll>
   vmnet il <dll> <Type.Method>
   vmnet run <dll> <Type.Method> '<json-array-of-args>'
-  vmnet check [--profile=minimal|rules|netstandard-lite] <dll>
-  vmnet check package [--profile=...] <id>@<version>
+  vmnet check [--profile=minimal|rules|netstandard-lite] [--html=<file>] <dll>
+  vmnet check package [--profile=...] [--html=<file>] <id>@<version>
+  vmnet analyze <dir> [--profile=...] [--html=<file>]
+  vmnet bind <dll> --out=<dir> [--package=<name>]
+  vmnet bind package <id>@<version> --out=<dir> [--package=<name>]
   vmnet add <id>[@<version>]
   vmnet restore
   vmnet packages`)
@@ -216,16 +227,19 @@ func runCheck(args []string) error {
 	}
 
 	profile := checker.ProfileRules
-	var dllPath string
+	var dllPath, htmlPath string
 	for _, a := range args {
-		if p, ok := strings.CutPrefix(a, "--profile="); ok {
-			profile = checker.Profile(p)
-		} else {
+		switch {
+		case strings.HasPrefix(a, "--profile="):
+			profile = checker.Profile(strings.TrimPrefix(a, "--profile="))
+		case strings.HasPrefix(a, "--html="):
+			htmlPath = strings.TrimPrefix(a, "--html=")
+		default:
 			dllPath = a
 		}
 	}
 	if dllPath == "" {
-		return fmt.Errorf("usage: vmnet check [--profile=minimal|rules|netstandard-lite] <dll>")
+		return fmt.Errorf("usage: vmnet check [--profile=minimal|rules|netstandard-lite] [--html=<file>] <dll>")
 	}
 	if err := validateProfile(profile); err != nil {
 		return err
@@ -238,9 +252,36 @@ func runCheck(args []string) error {
 	report := checker.Analyze(f, md, profile)
 	printReport(report)
 
+	name := report.AssemblyName
+	if name == "" {
+		name = dllPath
+	}
+	if err := writeHTMLReport(htmlPath, "vmnet compatibility report — "+name, []checker.NamedReport{{Name: name, Report: report}}, nil); err != nil {
+		return err
+	}
+
 	if report.Status != checker.StatusCompatible {
 		os.Exit(1)
 	}
+	return nil
+}
+
+// writeHTMLReport is a no-op when htmlPath is empty — every `--html=`
+// call site shares this one helper so `vmnet check`/`check package`/
+// `analyze` all produce the exact same report shape and the same
+// "wrote ..." confirmation message.
+func writeHTMLReport(htmlPath, title string, reports []checker.NamedReport, candidates []checker.Candidate) error {
+	if htmlPath == "" {
+		return nil
+	}
+	html, err := checker.RenderHTML(title, reports, candidates, time.Now().Format("2006-01-02 15:04:05 MST"))
+	if err != nil {
+		return fmt.Errorf("rendering HTML report: %w", err)
+	}
+	if err := os.WriteFile(htmlPath, []byte(html), 0o644); err != nil {
+		return fmt.Errorf("writing HTML report: %w", err)
+	}
+	fmt.Printf("wrote %s\n", htmlPath)
 	return nil
 }
 
@@ -255,16 +296,19 @@ func validateProfile(p checker.Profile) error {
 
 func runCheckPackage(args []string) error {
 	profile := checker.ProfileNetStandardLite
-	var spec string
+	var spec, htmlPath string
 	for _, a := range args {
-		if p, ok := strings.CutPrefix(a, "--profile="); ok {
-			profile = checker.Profile(p)
-		} else {
+		switch {
+		case strings.HasPrefix(a, "--profile="):
+			profile = checker.Profile(strings.TrimPrefix(a, "--profile="))
+		case strings.HasPrefix(a, "--html="):
+			htmlPath = strings.TrimPrefix(a, "--html=")
+		default:
 			spec = a
 		}
 	}
 	if spec == "" {
-		return fmt.Errorf("usage: vmnet check package [--profile=...] <id>@<version>")
+		return fmt.Errorf("usage: vmnet check package [--profile=...] [--html=<file>] <id>@<version>")
 	}
 	if err := validateProfile(profile); err != nil {
 		return err
@@ -353,10 +397,235 @@ func runCheckPackage(args []string) error {
 	report := checker.AnalyzeWithDeps(f, md, deps, profile)
 	printReport(report)
 
+	pkgName := fmt.Sprintf("%s@%s", pkg.Spec.Metadata.ID, pkg.Spec.Metadata.Version)
+	if err := writeHTMLReport(htmlPath, "vmnet compatibility report — "+pkgName, []checker.NamedReport{{Name: pkgName, Report: report}}, nil); err != nil {
+		return err
+	}
+
 	if report.Status != checker.StatusCompatible {
 		os.Exit(1)
 	}
 	return nil
+}
+
+// runAnalyze implements `vmnet analyze <dir>`: a whole-directory
+// migration decision tool, not a per-file checker run — see
+// internal/migrate's own doc comment for why cross-assembly resolution
+// across every DLL found in dir matters here.
+func runAnalyze(args []string) error {
+	profile := checker.ProfileNetStandardLite
+	var dir, htmlPath string
+	for _, a := range args {
+		switch {
+		case strings.HasPrefix(a, "--profile="):
+			profile = checker.Profile(strings.TrimPrefix(a, "--profile="))
+		case strings.HasPrefix(a, "--html="):
+			htmlPath = strings.TrimPrefix(a, "--html=")
+		default:
+			dir = a
+		}
+	}
+	if dir == "" {
+		return fmt.Errorf("usage: vmnet analyze <dir> [--profile=minimal|rules|netstandard-lite] [--html=<file>]")
+	}
+	if err := validateProfile(profile); err != nil {
+		return err
+	}
+
+	summary, err := migrate.AnalyzeDirectory(dir, profile)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Assemblies: %d\n", summary.TotalAssemblies)
+	fmt.Printf("Methods analyzed: %s\n", formatCount(summary.TotalMethods))
+	fmt.Printf("Runnable today: %s\n", formatCount(summary.TotalRunnable))
+	for _, cat := range migrate.BlockedByCategory(summary) {
+		fmt.Printf("Blocked by %s: %s\n", cat.Label, formatCount(cat.Count))
+	}
+	if len(summary.Skipped) > 0 {
+		fmt.Println()
+		fmt.Printf("Skipped %d file(s) that aren't readable .NET assemblies:\n", len(summary.Skipped))
+		for _, s := range summary.Skipped {
+			fmt.Printf("  %s: %s\n", s.Path, s.Reason)
+		}
+	}
+
+	if len(summary.Candidates) > 0 {
+		fmt.Println()
+		fmt.Println("Best migration candidates:")
+		for _, c := range summary.Candidates {
+			ratio := 100 * float64(c.MethodsAnalyzed-c.MethodsFlagged) / float64(c.MethodsAnalyzed)
+			fmt.Printf("- %s (%s) — %.1f%% clean (%d/%d)\n", c.Type, c.Assembly, ratio, c.MethodsAnalyzed-c.MethodsFlagged, c.MethodsAnalyzed)
+		}
+	}
+
+	if err := writeHTMLReport(htmlPath, "vmnet migration analysis — "+dir, summary.Reports, summary.Candidates); err != nil {
+		return err
+	}
+
+	if summary.TotalFlagged > 0 {
+		os.Exit(1)
+	}
+	return nil
+}
+
+// formatCount adds thousands separators (48,392, not 48392) — the exact
+// shape the user's own example output uses, and genuinely more readable
+// once a real legacy system's method count reaches five or six digits.
+func formatCount(n int) string {
+	s := fmt.Sprintf("%d", n)
+	neg := strings.HasPrefix(s, "-")
+	if neg {
+		s = s[1:]
+	}
+	var out []byte
+	for i, c := range []byte(s) {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			out = append(out, ',')
+		}
+		out = append(out, c)
+	}
+	if neg {
+		return "-" + string(out)
+	}
+	return string(out)
+}
+
+// runBind implements `vmnet bind`: generating idiomatic Go wrapper code
+// over a real assembly's or NuGet package's own public API — see
+// internal/bind's own doc comment for exactly what it can and can't map
+// precisely.
+func runBind(args []string) error {
+	if len(args) > 0 && args[0] == "package" {
+		return runBindPackage(args[1:])
+	}
+
+	var dllPath, outDir, goPackage string
+	for _, a := range args {
+		switch {
+		case strings.HasPrefix(a, "--out="):
+			outDir = strings.TrimPrefix(a, "--out=")
+		case strings.HasPrefix(a, "--package="):
+			goPackage = strings.TrimPrefix(a, "--package=")
+		default:
+			dllPath = a
+		}
+	}
+	if dllPath == "" || outDir == "" {
+		return fmt.Errorf("usage: vmnet bind <dll> --out=<dir> [--package=<name>]")
+	}
+	_, md, err := loadRaw(dllPath)
+	if err != nil {
+		return err
+	}
+	sourceName := filepath.Base(dllPath)
+	if asm, err := md.Assembly(1); err == nil && asm.Name != "" {
+		sourceName = asm.Name
+	}
+	if goPackage == "" {
+		goPackage = defaultGoPackageName(sourceName)
+	}
+	return writeBoundPackage(md, goPackage, sourceName, outDir)
+}
+
+func runBindPackage(args []string) error {
+	var spec, outDir, goPackage string
+	for _, a := range args {
+		switch {
+		case strings.HasPrefix(a, "--out="):
+			outDir = strings.TrimPrefix(a, "--out=")
+		case strings.HasPrefix(a, "--package="):
+			goPackage = strings.TrimPrefix(a, "--package=")
+		default:
+			spec = a
+		}
+	}
+	if spec == "" || outDir == "" {
+		return fmt.Errorf("usage: vmnet bind package <id>@<version> --out=<dir> [--package=<name>]")
+	}
+	id, version, err := splitPackageSpec(spec)
+	if err != nil {
+		return err
+	}
+
+	client := nuget.NewClient()
+	cache := nuget.NewCache(vmnet.NuGetCacheDir)
+	if version == "" {
+		version, err = client.LatestVersion(id)
+		if err != nil {
+			return err
+		}
+	}
+	data, err := cache.Fetch(client, id, version)
+	if err != nil {
+		return err
+	}
+	pkg, err := nuget.OpenPackage(data)
+	if err != nil {
+		return err
+	}
+	asset, ok, reason := pkg.SelectLibAsset(nuget.SelectOptions{})
+	if !ok {
+		return fmt.Errorf("%s@%s has no usable managed assembly: %s", id, version, reason)
+	}
+	f, err := pe.Parse(asset.Data)
+	if err != nil {
+		return fmt.Errorf("parsing selected assembly: %w", err)
+	}
+	md, err := metadata.Parse(f.Metadata)
+	if err != nil {
+		return fmt.Errorf("parsing selected assembly metadata: %w", err)
+	}
+
+	sourceName := fmt.Sprintf("%s@%s", pkg.Spec.Metadata.ID, pkg.Spec.Metadata.Version)
+	if goPackage == "" {
+		goPackage = defaultGoPackageName(pkg.Spec.Metadata.ID)
+	}
+	return writeBoundPackage(md, goPackage, sourceName, outDir)
+}
+
+func writeBoundPackage(md *metadata.Metadata, goPackage, sourceName, outDir string) error {
+	model, err := bind.BuildModel(md, goPackage, sourceName)
+	if err != nil {
+		return fmt.Errorf("building bind model: %w", err)
+	}
+	src, err := model.Generate()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return fmt.Errorf("creating output directory: %w", err)
+	}
+	outPath := filepath.Join(outDir, goPackage+".go")
+	if err := os.WriteFile(outPath, []byte(src), 0o644); err != nil {
+		return fmt.Errorf("writing generated Go file: %w", err)
+	}
+	fmt.Printf("wrote %s: package %s, %d bound type(s) from %s\n", outPath, goPackage, len(model.Types), sourceName)
+	if len(model.Types) == 0 {
+		fmt.Println("note: no public, top-level class or struct was found to bind — nothing was generated beyond the package clause")
+	}
+	return nil
+}
+
+// defaultGoPackageName derives a valid, lowercase Go package name from a
+// real assembly/package name — "Jint" -> "jint", "System.Text.Json" ->
+// "systemtextjson" (a real Go package name can't contain dots).
+func defaultGoPackageName(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	out := b.String()
+	if out == "" {
+		return "bound"
+	}
+	if out[0] >= '0' && out[0] <= '9' {
+		return "pkg" + out
+	}
+	return out
 }
 
 func runAdd(args []string) error {

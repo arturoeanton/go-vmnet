@@ -87,6 +87,12 @@ examples/di-demo/obj/
 examples/fluentvalidation-demo/bin/
 examples/fluentvalidation-demo/obj/
 
+# same rationale — Bench.cs is committed source, its compiled Bench.dll
+# and .vmnet/ package cache are build artifacts.
+benchmarks/bin/
+benchmarks/obj/
+benchmarks/.vmnet/
+
 # macOS Finder metadata
 .DS_Store
 
