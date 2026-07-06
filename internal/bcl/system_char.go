@@ -37,6 +37,35 @@ func init() {
 	// transformation as their culture-sensitive counterparts.
 	register("System.Char::ToUpperInvariant", true, charTransform(unicode.ToUpper))
 	register("System.Char::ToLowerInvariant", true, charTransform(unicode.ToLower))
+	// A `char` is a KindI4 on the CIL stack (this file's own top-of-file
+	// comment), so its GetHashCode follows the same identity convention
+	// system_numeric.go's int32GetHashCode already documents for
+	// Int32/Int16/Byte — the exact bit pattern doesn't need to match real
+	// .NET's own internal implementation (an implementation detail no
+	// real caller depends on byte-for-byte), only that equal chars
+	// always hash equal within one run, which every real Dictionary<char,
+	// ...>/HashSet<char> lookup actually needs. Found running real Jint/
+	// Esprima source (its own tokenizer keys character-class lookup
+	// tables by `char`), building examples/jint-advanced-demo.
+	register("System.Char::GetHashCode", true, charGetHashCode)
+	// IsSurrogatePair(char, char) / IsSurrogatePair(string, int) — found
+	// running real Jint's own JSON.stringify, which checks every
+	// character position for a UTF-16 surrogate pair while escaping a
+	// string. vmnet stores a `char`/string as a real Unicode code point
+	// (a Go rune), not a UTF-16 code unit (this file's own top comment,
+	// same "rune positions" convention stringIndexOf documents) — a
+	// genuine surrogate pair only ever exists as a UTF-16 ENCODING
+	// artifact, never as two adjacent standalone code points, so this
+	// always correctly answers false for vmnet's own strings; it's
+	// implemented with the real numeric ranges anyway (not hardcoded
+	// false) so it stays correct if a caller ever constructs raw
+	// surrogate-range char values directly, e.g. from `String.Format`
+	// re-emitting UTF-16 code units read out of some other source.
+	register("System.Char::IsSurrogatePair", true, charIsSurrogatePair)
+	// IsSurrogate(char) — the single-character sibling check
+	// IsSurrogatePair's own real caller (Jint's JSON.stringify) also
+	// makes, same "always false for a real vmnet rune" reasoning.
+	register("System.Char::IsSurrogate", true, charPredicate(isSurrogateRune))
 }
 
 // charArg accepts both real overload shapes these predicates/transforms
@@ -99,4 +128,48 @@ func charToString(args []runtime.Value) (runtime.Value, error) {
 		return runtime.Value{}, err
 	}
 	return runtime.String(string(r)), nil
+}
+
+func charGetHashCode(args []runtime.Value) (runtime.Value, error) {
+	r, err := charArg(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	return runtime.Int32(int32(r)), nil
+}
+
+// charIsSurrogatePair backs both real overloads: (char highSurrogate,
+// char lowSurrogate) and (string s, int index) — the latter checking the
+// two code points at s[index]/s[index+1], returning false (not an
+// out-of-range error) when index+1 falls outside the string, matching
+// real .NET's own documented behavior of simply answering false rather
+// than throwing for a trailing lone char.
+func charIsSurrogatePair(args []runtime.Value) (runtime.Value, error) {
+	if len(args) == 2 && args[0].Kind == runtime.KindI4 && args[1].Kind == runtime.KindI4 {
+		return runtime.Bool(isSurrogatePair(rune(args[0].I4), rune(args[1].I4))), nil
+	}
+	if len(args) == 2 && args[0].Kind == runtime.KindString && args[1].Kind == runtime.KindI4 {
+		runes := []rune(args[0].Str)
+		idx := int(args[1].I4)
+		if idx < 0 || idx+1 >= len(runes) {
+			return runtime.Bool(false), nil
+		}
+		return runtime.Bool(isSurrogatePair(runes[idx], runes[idx+1])), nil
+	}
+	return runtime.Value{}, fmt.Errorf("bcl: System.Char.IsSurrogatePair expects (char, char) or (string, int)")
+}
+
+// isSurrogatePair applies the real UTF-16 surrogate-pair definition
+// directly (high surrogate U+D800-U+DBFF followed by low surrogate
+// U+DC00-U+DFFF) — see charIsSurrogatePair's own doc comment for why
+// this always answers false against vmnet's own rune-based strings.
+func isSurrogatePair(high, low rune) bool {
+	return high >= 0xD800 && high <= 0xDBFF && low >= 0xDC00 && low <= 0xDFFF
+}
+
+// isSurrogateRune is true for either half of a UTF-16 surrogate pair
+// (U+D800-U+DFFF) — see charIsSurrogatePair's own doc comment for why
+// this always answers false against vmnet's own rune-based strings.
+func isSurrogateRune(r rune) bool {
+	return r >= 0xD800 && r <= 0xDFFF
 }

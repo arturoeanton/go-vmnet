@@ -1109,7 +1109,36 @@ func resolveTypeTokenOrGeneric(md *metadata.Metadata, token uint32) (string, err
 	switch t.Kind {
 	case metadata.SigGenericParam:
 		return "", nil
-	case metadata.SigGenericInst, metadata.SigClass, metadata.SigValueType:
+	case metadata.SigGenericInst:
+		openName, err := resolveTypeToken(md, t.Token)
+		if err != nil {
+			return "", err
+		}
+		// System.Nullable`1's own closed argument is kept (bracketed, the
+		// same "Open[[Arg]]" convention SigTypeFullName uses elsewhere) —
+		// everything else stays a bare open name, matching this
+		// function's own pre-existing behavior, to avoid changing what
+		// isinst/isAssignableTo (internal/interpreter/typecheck.go, which
+		// only ever matches this function's OPEN-name convention for a
+		// value-type generic instantiation) sees for every other
+		// GenericInst. `initobj Nullable<T>`/`= null` on a Nullable<T>
+		// field needs T's own real name to compute a correct
+		// default(Nullable<T>) — see internal/interpreter/structs.go's
+		// defaultValueFor, which previously always defaulted the "value"
+		// field to a hardcoded Int32(0) for ANY T, silently wrong for a
+		// plugin's own generic value type. Found running real Jint/
+		// Esprima: Esprima.JavaScriptParser's own
+		// `_parseVariableBindingParameters` field is
+		// `Esprima.ArrayList<Token>?` — a Nullable<T> wrapping a
+		// plugin-defined generic struct, not a BCL primitive.
+		if openName == "System.Nullable`1" && len(t.Args) == 1 {
+			argName, argErr := SigTypeFullName(md, t.Args[0])
+			if argErr == nil && argName != "" {
+				return openName + "[[" + argName + "]]", nil
+			}
+		}
+		return openName, nil
+	case metadata.SigClass, metadata.SigValueType:
 		return resolveTypeToken(md, t.Token)
 	case metadata.SigSZArray:
 		// `isinst T[]`/`is T[]` (Fase 3.27, found running real Jint/

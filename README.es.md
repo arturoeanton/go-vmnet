@@ -259,6 +259,7 @@ Ejemplos corribles y documentados en [`examples/`](examples/):
 | [`examples/nuget-basic`](examples/nuget-basic) | Agregar y restaurar un paquete NuGet real publicado, y llamar una función real de ese paquete |
 | [`examples/jint-demo`](examples/jint-demo) | Ejecución de JavaScript real vía el paquete NuGet Jint real + toda su cadena de dependencias, manejado a través de un pequeño wrapper compilado en C# |
 | [`examples/jint-nowrapper`](examples/jint-nowrapper) | El mismo demo de Jint sin ningún wrapper de C# — `Assembly.New`/`Instance.Call` manejando `Jint.Engine` directamente desde Go |
+| [`examples/jint-advanced-demo`](examples/jint-advanced-demo) | JavaScript real llevado más lejos — `var`/`let`/`const`, literales de objeto/array anidados, operadores, `Math.*`, datos estructurados desde Go — más seis bugs reales que encontró y arregló, y tres brechas más profundas y abiertas que encontró y documentó en vez de disimular |
 | [`examples/npoi-demo`](examples/npoi-demo) | Leer un archivo `.xls` legacy real (strings, números, una celda con fórmula) vía el paquete NuGet NPOI real, sin wrapper de C# |
 | [`examples/system-text-json-demo`](examples/system-text-json-demo) | Parsear JSON real vía el paquete System.Text.Json real, sin wrapper de C# |
 | [`examples/newtonsoft-json-demo`](examples/newtonsoft-json-demo) | Parsear JSON real vía el DOM "LINQ to JSON" de Newtonsoft.Json real, sin wrapper de C# |

@@ -83,5 +83,26 @@ namespace Vmnet.Fixtures
             var p = new Point(5, 6);
             return DescribeGeneric(p);
         }
+
+        // NullableOfPluginStructGetValueOrDefault: found broken building
+        // examples/jint-advanced-demo — real Esprima.JavaScriptParser has
+        // a field typed `Esprima.ArrayList<Token>?` (Nullable<T> wrapping
+        // a plugin-defined GENERIC value type, not a numeric primitive),
+        // and `.GetValueOrDefault()` on it, never yet assigned, used to
+        // return a raw int32 where a real, zeroed struct was expected —
+        // internal/bcl/system_nullable.go's own shared Nullable`1 native
+        // hardcodes Int32(0) as its "value" field default, correct for
+        // the dominant real case (int?/double?/bool?) but silently wrong
+        // for any other T. `Point` here is non-generic, but the fix
+        // (assembly.go's nullableValueTypeDefault, internal/interpreter/
+        // structs.go's nullableDefaultFor) applies identically regardless
+        // of whether T is itself generic — this is the simplest fixture
+        // that exercises the same "T is a plugin struct" class of bug.
+        public static int NullableOfPluginStructGetValueOrDefault()
+        {
+            Point? p = null;
+            var got = p.GetValueOrDefault();
+            return got.SumCoords();
+        }
     }
 }

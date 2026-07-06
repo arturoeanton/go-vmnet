@@ -2477,6 +2477,9 @@ func (asm *Assembly) fieldOrLocalDefault(sig metadata.SigType, depth int) (runti
 		return asm.valueTypeDefault(sig.Token, depth), nil
 	case metadata.SigGenericInst:
 		if sig.GenericInstIsValueType {
+			if def, ok := asm.nullableValueTypeDefault(sig, depth); ok {
+				return def, nil
+			}
 			return asm.valueTypeDefault(sig.Token, depth), nil
 		}
 		return runtime.Null(), nil
@@ -2541,6 +2544,49 @@ func (asm *Assembly) valueTypeDefault(tok metadata.Token, depth int) runtime.Val
 		return runtime.Int32(0)
 	}
 	return runtime.StructVal(runtime.NewStruct(t))
+}
+
+// nullableValueTypeDefault special-cases default(Nullable<T>) when T
+// itself needs a non-trivial default — internal/bcl/system_nullable.go's
+// nullableType is a single, shared synthetic Type with a hardcoded
+// Int32(0) default for its "value" field, correct for the dominant real
+// case (int?/double?/bool?) but silently wrong for any other T. Found
+// running real Jint/Esprima: Esprima.JavaScriptParser's own
+// `_parseVariableBindingParameters` field is `ArrayList<Token>?` — a
+// plugin-defined GENERIC VALUE TYPE wrapped in Nullable<T>, not a
+// primitive — and `_parseVariableBindingParameters.GetValueOrDefault()`
+// on a never-yet-assigned field returned a raw int32 where an
+// ArrayList<Token> struct was expected, crashing several calls deep
+// (parameters.Clear()) with a NullReferenceException that looked
+// completely unrelated to Nullable at first. Recomputes hasValue=false/
+// value=default(T) fresh for this specific call site's own closed T
+// (reusing fieldOrLocalDefault itself, so T can be anything
+// fieldOrLocalDefault already knows how to default — numeric, a BCL
+// struct, or another plugin value type) rather than trusting the shared
+// nullableType's own one-size-fits-all placeholder. ok is false for
+// anything that isn't really Nullable`1 (with exactly one generic
+// argument), in which case the caller falls back to the existing
+// asm.valueTypeDefault path unchanged.
+func (asm *Assembly) nullableValueTypeDefault(sig metadata.SigType, depth int) (runtime.Value, bool) {
+	if len(sig.Args) != 1 {
+		return runtime.Value{}, false
+	}
+	name, err := resolveTypeTokenName(asm.md, sig.Token)
+	if err != nil || name != "System.Nullable`1" {
+		return runtime.Value{}, false
+	}
+	t, ok := bcl.LookupValueType(name)
+	if !ok {
+		return runtime.Value{}, false
+	}
+	valueDefault, err := asm.fieldOrLocalDefault(sig.Args[0], depth+1)
+	if err != nil {
+		return runtime.Value{}, false
+	}
+	s := runtime.NewStruct(t)
+	s.Fields[0] = runtime.Bool(false)
+	s.Fields[1] = valueDefault
+	return runtime.StructVal(s), true
 }
 
 func splitTypeName(typeName string) (namespace, name string) {

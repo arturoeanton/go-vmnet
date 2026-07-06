@@ -44,6 +44,11 @@ tests/fixtures/csharp-pinvoke/obj/
 examples/jint-demo/bin/
 examples/jint-demo/obj/
 
+# same rationale — JintAdvancedWrapper.cs is committed source, the
+# compiled JintAdvancedWrapper.dll it produces is not.
+examples/jint-advanced-demo/bin/
+examples/jint-advanced-demo/obj/
+
 # .NET build output for the examples/closedxml-demo wrapper (same
 # rationale as jint-demo above — GraphicEngineWrapper.cs is committed
 # source, the compiled GraphicEngineWrapper.dll it produces is not)

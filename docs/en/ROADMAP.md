@@ -6335,6 +6335,99 @@ go run .
 ```
 
 ---
+## Fase 3.77 — `examples/jint-advanced-demo`: six real bugs fixed, three genuinely open gaps found and root-caused
+
+**Goal:** a Jint demo that goes past "1 + 2" — `var`/`let`/`const`, object/array literals,
+closures, array higher-order methods, an ES6 class hierarchy, template literals, `JSON.stringify`,
+and calling a named JS function with host-supplied arguments — to actually verify how much of
+real, everyday JavaScript already runs under vmnet, not just the narrow expression shapes the two
+existing Jint demos exercise.
+
+**Result: a real, working demo shipped, six genuine BCL gaps found and fixed, and three deeper,
+still-open gaps found and root-caused precisely enough to state exactly what's broken and why —
+none of them narrow one-off misses, each one a wall hit from a distinct, common JS feature.**
+
+- **Six real bugs found and fixed**, all discovered building this demo's own first drafts against
+  real Jint/Esprima code paths no previous example exercised:
+  - `System.Char::GetHashCode` — didn't exist at all (Esprima's own tokenizer keys character-class
+    lookup tables by `char`).
+  - **`Nullable<T>` defaulted to the wrong runtime shape for a plugin-defined generic value
+    type** — `internal/bcl/system_nullable.go`'s single, shared `Nullable\`1` native hardcodes
+    `Int32(0)` as its "value" field default, correct for the dominant real case
+    (`int?`/`double?`/`bool?`) but silently wrong for any other `T`. `Esprima.JavaScriptParser`'s
+    own `_parseVariableBindingParameters` field is `ArrayList<Token>?` — `T` a plugin-defined
+    GENERIC value type, not a numeric primitive — and `.GetValueOrDefault()` on it (never yet
+    assigned) returned a raw int32 where a real, zeroed `ArrayList<Token>` struct was expected,
+    crashing several calls later with a `NullReferenceException` that looked completely unrelated
+    to `Nullable` at first (`"Esprima.ArrayList\`1._count"`). Fixed in two places: `assembly.go`'s
+    new `nullableValueTypeDefault` (field defaults — the real closed generic argument was already
+    available in `metadata.SigType.Args`, just discarded by `fieldOrLocalDefault`'s own
+    `SigGenericInst` case) and `internal/interpreter/structs.go`'s new `nullableDefaultFor`
+    (`initobj` — needed `internal/ir/builder.go`'s `resolveTypeTokenOrGeneric` to actually encode
+    `T`'s name for `System.Nullable\`1` specifically, `"System.Nullable\`1[[T]]"`, since it
+    previously discarded every generic instantiation's own type arguments unconditionally).
+  - `System.Array::Copy`'s 3-arg overload (`Array, Array, int`, implicitly
+    `sourceIndex=destinationIndex=0`) and `System.Array::Clear` (both real overloads) didn't
+    exist — `Esprima.ArrayList\`1.Clear()`'s own real `Array.Clear(_items, 0, _count);` call needed
+    both.
+  - `System.Runtime.CompilerServices.RuntimeHelpers::GetHashCode` — didn't exist (Jint's own
+    internal object/property bookkeeping hashes by reference identity).
+  - `System.Char::IsSurrogate`/`IsSurrogatePair` — didn't exist (Jint's own `JSON.stringify` checks
+    every character position for a UTF-16 surrogate pair while escaping a string).
+  - `System.Collections.Generic.List\`1::get_Capacity`/`set_Capacity` — didn't exist (Jint's own
+    internal property storage checks `Capacity` the same way `ArrayList<T>` does; `set_Capacity`
+    is a real no-op, matching real .NET's own "preallocation hint" semantics).
+  - All six are regression-tested against real C# fixtures (`tests/fixtures/csharp/Arrays.cs`,
+    `CheapWins.cs`, `Structs.cs`), not just proven by the demo running end to end.
+- **Three deeper, genuinely open gaps found and root-caused, not fixed** — each one a wall hit
+  from a distinct, common real JS feature, not a narrow miss a single native could close:
+  - **Any JS `function` at all** (named, anonymous, or arrow — even one never called) fails while
+    Jint builds the function object itself. Root-caused precisely: `Function.SetFunctionName`'s
+    own `_nameDescriptor` field (declared type `PropertyDescriptor`, a reference type) ends up
+    holding a reference to the function object itself instead of `null`, so the next read passes
+    the WRONG object into `ObjectInstance.UnwrapJsValue(PropertyDescriptor desc, ...)`, which then
+    fails looking up `_flags` on it (`"Jint.Runtime.Descriptors.PropertyDescriptor has no field
+    \"_flags\""`, receiver actually a `Jint.Native.Function.ScriptFunction`). `buildType` itself was
+    checked directly and is NOT the problem — every real `PropertyDescriptor` subclass
+    (`AllForbiddenDescriptor`, `LazyPropertyDescriptor`,
+    `GetSetPropertyDescriptor+ThrowerPropertyDescriptor`) builds with correctly-inherited
+    `_flags`/`_value` fields, confirmed by instrumenting `buildType` directly. The bug is a field
+    aliasing/identity issue somewhere in how `ScriptFunction` gets constructed, not in vmnet's
+    general type-building machinery.
+  - **Array growth** (`.push`, `.slice()`, `.sort()`, `.concat()`, `.reverse()` on a copy) fails
+    with `"compare on mismatched value kinds (7, 1)"` (`KindObject` vs `KindI4`) — something in
+    Jint's own internal array-storage growth path boxes or compares a value incorrectly. A plain
+    array literal, indexing, and `.length` all work fine; it's specifically growing or copying an
+    array's backing storage that doesn't.
+  - **String methods** (`.split`, `.trim`, `.charAt`, chained `.toUpperCase()`), template literals,
+    and `JSON.stringify` all fail, two different ways: string methods hit a
+    `Jint.Native.JsValue._type` null reference (a distinct bug from the array one above); template
+    literals and `JSON.stringify` hit an unimplemented `sizeof` IL opcode inside
+    `System.SpanHelpers.CopyTo` — a real, general gap (`sizeof` on an open generic type parameter
+    needs a per-instantiation memory-layout size vmnet's type-erased `Value` model doesn't track
+    anywhere today), not something a single new native could close.
+- **`examples/jint-advanced-demo`** (new): ships with a script exercising every one of the six
+  fixes above (the multi-declarator `var` statement alone needs the `Nullable<T>` fix), explicitly
+  avoiding all three open gaps, with its own README documenting exactly what was tried, what broke,
+  and why — see that README for the full account, including why its own heavier loop runs 2,000
+  iterations rather than a rounder, more "impressive" number (each JS loop iteration compounds into
+  dozens of real vmnet instructions across Jint's own tree-walking evaluator, so vmnet's own default
+  10,000,000-instruction budget is reached far sooner than "instruction count" alone would suggest —
+  1,000-3,000 iterations succeed, 5,000+ hit the limit, confirmed empirically).
+
+### How to verify Fase 3.77
+
+```bash
+dotnet build tests/fixtures/csharp/Fixtures.csproj -c Release
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+go test -run "TestArrays|TestStructs$|TestCheapWins$" -v .
+cd examples/jint-advanced-demo && dotnet build -c Release && go run .
+```
+
+---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 
 **Goal:** turn the functional engine into an adoptable product — reliable, documented, and

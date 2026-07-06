@@ -20,6 +20,9 @@ func (m *Machine) defaultValueFor(typeFullName string) runtime.Value {
 	if typeFullName == "" {
 		return runtime.Null()
 	}
+	if def, ok := m.nullableDefaultFor(typeFullName); ok {
+		return def
+	}
 	// A closed generic instantiation's own encoded name (e.g.
 	// "System.ValueTuple`2[[System.Reflection.ConstructorInfo],
 	// [System.Reflection.ParameterInfo[]]]", ir/builder.go's
@@ -62,6 +65,47 @@ func (m *Machine) defaultValueFor(typeFullName string) runtime.Value {
 		return runtime.Int32(0)
 	}
 	return runtime.StructVal(runtime.NewStruct(t))
+}
+
+// nullableDefaultFor computes default(Nullable<T>) — hasValue=false,
+// value=default(T) — for the one case ir/builder.go's
+// resolveTypeTokenOrGeneric encodes T into typeFullName for at all
+// ("System.Nullable`1[[T]]", the same "Open[[Arg]]" convention
+// SigTypeFullName uses elsewhere): bcl.LookupValueType's shared
+// nullableType (internal/bcl/system_nullable.go) hardcodes Int32(0) as
+// ITS OWN "value" field default, correct for the dominant real case
+// (int?/double?/bool?) but silently wrong for any other T. Found running
+// real Jint/Esprima: Esprima.JavaScriptParser's own
+// `_parseVariableBindingParameters` field is `Esprima.ArrayList<Token>?`
+// — a Nullable<T> wrapping a plugin-defined generic struct, not a BCL
+// primitive — and `_parseVariableBindingParameters = null;` (compiling
+// to `initobj Nullable<ArrayList<Token>>`) used to leave the "value"
+// field a raw int32 where an ArrayList<Token> struct was expected,
+// crashing several calls later with a NullReferenceException that
+// looked completely unrelated to Nullable at first. Recurses through
+// defaultValueFor itself for T's own default, so T can be anything this
+// function already knows how to default (numeric, a BCL struct, or
+// another plugin value type) — false for anything that isn't really a
+// closed Nullable`1[[T]] encoding, in which case the caller falls back
+// to its own existing GenericOpenName/bcl.LookupValueType path
+// unchanged (the shared nullableType, correct for a numeric T).
+func (m *Machine) nullableDefaultFor(typeFullName string) (runtime.Value, bool) {
+	const openName = "System.Nullable`1"
+	if bcl.GenericOpenName(typeFullName) != openName || typeFullName == openName {
+		return runtime.Value{}, false
+	}
+	args := bcl.ClosedGenericArgs(typeFullName)
+	if len(args) != 1 {
+		return runtime.Value{}, false
+	}
+	t, ok := bcl.LookupValueType(openName)
+	if !ok {
+		return runtime.Value{}, false
+	}
+	s := runtime.NewStruct(t)
+	s.Fields[0] = runtime.Bool(false)
+	s.Fields[1] = m.defaultValueFor(args[0])
+	return runtime.StructVal(s), true
 }
 
 // primitiveDefaults maps the CIL primitive value type names to their

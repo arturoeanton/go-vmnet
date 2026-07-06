@@ -243,6 +243,7 @@ Runnable, documented examples in [`examples/`](examples/):
 | [`examples/nuget-basic`](examples/nuget-basic) | Adding and restoring a real published NuGet package, then calling a real function from it |
 | [`examples/jint-demo`](examples/jint-demo) | Real JavaScript execution via the real Jint NuGet package + its full dependency chain, driven through a small compiled C# wrapper |
 | [`examples/jint-nowrapper`](examples/jint-nowrapper) | The same Jint demo with zero C# wrapper — `Assembly.New`/`Instance.Call` driving `Jint.Engine` directly from Go |
+| [`examples/jint-advanced-demo`](examples/jint-advanced-demo) | Real JavaScript pushed harder — `var`/`let`/`const`, nested object/array literals, operators, `Math.*`, structured data from Go — plus six real bugs it found and fixed, and three deeper, open gaps it found and documented instead of papering over |
 | [`examples/npoi-demo`](examples/npoi-demo) | Reading a real legacy `.xls` binary file (strings, numbers, a formula cell) through the real NPOI NuGet package, zero C# wrapper |
 | [`examples/system-text-json-demo`](examples/system-text-json-demo) | Parsing real JSON through the real System.Text.Json package, zero C# wrapper |
 | [`examples/newtonsoft-json-demo`](examples/newtonsoft-json-demo) | Parsing real JSON through the real Newtonsoft.Json "LINQ to JSON" DOM, zero C# wrapper |

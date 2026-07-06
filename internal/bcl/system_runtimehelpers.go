@@ -25,6 +25,20 @@ func init() {
 	// layer above this, deterministically and recoverably, well before any
 	// real Go-level stack ever gets close to overflowing.
 	register("System.Runtime.CompilerServices.RuntimeHelpers::EnsureSufficientExecutionStack", false, objectCtorNoop)
+	// RuntimeHelpers.GetHashCode(object) — the *identity* hash code,
+	// deliberately bypassing whatever GetHashCode() override the actual
+	// receiver's type might declare (real .NET uses this to hash by
+	// reference identity even when a type overrides equality/hashing,
+	// e.g. a real object used as a WeakMap/ConditionalWeakTable-style
+	// cache key). vmnet's own valueHash (system_object.go, backing the
+	// plain virtual Object.GetHashCode already) never dispatches to an
+	// overridden GetHashCode() either — every Kind hashes structurally/
+	// by identity already — so reusing it here gives the same real
+	// answer real callers need, not a separate implementation. Found
+	// running real Jint: object/array literal construction hits this via
+	// Jint's own internal dictionary bookkeeping (Fase, examples/jint-
+	// advanced-demo).
+	register("System.Runtime.CompilerServices.RuntimeHelpers::GetHashCode", true, objectGetHashCode)
 }
 
 func runtimeHelpersIsReferenceOrContainsReferencesFalse(args []runtime.Value) (runtime.Value, error) {

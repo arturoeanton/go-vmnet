@@ -6648,6 +6648,110 @@ go run .
 ```
 
 ---
+## Fase 3.77 — `examples/jint-advanced-demo`: seis bugs reales arreglados, tres brechas genuinamente abiertas encontradas
+
+**Objetivo:** un demo de Jint que vaya más allá de "1 + 2" — `var`/`let`/`const`, literales de
+objeto/array, closures, métodos de orden superior de arrays, una jerarquía de clases ES6, template
+literals, `JSON.stringify`, y llamar a una función JS nombrada con argumentos provistos por el
+host — para verificar de verdad cuánto de JavaScript real y cotidiano ya corre bajo vmnet, no solo
+las formas de expresión angostas que los dos demos de Jint existentes ejercitan.
+
+**Resultado: un demo real y funcionando entregado, seis brechas genuinas de BCL encontradas y
+arregladas, y tres brechas más profundas, todavía abiertas, encontradas y con causa raíz
+identificada con precisión suficiente para decir exactamente qué está roto y por qué — ninguna de
+ellas un hueco angosto y puntual, cada una un muro real encontrado desde una feature de JS distinta
+y común.**
+
+- **Seis bugs reales encontrados y arreglados**, todos descubiertos construyendo los primeros
+  borradores de este demo contra caminos de código reales de Jint/Esprima que ningún ejemplo
+  anterior ejercitaba:
+  - `System.Char::GetHashCode` — no existía en absoluto (el propio tokenizer de Esprima usa `char`
+    como clave en sus tablas de lookup de clases de carácter).
+  - **`Nullable<T>` tenía el default equivocado para un tipo valor genérico definido por el
+    plugin** — el único `Nullable\`1` nativo compartido de `internal/bcl/system_nullable.go`
+    hardcodea `Int32(0)` como default de su campo "value", correcto para el caso real dominante
+    (`int?`/`double?`/`bool?`) pero silenciosamente equivocado para cualquier otro `T`. El propio
+    campo `_parseVariableBindingParameters` de `Esprima.JavaScriptParser` es `ArrayList<Token>?` —
+    `T` un tipo valor GENÉRICO definido por el plugin, no un primitivo numérico — y
+    `.GetValueOrDefault()` sobre él (todavía nunca asignado) devolvía un int32 crudo donde se
+    esperaba un struct `ArrayList<Token>` real y en cero, fallando varias llamadas después con un
+    `NullReferenceException` que al principio parecía completamente ajeno a `Nullable`
+    (`"Esprima.ArrayList\`1._count"`). Arreglado en dos lugares: el nuevo
+    `nullableValueTypeDefault` de `assembly.go` (defaults de campo — el argumento genérico cerrado
+    real ya estaba disponible en `metadata.SigType.Args`, solo que el propio caso `SigGenericInst`
+    de `fieldOrLocalDefault` lo descartaba) y el nuevo `nullableDefaultFor` de
+    `internal/interpreter/structs.go` (`initobj` — necesitaba que `resolveTypeTokenOrGeneric` de
+    `internal/ir/builder.go` codificara de verdad el nombre de `T` específicamente para
+    `System.Nullable\`1`, `"System.Nullable\`1[[T]]"`, ya que antes descartaba incondicionalmente los
+    argumentos de tipo de cualquier instanciación genérica).
+  - El overload de 3 argumentos de `System.Array::Copy` (`Array, Array, int`, implícitamente
+    `sourceIndex=destinationIndex=0`) y `System.Array::Clear` (ambos overloads reales) no
+    existían — el propio `Array.Clear(_items, 0, _count);` real de `Esprima.ArrayList\`1.Clear()`
+    necesitaba los dos.
+  - `System.Runtime.CompilerServices.RuntimeHelpers::GetHashCode` — no existía (la propia
+    contabilidad interna de objetos/propiedades de Jint hashea por identidad de referencia).
+  - `System.Char::IsSurrogate`/`IsSurrogatePair` — no existían (el propio `JSON.stringify` de Jint
+    chequea cada posición de carácter por un par sustituto UTF-16 al escapar un string).
+  - `System.Collections.Generic.List\`1::get_Capacity`/`set_Capacity` — no existían (el propio
+    almacenamiento interno de propiedades de Jint chequea `Capacity` de la misma forma que
+    `ArrayList<T>`; `set_Capacity` es un no-op real, coincidiendo con la propia semántica de
+    "sugerencia de preasignación" del .NET real).
+  - Los seis tienen test de regresión contra fixtures C# reales (`tests/fixtures/csharp/Arrays.cs`,
+    `CheapWins.cs`, `Structs.cs`), no solo probados por el demo corriendo de punta a punta.
+- **Tres brechas más profundas, genuinamente abiertas, encontradas y con causa raíz identificada,
+  no arregladas** — cada una un muro real encontrado desde una feature de JS distinta y común, no
+  un hueco angosto que un solo nativo pudiera cerrar:
+  - **Cualquier `function` de JS en absoluto** (nombrada, anónima, o arrow — incluso una nunca
+    llamada) falla mientras Jint construye el propio objeto función. Causa raíz identificada con
+    precisión: el propio campo `_nameDescriptor` de `Function.SetFunctionName` (tipo declarado
+    `PropertyDescriptor`, un tipo referencia) termina sosteniendo una referencia al propio objeto
+    función en vez de `null`, así que la siguiente lectura pasa el objeto EQUIVOCADO a
+    `ObjectInstance.UnwrapJsValue(PropertyDescriptor desc, ...)`, que después falla buscando
+    `_flags` en él (`"Jint.Runtime.Descriptors.PropertyDescriptor has no field \"_flags\""`, el
+    receptor en realidad un `Jint.Native.Function.ScriptFunction`). El propio `buildType` se chequeó
+    directamente y NO es el problema — cada subclase real de `PropertyDescriptor`
+    (`AllForbiddenDescriptor`, `LazyPropertyDescriptor`,
+    `GetSetPropertyDescriptor+ThrowerPropertyDescriptor`) se construye con los campos
+    `_flags`/`_value` correctamente heredados, confirmado instrumentando `buildType` directamente.
+    El bug es un problema de aliasing/identidad de campo en algún lugar de cómo se construye
+    `ScriptFunction`, no en la maquinaria general de construcción de tipos de vmnet.
+  - **El crecimiento de arrays** (`.push`, `.slice()`, `.sort()`, `.concat()`, `.reverse()` sobre
+    una copia) falla con `"compare on mismatched value kinds (7, 1)"` (`KindObject` vs `KindI4`) —
+    algo en el propio camino interno de crecimiento de almacenamiento de arrays de Jint boxea o
+    compara un valor incorrectamente. Un literal de array plano, indexado, y `.length` funcionan
+    bien; es específicamente crecer o copiar el almacenamiento interno de un array lo que no.
+  - **Los métodos de string** (`.split`, `.trim`, `.charAt`, `.toUpperCase()` encadenado), los
+    template literals, y `JSON.stringify` fallan todos, de dos formas distintas: los métodos de
+    string chocan con una referencia nula de `Jint.Native.JsValue._type` (un bug distinto del de
+    arrays de arriba); los template literals y `JSON.stringify` chocan con un opcode IL `sizeof` no
+    implementado dentro de `System.SpanHelpers.CopyTo` — una brecha real y general (`sizeof` sobre
+    un parámetro de tipo genérico abierto necesita un tamaño de layout de memoria por instanciación
+    que el modelo `Value` con borrado de tipos de vmnet no rastrea en ningún lado hoy), no algo que
+    un solo nativo nuevo pudiera cerrar.
+- **`examples/jint-advanced-demo`** (nuevo): se entrega con un script que ejercita cada uno de los
+  seis arreglos de arriba (la sola declaración `var` con múltiples variables ya necesita el arreglo
+  de `Nullable<T>`), evitando explícitamente las tres brechas abiertas, con su propio README
+  documentando exactamente qué se probó, qué se rompió, y por qué — ver ese README para el relato
+  completo, incluyendo por qué su propio loop más pesado corre 2.000 iteraciones en vez de un número
+  más redondo y "impresionante" (cada iteración de loop JS se compone en docenas de instrucciones
+  reales de vmnet a través del propio evaluador de árbol de Jint, así que el propio presupuesto por
+  defecto de 10.000.000 de instrucciones de vmnet se alcanza mucho antes de lo que "cantidad de
+  iteraciones" solo sugeriría — 1.000-3.000 iteraciones funcionan, 5.000+ chocan con el límite,
+  confirmado empíricamente).
+
+### Cómo verificar la Fase 3.77
+
+```bash
+dotnet build tests/fixtures/csharp/Fixtures.csproj -c Release
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+go test -run "TestArrays|TestStructs$|TestCheapWins$" -v .
+cd examples/jint-advanced-demo && dotnet build -c Release && go run .
+```
+
+---
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
 
 **Objetivo:** convertir el motor funcional en un producto adoptable, confiable, documentado y

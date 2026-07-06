@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 
 namespace Vmnet.Fixtures
 {
@@ -86,6 +87,62 @@ namespace Vmnet.Fixtures
             var okFound = d.TryGetValue("a", out found);
             var okMissing = d.TryGetValue("z", out missing);
             return (okFound ? 1 : 0) * 100 + found * 10 + (okMissing ? 1 : 0);
+        }
+
+        // CharGetHashCode: found missing entirely (not a wrong-answer
+        // bug, a genuine gap) building examples/jint-advanced-demo, whose
+        // real Jint/Esprima source calls this from its own tokenizer's
+        // character-class lookup tables. Real .NET's own exact bit
+        // pattern isn't the contract — only that equal chars hash equal —
+        // so this just checks that invariant, not a specific value.
+        public static bool CharGetHashCode()
+        {
+            return 'x'.GetHashCode() == 'x'.GetHashCode() && 'x'.GetHashCode() != 'y'.GetHashCode();
+        }
+
+        // CharSurrogateChecks: also found missing building the same demo
+        // (real Jint's own JSON.stringify checks every character position
+        // for a UTF-16 surrogate pair while escaping a string). vmnet
+        // strings store real Unicode code points (runes), never raw
+        // UTF-16 surrogate halves, so both real .NET surrogate range
+        // values used directly here (0xD800/0xDC00) are the only way to
+        // exercise the real numeric-range check at all.
+        public static string CharSurrogateChecks()
+        {
+            var result = "";
+            result += char.IsSurrogate((char)0xD800) ? "1" : "0";
+            result += char.IsSurrogate('x') ? "1" : "0";
+            result += char.IsSurrogatePair((char)0xD800, (char)0xDC00) ? "1" : "0";
+            result += char.IsSurrogatePair('x', 'y') ? "1" : "0";
+            return result;
+        }
+
+        // RuntimeHelpersGetHashCode: found missing entirely building the
+        // same demo (real Jint's own internal dictionary bookkeeping for
+        // object/array literal construction calls this directly, to hash
+        // by reference identity regardless of any GetHashCode() override
+        // the receiver's own type might declare).
+        public static bool RuntimeHelpersGetHashCode()
+        {
+            var o = new object();
+            return RuntimeHelpers.GetHashCode(o) == RuntimeHelpers.GetHashCode(o);
+        }
+
+        // ListCapacity: found missing entirely building the same demo
+        // (real Jint's own internal property storage uses a List<T> the
+        // same way Esprima's ArrayList<T> does, and checks Capacity
+        // before growing/serializing it). vmnet's own List<T> has no
+        // separate capacity/count distinction (get_Capacity reports the
+        // current Count itself, set_Capacity is a no-op) — this just
+        // confirms both are callable and Capacity never reports less
+        // than the real Count.
+        public static int ListCapacity()
+        {
+            var xs = new List<int>();
+            xs.Add(1);
+            xs.Add(2);
+            xs.Capacity = 10;
+            return xs.Capacity >= xs.Count ? 1 : 0;
         }
     }
 }

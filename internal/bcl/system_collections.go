@@ -185,6 +185,19 @@ func init() {
 	register("System.Collections.Generic.List`1::.ctor", false, listCtorInPlace)
 	register("System.Collections.Generic.List`1::Add", false, listAdd)
 	register("System.Collections.Generic.List`1::get_Count", true, listCount)
+	// Capacity (found running real Jint: its own internal PropertyDescriptor
+	// storage uses a List`1 the same way ArrayList<T> does, and checks
+	// Capacity before serialization/growth). vmnet's nativeList is a plain
+	// Go slice with no separate capacity/length distinction of its own
+	// (append already grows it as needed) — get_Capacity reports the
+	// current length itself as the best available proxy (real Capacity is
+	// always >= Count; reporting exactly Count is the smallest value that
+	// keeps that invariant true, and no real caller found so far depends
+	// on Capacity being strictly larger). set_Capacity is a no-op: it's a
+	// pure preallocation hint in real .NET too, never something correct
+	// code depends on to observe a specific value afterward.
+	register("System.Collections.Generic.List`1::get_Capacity", true, listCount)
+	register("System.Collections.Generic.List`1::set_Capacity", false, listSetCapacityNoop)
 	// IsReadOnly (Fase 3.74, found via System.Text.Json's own generic
 	// collection-converter internals — ICollectionOfTConverter<T,
 	// TElement>.CreateCollection and siblings check IsReadOnly on the
@@ -739,6 +752,18 @@ func listClear(args []runtime.Value) (runtime.Value, error) {
 		return runtime.Value{}, err
 	}
 	l.items = l.items[:0]
+	return runtime.Value{}, nil
+}
+
+// listSetCapacityNoop backs List<T>.set_Capacity — see get_Capacity's own
+// registration comment for why this is a real, deliberate no-op rather
+// than tracking a separate value: still validates the receiver is a real
+// list (matching every other setter here), just doesn't need the new
+// value for anything.
+func listSetCapacityNoop(args []runtime.Value) (runtime.Value, error) {
+	if _, err := asList(args); err != nil {
+		return runtime.Value{}, err
+	}
 	return runtime.Value{}, nil
 }
 

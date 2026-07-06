@@ -215,6 +215,26 @@ func TestArrays(t *testing.T) {
 	if got := out.Native().(int32); got != 6 {
 		t.Errorf("Arrays.SumArray() = %d, want 6", got)
 	}
+
+	t.Run("Array.Copy 3-arg overload", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.Arrays", "ArrayCopyThreeArg")
+		if err != nil {
+			t.Fatalf("ArrayCopyThreeArg() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 6 {
+			t.Errorf("ArrayCopyThreeArg() = %d, want 6", got)
+		}
+	})
+
+	t.Run("Array.Clear whole and ranged", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.Arrays", "ArrayClearWholeAndRange")
+		if err != nil {
+			t.Fatalf("ArrayClearWholeAndRange() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 5 {
+			t.Errorf("ArrayClearWholeAndRange() = %d, want 5", got)
+		}
+	})
 }
 
 // TestByRef exercises the managed-pointer support added in Fase 3.5
@@ -393,6 +413,16 @@ func TestStructs(t *testing.T) {
 		}
 		if v := direct.Native().(int32); v != 42 {
 			t.Errorf("DirectNullableAssignTest() = %d, want 42", v)
+		}
+	})
+
+	t.Run("Nullable<T> of a plugin struct defaults to a real zeroed struct, not Int32(0)", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.Structs", "NullableOfPluginStructGetValueOrDefault")
+		if err != nil {
+			t.Fatalf("NullableOfPluginStructGetValueOrDefault() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 0 {
+			t.Errorf("NullableOfPluginStructGetValueOrDefault() = %d, want 0", got)
 		}
 	})
 }
@@ -862,6 +892,46 @@ func TestCheapWins(t *testing.T) {
 		}
 		if got := out.Native().(int32); got != 200 {
 			t.Errorf("DictTryGetValue() = %d, want 200", got)
+		}
+	})
+
+	t.Run("char.GetHashCode is consistent", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins", "CharGetHashCode")
+		if err != nil {
+			t.Fatalf("CharGetHashCode() error = %v", err)
+		}
+		if got := out.Native().(int32); got == 0 {
+			t.Errorf("CharGetHashCode() = %d, want nonzero (true)", got)
+		}
+	})
+
+	t.Run("char.IsSurrogate/IsSurrogatePair", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins", "CharSurrogateChecks")
+		if err != nil {
+			t.Fatalf("CharSurrogateChecks() error = %v", err)
+		}
+		if got := out.Native().(string); got != "1010" {
+			t.Errorf("CharSurrogateChecks() = %q, want %q", got, "1010")
+		}
+	})
+
+	t.Run("RuntimeHelpers.GetHashCode", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins", "RuntimeHelpersGetHashCode")
+		if err != nil {
+			t.Fatalf("RuntimeHelpersGetHashCode() error = %v", err)
+		}
+		if got := out.Native().(int32); got == 0 {
+			t.Errorf("RuntimeHelpersGetHashCode() = %d, want nonzero (true)", got)
+		}
+	})
+
+	t.Run("List.Capacity", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.CheapWins", "ListCapacity")
+		if err != nil {
+			t.Fatalf("ListCapacity() error = %v", err)
+		}
+		if got := out.Native().(int32); got == 0 {
+			t.Errorf("ListCapacity() = %d, want nonzero (true)", got)
 		}
 	})
 }
