@@ -36,11 +36,16 @@ internal/interpreter/*.go` son la fuente de verdad; este documento es el recorri
   `Convert.FromBase64String`/`ToBase64String` (`system_convert_base64.go`).
 - **`System.String`**: el archivo individual más profundo (`system_string.go` +
   `system_string_statics.go`, ~33 miembros registrados) — `Concat`, `Format`, `Substring`,
-  `Split`, `Replace`, la familia `IndexOf`/`LastIndexOf`, la familia `Trim`, `PadLeft`/`PadRight`,
-  `Equals`/`op_Equality`, `Join`, `Contains`, `StartsWith`/`EndsWith`, `ToUpper`/`ToLower`
-  (sensible a la cultura vía `CultureInfo`), `get_Chars`/`get_Length`. `System.MemoryExtensions`
-  suma las variantes con sabor a `Span<char>` (`AsSpan`, `IndexOf`/`Trim` sobre span) que el código
-  real usa cada vez más.
+  `Split`, `Replace`, la familia `IndexOf`/`LastIndexOf` (tanto los overloads planos como los
+  sufijados con `StringComparison` — comparación ordinal únicamente, sin soporte de cultura, igual
+  que `StartsWith`/`Equals`; un bug real de despacho donde el valor crudo del enum en el overload
+  `StringComparison` se leía mal como índice de inicio, a veces tirando un
+  `ArgumentOutOfRangeException` espurio, se encontró y arregló en la Fase 3.76 vía una tabla
+  `stringComparisonSensitiveNatives` en `internal/interpreter/calls.go`), la familia `Trim`,
+  `PadLeft`/`PadRight`, `Equals`/`op_Equality`, `Join`, `Contains`, `StartsWith`/`EndsWith`,
+  `ToUpper`/`ToLower` (sensible a la cultura vía `CultureInfo`), `get_Chars`/`get_Length`.
+  `System.MemoryExtensions` suma las variantes con sabor a `Span<char>` (`AsSpan`, `IndexOf`/`Trim`
+  sobre span) que el código real usa cada vez más.
 - **`System.Math`**: la superficie común completa (`Pow`, `Round`, `Log`/`Log2`/`Log10`, `Sqrt`,
   las funciones trigonométricas, `Ceiling`/`Floor`/`Truncate`, `Abs`, `Min`/`Max`, `Clamp`) —
   cerrada desde la Fase 3.31.

@@ -246,3 +246,13 @@ qué `COMPATIBILITY.md` también sigue por separado los demos reales que efectiv
 realmente cada profile (`minimal`/`rules`/`netstandard-lite`) y el formato completo de
 findings/reporte — este documento solo cubre la mitad específica de NuGet del pipeline que
 alimenta a eso.
+
+`vmnet bind package <id>@<versión>` (`internal/bind`, Fase 3.75) es el otro comando del CLI que
+resuelve un paquete real directo desde nuget.org: `runBindPackage` (`cmd/vmnet/main.go`) reusa
+exactamente los mismos bloques `nuget.Client`/`nuget.Cache`/`OpenPackage`/`SelectLibAsset` que usa
+`check package` para bajar el `.nupkg` y elegir su mejor asset, pero se detiene ahí en vez de
+recorrer el grafo completo de dependencias transitivas — generar un wrapper Go idiomático solo
+necesita la metadata propia y ya decodificada del paquete target, no la de sus dependientes. El
+§3.2 de `docs/es/compatibility-profile.md` cubre qué genera y cómo usar el resultado; el trabajo de
+este documento es solo señalar que se apoya en la misma maquinaria de fetch/select documentada
+arriba.

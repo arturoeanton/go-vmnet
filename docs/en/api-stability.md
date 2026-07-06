@@ -10,10 +10,11 @@ dependency.
 **Only the root package, `github.com/arturoeanton/go-vmnet` (package `vmnet`) — everything
 importable without an `internal/` path segment.** Every `internal/*` package (`internal/il`,
 `internal/ir`, `internal/metadata`, `internal/pe`, `internal/runtime`, `internal/interpreter`,
-`internal/bcl`, `internal/checker`, `internal/nuget`) is exactly what Go's own `internal/`
-convention means: implementation detail, free to change shape at any time, in any release,
-without notice. Nothing in this document constrains them. `cmd/vmnet` (the CLI) is covered
-separately, informally, by its own command/flag surface — see `docs/en/compatibility-profile.md`
+`internal/bcl`, `internal/checker`, `internal/nuget`, `internal/migrate`, `internal/bind`) is
+exactly what Go's own `internal/` convention means: implementation detail, free to change shape at
+any time, in any release, without notice. Nothing in this document constrains them. `cmd/vmnet`
+(the CLI) is covered separately, informally, by its own command/flag surface — see
+`docs/en/compatibility-profile.md`
 for the `check`/`check package` subcommands' current flags; the CLI isn't semver-tracked the way
 the Go API is, since it's consumed as a binary, not as an imported package.
 
@@ -77,6 +78,14 @@ it):
 That's the entire surface. It's deliberately small: three "verb" types (`VM`, `Assembly`,
 `Instance`), one error type, one permissions struct, one NuGet manager, and a handful of `Value`
 constructors.
+
+Fase 3.75 (HTML compatibility reports, `vmnet analyze`, `vmnet bind`) and Fase 3.76 (the
+`dotnet new vmnet-plugin` SDK, plus a real `String.IndexOf(string, StringComparison)` bug fix) both
+landed on `main` after `v0.7.0` without touching this surface at all: the new code they added lives
+either in `cmd/vmnet` (new subcommands, covered informally, not by this document) or in two new
+`internal/*` packages (`internal/migrate`, `internal/bind`, added to the list above). The root
+package gained zero new exported symbols across both Fases — confirmed directly against
+`go doc -all .` — so this snapshot needs no revision because of them.
 
 ## The semver commitment
 

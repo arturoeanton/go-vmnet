@@ -21,7 +21,12 @@ agrega comportamiento real.
 `internal/nuget` y `internal/checker` son transversales: el primero resuelve
 paquetes `.nupkg` hacia assemblies que entran por el mismo pipeline; el
 segundo analiza metadata/IR antes de ejecutar para reportar compatibilidad
-(spec §23).
+(spec §23). Dos paquetes transversales más llegaron en Fase 3.75:
+`internal/migrate` corre el checker contra cada `.dll` de un directorio
+para responder "qué puede correr ya toda esta app legacy" (respalda
+`vmnet analyze`), e `internal/bind` lee la metadata de un assembly
+directamente — sin intérprete/ejecución en absoluto — para generar
+código Go tipado (respalda `vmnet bind`).
 
 ## Layout de paquetes
 
@@ -35,9 +40,15 @@ segundo analiza metadata/IR antes de ejecutar para reportar compatibilidad
 /internal/runtime     modelo de objetos managed (spec §14-15, 17-18, 20)
 /internal/bcl         BCL parcial (spec §16)
 /internal/nuget       .nupkg/.nuspec/TFM/resolver (spec §22)
-/internal/checker     compatibility checker (spec §23-24)
+/internal/checker     compatibility checker + reportes HTML (spec §23-24)
+/internal/migrate     `vmnet analyze` — escaneo de migración de un directorio completo (Fase 3.75)
+/internal/bind        `vmnet bind` — codegen de wrappers Go desde metadata real del assembly (Fase 3.75)
 /cmd/vmnet            CLI (spec §27)
-/examples             hello, rules, calculator, nuget-basic
+/templates/vmnet-plugin  template `dotnet new` para un proyecto de plugin vmnet (Fase 3.76)
+/examples             hello, rules, calculator, nuget-basic, jint-demo, jint-nowrapper,
+                      npoi-demo, system-text-json-demo, newtonsoft-json-demo, openxml-demo,
+                      closedxml-demo, dapper-demo, sqlite-demo, fluentvalidation-demo,
+                      di-demo, permissions-demo, bind-demo, plugin-demo
 /tests/fixtures       fixtures C# usadas como golden input
 /tests/golden         salidas esperadas para tests table-driven
 ```
@@ -699,3 +710,120 @@ del resolver que el primer uso no-Jint de `AnalyzeWithDeps` sacó a la luz
 `[3.1.1, 4.0.0)`, no un pin plano), lo que rompía la resolución de
 dependencias por completo tanto para `vmnet check package` como para el
 camino real de runtime `vm.LoadPackage` — no solo un problema del checker.
+
+Fase 3.31 a Fase 3.58 cierran la mayor parte de la superficie BCL/LINQ
+restante (gaps de `System.Math`, más métodos de `Enumerable`,
+`System.Xml.XmlWriter` y `System.Xml.Linq`, las colecciones legacy
+`ArrayList`/`Hashtable`) y, desde Fase 3.39, cambian la metodología de
+certificación misma: cada fase construye y deja committeado un ejemplo
+real y corrible (`examples/npoi-demo`, `closedxml-demo`,
+`system-text-json-demo`, `openxml-demo`, `newtonsoft-json-demo`,
+`calculator`, `dapper-demo`, `sqlite-demo`, `fluentvalidation-demo`,
+`di-demo`, `permissions-demo`) contra el paquete NuGet real sin
+modificar de punta a punta, que es lo que encontró las cadenas de bugs
+más largas del proyecto (solo Fase 3.39/3.40: 18 bugs reales de
+intérprete/overload construyendo `npoi-demo`/`closedxml-demo`). Fase 3.44
+arregla un bug real de performance (`metadata.FindTypeDef` era un
+scan O(n) sin cache, causando un hang no determinístico); Fase 3.53
+agrega un proveedor ADO.NET real y nativo en Go de
+`Microsoft.Data.Sqlite`, verificado independientemente contra el `sqlite3`
+CLI real. Este documento condensa la secuencia en vez de reproducirla —
+ver `docs/es/ROADMAP.md` para el relato fase por fase.
+
+Fase 3.59 (modelo `Permissions`, `System.IO.File`/`Directory`/
+`FileStream`/`FileInfo`/`DirectoryInfo` deny-by-default) hasta Fase 3.74
+(empujando más del corpus de 19 paquetes rastreados por encima de la
+barra del 97%-individualmente-funcionando del propio checker — 7/19 la
+cruzan a esta fase, subiendo de 5; promedio simple 94.45% → 95.8%,
+promedio ponderado por métodos ~97.8% → ~98.4%) cierran el checklist
+restante de la Fase 4: soporte real de `Microsoft.Extensions.
+DependencyInjection` (3.60), `AsyncLocal`/`ConcurrentQueue` (3.61),
+reflection más profunda (`Type.IsSubclassOf`/`RuntimeTypeHandle`,
+`CustomAttributeData` real, 3.62-3.63), un evaluador real de árboles de
+expresión para `Expression<T>.Compile()` incluyendo genéricos a nivel de
+clase y `try`/`catch`/`finally` dentro del árbol (3.65-3.66), el catálogo
+completo de códigos `VMNET_*` y stack traces de spec §18.3 (3.67), una
+auditoría de la golden suite más una baseline de cobertura real medida
+(3.69), los cuatro docs que faltaban más una suite de benchmarks real
+(3.70), **congelar la API pública de Go y un compromiso semver real**
+(3.71, `docs/es/api-stability.md`) — la base del tag `v0.7.0` sobre el
+que se construye el release actual del proyecto — `MaxStringBytes`
+(3.72), y un cache de resolución de métodos/tokens (~35% menos overhead
+por llamada medido, 3.73). Ver `docs/es/COMPATIBILITY.md` para los
+números actuales por paquete.
+
+Fase 3.75 (reportes de compatibilidad en HTML, `vmnet analyze`, `vmnet
+bind`) completa — tres features orientadas a producto que responden
+preguntas de adopción que el reporte del checker en texto plano y la API
+de bajo nivel `Assembly.Call` no alcanzan. `--html=<file>` en `vmnet
+check`/`vmnet check package` (`internal/checker/html.go`, nuevo) renderiza
+el mismo `Report` — cada stat, cada finding — como una única página
+autocontenida vía `html/template` (elegido porque los nombres reales de
+métodos genéricos de C# contienen `<`/`>`/`` ` ``, que el auto-escaping
+de `html/template` maneja de forma segura y la concatenación cruda de
+strings no). `vmnet analyze <dir>` (`internal/migrate`, paquete nuevo)
+corre el checker contra cada `.dll` encontrado recursivamente bajo un
+directorio, tratando cada otro `.dll` del mismo scan como dependencia
+del mismo directorio para `AnalyzeWithDeps` — el mismo principio que
+`AnalyzeWithDeps` (Fase 3.29) ya aplica al grafo transitivo propio de un
+paquete, generalizado a "cualquier otro DLL en este directorio" — y
+agrega dos rollups que un reporte de un solo assembly no tiene uso para:
+findings agrupados por categoría (los findings de BCL no soportada
+re-agrupados por namespace real), y tipos rankeados por su propio ratio
+de métodos limpios (`Report.PerType`, campo nuevo) para una lista de
+"mejores candidatos de migración". Un archivo que no es un assembly
+legible se saltea y se reporta, no es un error fatal. `vmnet bind
+<dll>|package <id>@<version> --out=<dir>` (`internal/bind`, paquete
+nuevo: `BuildModel`/`Generate`) genera código Go wrapper idiomático y
+tipado directo desde la metadata propia de un assembly; un método con
+exactamente un overload real y solo tipos mapeados obtiene una firma Go
+precisa, cualquier otro caso (overloaded, o un tipo genérico/delegate sin
+mapear) igual obtiene un punto de entrada llamable
+`(...vmnet.Value) (vmnet.Value, error)` en vez de descartarse en
+silencio, y el código generado se valida vía `go/format.Source` antes de
+tocar disco. Verificado contra el paquete `Jint` 3.1.3 real y sin
+modificar, descargado en vivo de nuget.org (111 tipos bindeados, un
+wrapper generado `Evaluate("1 + 2")` funcionando), lo que sacó a la luz y
+arregló dos bugs reales del generador: se necesitó un sanitizador de
+identificadores whitelist de letras/dígitos ASCII después de que un
+nombre real de miembro generado por el compilador de Jint con un `$`
+literal crasheara `go/format.Source`; y los accesores `get_X`/`set_X`
+necesitan un caso especial antes de sanitizar, o se vuelven
+`Get_Name`/`Set_Name` en vez de `GetX`/`SetX`. Ver
+`docs/es/compatibility-profile.md` §3.1-3.2 y `examples/bind-demo`.
+
+Fase 3.76 (el SDK de plugins `dotnet new vmnet-plugin`, y un arreglo real
+de `IndexOf` que encontró) completa. `templates/vmnet-plugin` es un
+template `dotnet new` real e instalable
+(`.template.config/template.json`) que scaffoldea una librería de clases
+`netstandard2.0` exponiendo `Entry.Invoke(byte[]) : byte[]` — el
+contrato exacto que `Assembly.CallBytes`/`CallJSON` ya llaman
+directamente — verificado de punta a punta contra el CLI real de
+`dotnet` (`dotnet new install` → `dotnet new vmnet-plugin -n ...` →
+`dotnet build`), no solo leído como fuente de template. Construir el
+starter generado de verdad (parsea a mano un campo JSON `"name"` vía
+`IndexOf`/`Substring` en vez de traer una librería de JSON, así que un
+plugin recién generado compila sin nada más allá del SDK de .NET)
+encontró un bug real y general del intérprete: `s.IndexOf(needle,
+StringComparison.Ordinal)` devolvía el índice equivocado (o un
+`ArgumentOutOfRangeException` falso), porque `stringIndexOf`/
+`stringLastIndexOf` de `internal/bcl/system_string.go` solo ven un
+`[]runtime.Value` plano sin metadata de firma por-llamada, así que un
+argumento `KindI4` final siempre se trataba como índice de inicio —
+malinterpretando el valor crudo de `StringComparison.Ordinal` (`4`) como
+una posición de inicio. Arreglado en
+`internal/interpreter/calls.go`'s `convertCharArgsForNative` con una
+tabla nueva `stringComparisonSensitiveNatives` que descarta el argumento
+final una vez que el `paramTypeNames` resuelto del call site dice que en
+verdad es un `System.StringComparison` (vmnet no tiene soporte de
+cultura en ningún lado, así que no hay nada a qué convertirlo).
+`examples/plugin-demo` (nuevo) es una segunda copia rellenada del mismo
+scaffold con una regla de negocio real de 8% de impuesto plano
+reemplazando el saludo del starter, llamándola desde Go con `CallBytes`
+y `CallJSON`. Ver `docs/es/plugin-sdk.md` (nuevo).
+
+A la fecha de esta escritura, Fase 3.76 es la última fase en `main`. El
+último release taggeado es `v0.7.0` — el núcleo del intérprete, el
+checker, y la API pública congelada, hasta Fase 3.74 (ver
+`docs/es/api-stability.md`); Fase 3.75-3.76 llegan después de ese tag y
+todavía no son parte de un release numerado.

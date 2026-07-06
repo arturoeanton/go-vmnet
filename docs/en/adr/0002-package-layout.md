@@ -41,3 +41,10 @@ separation of concerns the spec defines.
   `internal/*` directly.
 - `docs/en/spec.md` keeps the original layout as a reference; this ADR
   is the note on the one deliberate deviation from it.
+- The same internal-vs-root split has held as the project grew past
+  Fase 3: newer cross-cutting packages the spec never listed, such as
+  `internal/migrate` (Fase 3.75, backs `vmnet analyze`) and
+  `internal/bind` (Fase 3.75, backs `vmnet bind`), went straight under
+  `/internal` too, for the same reasoning above — no new ADR needed per
+  package. See `docs/en/architecture.md` for the current, maintained
+  package list.

@@ -4955,7 +4955,7 @@ go test ./...
 ```
 
 ---
-### Fase 3.59 — un modelo `Permissions` real, más `System.IO.File`/`Directory`/`FileStream`/`FileInfo`/`DirectoryInfo` deny-by-default
+## Fase 3.59 — un modelo `Permissions` real, más `System.IO.File`/`Directory`/`FileStream`/`FileInfo`/`DirectoryInfo` deny-by-default
 
 **Objetivo:** hacer aterrizar la puerta de capacidad `Permissions` prometida hace tiempo (el propio
 checklist de Fase 4 de este archivo, `docs/en/security.md`) para I/O de disco real específicamente,
@@ -5098,7 +5098,7 @@ cd examples/sqlite-demo && go run . && cd -   # confirma que el retrofit de Sqli
 ```
 
 ---
-### Fase 3.60 — Microsoft.Extensions.DependencyInjection real, tres fixes profundos del intérprete
+## Fase 3.60 — Microsoft.Extensions.DependencyInjection real, tres fixes profundos del intérprete
 
 **Objetivo:** arrancar la propia lista de prioridad explícita del usuario — paquetes oficiales de
 Microsoft `Microsoft.Extensions.*` y una nueva ronda de NuGets populares — midiendo toda la familia
@@ -5242,7 +5242,7 @@ VMNET_NETWORK_TESTS=1 go test -run TestDiDemoE2E -v .
 ```
 
 ---
-### Fase 3.61 — primera pasada sobre la lista extendida de NuGets del usuario: AsyncLocal/ThreadLocal, ConcurrentQueue, paridad de checker
+## Fase 3.61 — primera pasada sobre la lista extendida de NuGets del usuario: AsyncLocal/ThreadLocal, ConcurrentQueue, paridad de checker
 
 **Objetivo:** continuar la lista de prioridad de la Fase 3.60 — se midieron 5 paquetes candidatos
 nuevos que el usuario preguntó (`Markdig`, `HtmlAgilityPack`, `Google.Protobuf`,

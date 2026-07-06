@@ -41,3 +41,10 @@ responsabilidades que la spec define.
   directamente.
 - `docs/es/spec.md` mantiene el layout original como referencia; esta ADR es
   la nota de la única desviación deliberada.
+- La misma separación internal-vs-raíz se sostuvo a medida que el proyecto
+  creció más allá de la Fase 3: paquetes transversales más nuevos que la
+  spec nunca listó, como `internal/migrate` (Fase 3.75, sostiene `vmnet
+  analyze`) e `internal/bind` (Fase 3.75, sostiene `vmnet bind`), también
+  se agregaron directo bajo `/internal`, por el mismo razonamiento de
+  arriba — sin necesitar una ADR nueva por paquete. Ver
+  `docs/es/architecture.md` para la lista de paquetes actual y mantenida.

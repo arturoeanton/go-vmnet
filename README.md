@@ -2,12 +2,17 @@
 
 A pure-Go IL/CIL interpreter for running C# plugins — and a growing set of
 real NuGet packages — inside a Go program, with no .NET runtime installed
-on the host.
+on the host. Around that interpreter core sit four tools built on the same
+real execution pipeline: a compatibility checker, a whole-directory
+migration analyzer, a Go wrapper code generator, and a plugin scaffolding
+SDK — see [CLI and tooling](#cli-and-tooling) below.
 
 **Current release: [v0.7.0](https://github.com/arturoeanton/go-vmnet/releases/tag/v0.7.0)** —
-see the [release notes](https://github.com/arturoeanton/go-vmnet/releases/tag/v0.7.0) for what's
-new, and [`docs/en/api-stability.md`](docs/en/api-stability.md) for the frozen public API and this
-pre-1.0 project's semver commitment.
+covers the interpreter core, the checker, and the frozen public API (see
+[`docs/en/api-stability.md`](docs/en/api-stability.md) for the semver commitment). Fase 3.75-3.76
+landed on `main` since that tag — HTML compatibility reports, `vmnet analyze`, `vmnet bind`, and the
+`dotnet new vmnet-plugin` SDK described below — see
+[`docs/en/ROADMAP.md`](docs/en/ROADMAP.md) for the exact commits and per-Fase tags.
 
 ## This runs a real JavaScript engine. Inside a Go binary. No CGo.
 
@@ -43,13 +48,16 @@ Go, no compilation step beyond `go run`) and
 tiny compiled C# wrapper, for APIs that lean on C#-only sugar).
 
 ```txt
-Status: Fase 3.74 complete — a real, deny-by-default Permissions/
+Status: Fase 3.76 complete — a real, deny-by-default Permissions
 sandbox model with MaxStringBytes, a structured VMNET_* error model
 with real spec-format stack traces, a general expression-tree evaluator
 (Expression<T>.Compile()), a golden test suite audited against every
 documented requirement, a frozen public Go API with a real semver
-commitment, a real benchmark suite, and a method/token resolution cache
-(~35% lower per-call overhead).
+commitment, a real benchmark suite, a method/token resolution cache
+(~35% lower per-call overhead), self-contained HTML compatibility
+reports, a whole-legacy-directory migration analyzer (vmnet analyze),
+a Go wrapper code generator (vmnet bind), and a dotnet new
+vmnet-plugin scaffolding SDK.
 
 Current corpus: 19 real NuGet packages checked with transitive
 dependencies under netstandard-lite. 7 of 19 now clear a
@@ -60,7 +68,7 @@ deliberately separate).
 
 Next: the rest of Fase 4 — real Process/socket support (deliberately
 deferred, no real corpus demand found so far), a complete CLI command
-set, a cross-platform CI matrix, and a final top-level README pass.
+set, and a cross-platform CI matrix.
 ```
 
 **Runtime-verified demos** — each one loads the real, unmodified package from nuget.org and
@@ -149,7 +157,17 @@ The full technical specification is in [`docs/en/spec.md`](docs/en/spec.md).
 - **Compatibility checker**: `vmnet check <dll>` reuses the *real*
   execution pipeline to report, method by method, what will and won't run
   under a given profile (`minimal`/`rules`/`netstandard-lite`) — not a
-  separate heuristic guess.
+  separate heuristic guess. `vmnet analyze <dir>` runs the same checker
+  across every assembly in a whole legacy `bin/` folder at once, ranking
+  which types are the best migration candidates; either one can also
+  write a self-contained HTML report instead of (or alongside) plain text.
+  See [CLI and tooling](#cli-and-tooling) below.
+- **Code generation**: `vmnet bind <dll>` generates idiomatic, typed Go
+  wrapper functions/methods straight from an assembly's real metadata, and
+  `dotnet new vmnet-plugin` scaffolds a plugin project shaped for
+  `CallBytes`/`CallJSON` — both meant to remove the friction of hand-typing
+  `Assembly.Call("Namespace.Type", "Method", ...)` string literals for
+  everyday use.
 - **NuGet**: `vmnet add`/`restore`/`packages` resolve and download real
   packages from `api.nuget.org` (including transitive dependencies),
   cache them locally, and load them with `vm.LoadPackage`.
@@ -241,7 +259,52 @@ Runnable, documented examples in [`examples/`](examples/):
 | [`examples/plugin-demo`](examples/plugin-demo) | A plugin scaffolded from `dotnet new vmnet-plugin`, its generated starter replaced with a real business rule, loaded via `LoadFile` and called with `CallBytes`/`CallJSON` |
 | [`benchmarks/`](benchmarks) | The full Fase 4 benchmark suite: seven workloads run through vmnet and native Go side by side, plus cold load time, method invoke overhead, allocations/op, and package restore time |
 
-## CLI
+## CLI and tooling
+
+`vmnet inspect`/`il`/`run` are the low-level building blocks (metadata, decoded IL, direct
+invocation). The other four commands below are what most real usage actually reaches for —
+each one reuses the *same* real execution/metadata pipeline the interpreter itself runs on, so
+none of them is a separate heuristic guessing at compatibility:
+
+- **`vmnet check`** — is this assembly (or NuGet package) safe to load? Walks every method under a
+  profile (`minimal`/`rules`/`netstandard-lite`) and reports exactly which ones will run and which
+  won't, with a concrete reason for each gap.
+  ```bash
+  vmnet check --profile=netstandard-lite mylib.dll
+  vmnet check package fluentvalidation@11.9.2
+  ```
+- **`vmnet analyze`** — the same check, but for an entire legacy `.NET` application at once: point
+  it at a `bin/` folder and it walks every `.dll` inside (treating siblings as each other's
+  dependencies, exactly like a real deployed app), then reports totals, what's blocking the rest
+  ("blocked by category" — Reflection, P/Invoke, a specific BCL namespace, ...), and which types
+  are the best migration candidates, ranked by their own clean-method ratio.
+  ```bash
+  vmnet analyze ./legacy-dotnet/bin
+  ```
+- **`vmnet bind`** — generates idiomatic, typed Go wrapper code straight from an assembly's real
+  metadata, so calling into it from Go looks like `engine.Evaluate("1 + 2")` instead of
+  `asm.Call("Jint.Engine", "Evaluate", ...)` string literals. Verified against a real, unmodified
+  NuGet package (Jint 3.1.3 → 111 generated types, real JavaScript evaluation working end to end).
+  ```bash
+  vmnet bind package Jint@3.1.3 --out=./jintgo --package=jint
+  ```
+  See [`examples/bind-demo`](examples/bind-demo) and
+  [`docs/en/compatibility-profile.md`](docs/en/compatibility-profile.md) §3.2.
+- **`dotnet new vmnet-plugin`** — the other direction: scaffolds a new C# plugin project shaped
+  exactly for `Assembly.CallBytes`/`CallJSON` (a `byte[]`-in/`byte[]`-out `Entry.Invoke`), so
+  writing a plugin from scratch starts with one command instead of a blank `.csproj`.
+  ```bash
+  dotnet new install ./templates/vmnet-plugin
+  dotnet new vmnet-plugin -n BillingRules
+  ```
+  See [`examples/plugin-demo`](examples/plugin-demo) and
+  [`docs/en/plugin-sdk.md`](docs/en/plugin-sdk.md).
+
+Both `vmnet check` and `vmnet analyze` accept `--html=<file>`, writing the same result as a
+single, self-contained HTML page (no external fonts/scripts) instead of — or alongside — plain
+text, for handing a compatibility result to someone who isn't going to read a terminal dump.
+
+Full command reference:
 
 ```txt
 vmnet inspect <dll>                                    # metadata summary
@@ -256,17 +319,6 @@ vmnet add <id>[@<version>]
 vmnet restore
 vmnet packages
 ```
-
-`--html=<file>` writes the same result as a single, self-contained HTML page (no external
-fonts/scripts) instead of only printing to the terminal — see
-[`docs/en/compatibility-profile.md`](docs/en/compatibility-profile.md) §3.1 for `vmnet analyze`'s
-own cross-assembly resolution and "best migration candidates" ranking, and §3.2 for `vmnet bind`'s
-code generation (see also [`examples/bind-demo`](examples/bind-demo)).
-
-Writing a plugin from scratch instead of calling into an existing package? `dotnet new install
-./templates/vmnet-plugin && dotnet new vmnet-plugin -n BillingRules` scaffolds a `byte[]`-in/
-`byte[]`-out `Entry.Invoke` project shaped for `Assembly.CallBytes`/`CallJSON` — see
-[`docs/en/plugin-sdk.md`](docs/en/plugin-sdk.md) and [`examples/plugin-demo`](examples/plugin-demo).
 
 ## Architecture
 

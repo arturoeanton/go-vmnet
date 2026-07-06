@@ -17,5 +17,5 @@ Expected output:
 Rules.Eval("checkout request") = map[customer:acme corp ok:true]
 Rules.Eval("") raised a managed exception: System.InvalidOperationException: empty input
 Loading a buggy plugin with an infinite loop...
-Runaway plugin stopped by the sandbox: vmnet: Vmnet.Fixtures.Loops.Runaway: interpreter: instruction limit exceeded
+Runaway plugin stopped by the sandbox: VMNET_CALL_DEPTH_EXCEEDED: Vmnet.Fixtures.Loops.Runaway: interpreter: instruction limit exceeded
 ```

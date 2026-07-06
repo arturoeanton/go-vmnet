@@ -10,9 +10,10 @@ ajustado fijar su dependencia.
 **Solo el paquete raíz, `github.com/arturoeanton/go-vmnet` (paquete `vmnet`) — todo lo importable
 sin un segmento de path `internal/`.** Cada paquete `internal/*` (`internal/il`, `internal/ir`,
 `internal/metadata`, `internal/pe`, `internal/runtime`, `internal/interpreter`, `internal/bcl`,
-`internal/checker`, `internal/nuget`) es exactamente lo que la propia convención `internal/` de Go
-significa: detalle de implementación, libre de cambiar de forma en cualquier momento, en cualquier
-release, sin aviso. Nada en este documento los restringe. `cmd/vmnet` (el CLI) se cubre por
+`internal/checker`, `internal/nuget`, `internal/migrate`, `internal/bind`) es exactamente lo que la
+propia convención `internal/` de Go significa: detalle de implementación, libre de cambiar de forma
+en cualquier momento, en cualquier release, sin aviso. Nada en este documento los restringe.
+`cmd/vmnet` (el CLI) se cubre por
 separado, de forma informal, por su propia superficie de comandos/flags — ver
 `docs/es/compatibility-profile.md` para los flags actuales de los subcomandos `check`/`check
 package`; el CLI no se rastrea con semver de la forma en que la API de Go sí, ya que se consume
@@ -80,6 +81,15 @@ esta lista es una instantánea de ella):
 Esa es toda la superficie. Es deliberadamente chica: tres tipos "verbo" (`VM`, `Assembly`,
 `Instance`), un tipo de error, un struct de permisos, un manager de NuGet, y un puñado de
 constructores de `Value`.
+
+La Fase 3.75 (reportes HTML de compatibilidad, `vmnet analyze`, `vmnet bind`) y la Fase 3.76 (el SDK
+`dotnet new vmnet-plugin`, más un arreglo real de bug en `String.IndexOf(string, StringComparison)`)
+aterrizaron las dos en `main` después de `v0.7.0` sin tocar esta superficie en absoluto: el código
+nuevo que agregaron vive o bien en `cmd/vmnet` (subcomandos nuevos, cubiertos de forma informal, no
+por este documento) o en dos paquetes `internal/*` nuevos (`internal/migrate`, `internal/bind`,
+agregados a la lista de arriba). El paquete raíz no ganó ningún símbolo exportado nuevo en ninguna
+de las dos Fases — confirmado directamente contra `go doc -all .` — así que esta instantánea no
+necesita revisión por su causa.
 
 ## El compromiso de semver
 

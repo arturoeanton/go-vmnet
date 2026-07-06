@@ -35,10 +35,15 @@ ground truth; this document is the curated tour of it.
   `ToBase64String` (`system_convert_base64.go`).
 - **`System.String`**: the deepest single file (`system_string.go` + `system_string_statics.go`,
   ~33 registered members) — `Concat`, `Format`, `Substring`, `Split`, `Replace`, `IndexOf`/
-  `LastIndexOf`, `Trim` family, `PadLeft`/`PadRight`, `Equals`/`op_Equality`, `Join`, `Contains`,
-  `StartsWith`/`EndsWith`, `ToUpper`/`ToLower` (culture-aware via `CultureInfo`), `get_Chars`/
-  `get_Length`. `System.MemoryExtensions` adds the `Span<char>`-flavored overloads (`AsSpan`, span
-  `IndexOf`/`Trim`) real code increasingly prefers.
+  `LastIndexOf` (both the plain overloads and the `StringComparison`-suffixed ones — ordinal
+  comparison only, no culture support, same as `StartsWith`/`Equals`; a real dispatch bug where the
+  `StringComparison` overload's raw enum value was misread as a start index, sometimes throwing a
+  bogus `ArgumentOutOfRangeException`, was found and fixed in Fase 3.76 via a
+  `stringComparisonSensitiveNatives` table in `internal/interpreter/calls.go`), `Trim` family,
+  `PadLeft`/`PadRight`, `Equals`/`op_Equality`, `Join`, `Contains`, `StartsWith`/`EndsWith`,
+  `ToUpper`/`ToLower` (culture-aware via `CultureInfo`), `get_Chars`/`get_Length`.
+  `System.MemoryExtensions` adds the `Span<char>`-flavored overloads (`AsSpan`, span `IndexOf`/
+  `Trim`) real code increasingly prefers.
 - **`System.Math`**: the full common surface (`Pow`, `Round`, `Log`/`Log2`/`Log10`, `Sqrt`, the
   trig functions, `Ceiling`/`Floor`/`Truncate`, `Abs`, `Min`/`Max`, `Clamp`) — closed since Fase
   3.31.

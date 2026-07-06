@@ -1,52 +1,72 @@
-# Contribuir a vmnet
+# Contributing to vmnet
 
-## Antes de nada
+## Before anything
 
-Lee `docs/es/spec.md` (qué construimos y por qué) y `docs/es/ROADMAP.md` (en qué
-fase estamos y qué tareas quedan). Un PR que agrega algo fuera del alcance
-de la fase activa probablemente deba esperar — ver "No objetivos" en la
-spec (§3) antes de proponer soporte para reflection, async, P/Invoke, etc.
+Read `docs/en/spec.md` (what we're building and why) and `docs/en/ROADMAP.md`
+(what Fase we're in and what's left). A PR that adds something outside the
+scope of the active Fase will probably have to wait — see "Non-goals" in the
+spec (§3) before proposing support for reflection, async, P/Invoke, etc.
 
-## Reglas duras
+## Hard rules
 
-- **Sin cgo en el núcleo.** `go build`/`go vet`/`go test` deben pasar con
-  `CGO_ENABLED=0`. Esto es un compromiso de producto (ADR 0001), no solo un
-  flag de CI.
-- **`internal/` es internal.** Los paquetes bajo `internal/pe`,
-  `internal/metadata`, etc. no son API pública (ADR 0002). Cualquier cosa
-  que el usuario final deba poder llamar se expone deliberadamente desde el
-  paquete raíz `vmnet`.
-- **`vmnet check` antes de prometer compatibilidad.** Si agregás soporte
-  para un opcode o método BCL nuevo, el analyzer de `internal/checker` tiene
-  que dejar de marcarlo como unsupported — no alcanza con que el intérprete
-  no crashee.
+- **No cgo in the core.** `go build`/`go vet`/`go test` must pass with
+  `CGO_ENABLED=0`. This is a product commitment (ADR 0001), not just a CI
+  flag.
+- **`internal/` is internal.** The packages under `internal/pe`,
+  `internal/metadata`, `internal/il`, `internal/ir`, `internal/interpreter`,
+  `internal/runtime`, `internal/bcl`, `internal/nuget`, `internal/checker`,
+  `internal/migrate`, and `internal/bind` are not public API (ADR 0002).
+  Anything the end user needs to call is exposed deliberately from the root
+  `vmnet` package.
+- **`vmnet check` before promising compatibility.** If you add support for a
+  new opcode or BCL method, the `internal/checker` analyzer has to stop
+  flagging it as unsupported — it's not enough for the interpreter to just
+  not crash.
 
-## Build y test
+## Build and test
 
 ```bash
 go build ./...
 go vet ./...
-go test ./...
+go test ./... -race
 ```
 
-## Fixtures C#
+CI (`.github/workflows/`) runs the same build/vet/test on Linux, macOS, and
+Windows, plus a `CGO_ENABLED=0` build on every OS. Windows runners fall back
+to plain `go test ./... -count=1` because the race detector needs a C
+toolchain that isn't reliably available there.
 
-Los tests de PE/metadata/IL/interpreter usan DLLs reales compiladas desde
-`tests/fixtures/csharp`. Necesitás el SDK de .NET instalado **solo para
-esto** — nunca para correr `vmnet` en sí:
+## C# fixtures
+
+The PE/metadata/IL/interpreter tests load real DLLs compiled from
+`tests/fixtures/csharp`. You need the .NET SDK installed **only for
+this** — never to run `vmnet` itself:
 
 ```bash
 dotnet build tests/fixtures/csharp/Fixtures.csproj -c Release
 ```
 
-Si agregás un caso nuevo (un opcode, un patrón de clase, una llamada BCL),
-agregá primero la fixture C# correspondiente en
-`tests/fixtures/csharp/README.md` con una fila describiendo qué ejercita.
+If you're touching `internal/migrate`, `vmnet analyze`, or P/Invoke
+detection in `internal/checker`, also build the second fixture project they
+exercise:
 
-## Commits y PRs
+```bash
+dotnet build tests/fixtures/csharp-pinvoke/PInvokeFixture.csproj -c Release
+```
 
-- Un PR por tarea de `docs/es/ROADMAP.md` cuando sea posible; referenciá la
-  fase y el módulo en la descripción (ej. "Fase 1 · /pe: RVA→offset").
-- Agregá tests junto con el código, no en un PR aparte.
-- Si el PR introduce una decisión de arquitectura no trivial, documentala
-  como ADR en `docs/es/adr/`.
+Tests that depend on it skip themselves with a clear message if it isn't
+built.
+
+If you add a new case (an opcode, a class pattern, a BCL call), add the
+corresponding C# fixture first in `tests/fixtures/csharp/README.md` with a
+row describing what it exercises.
+
+## Commits and PRs
+
+- One PR per `docs/en/ROADMAP.md` task when possible; reference the Fase and
+  module in the description (e.g. "Fase 1 · /pe: RVA→offset").
+- Add tests alongside the code, not in a separate PR.
+- If the PR introduces a non-trivial architecture decision, document it as
+  an ADR in `docs/en/adr/` — and mirror it in `docs/es/adr/` so both stay
+  true translations of each other, per this repo's bilingual documentation
+  convention.

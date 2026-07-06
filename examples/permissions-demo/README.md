@@ -16,7 +16,7 @@ Expected output (abridged):
 
 ```txt
 --- 1. A fresh VM denies real file I/O by default ---
-File.WriteAllText/ReadAllText with no Permissions granted: vmnet: ... System.UnauthorizedAccessException: ...
+File.WriteAllText/ReadAllText with no Permissions granted: VMNET_PERMISSION_DENIED: System.UnauthorizedAccessException: ...
 The C# code itself can catch it too: File.ReadAllText -> caught "DENIED"
 Confirmed: no file exists on disk at all — the gate ran before any real syscall.
 
@@ -25,7 +25,7 @@ File.WriteAllText/ReadAllText, now granted -> "top secret"
 Independently re-read from Go (not through vmnet at all): "top secret" — a real file, not an illusion.
 
 --- 3. Granting only AllowFileRead still denies a write ---
-File.WriteAllText with only AllowFileRead granted: vmnet: ... System.UnauthorizedAccessException: ...
+File.WriteAllText with only AllowFileRead granted: VMNET_PERMISSION_DENIED: System.UnauthorizedAccessException: ...
 ```
 
 Every capability starts denied (the zero `Permissions` value) — see

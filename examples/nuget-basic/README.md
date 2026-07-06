@@ -22,6 +22,9 @@ restored dependencies into vmnet.lock.json
   System.Buffers@4.5.1 -> lib/netstandard2.0/System.Buffers.dll
   ...
 SimpleBase.Base32.getAllocationByteCountForDecoding(0) = 0
+SimpleBase.Base32.getAllocationByteCountForDecoding(8) = 5
+SimpleBase.Base32.getAllocationByteCountForDecoding(16) = 10
+SimpleBase.Base32.getAllocationByteCountForDecoding(100) = 62
 SimpleBase.Base32.getAllocationByteCountForDecoding(1000) = 625
 ```
 

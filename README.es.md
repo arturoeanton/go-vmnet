@@ -2,12 +2,19 @@
 
 Un intérprete de IL/CIL puro en Go para correr plugins C# — y un conjunto
 creciente de paquetes NuGet reales — dentro de un programa Go, sin
-necesidad de tener el runtime de .NET instalado en el host.
+necesidad de tener el runtime de .NET instalado en el host. Alrededor de
+ese núcleo intérprete hay cuatro herramientas construidas sobre el mismo
+pipeline de ejecución real: un checker de compatibilidad, un analizador de
+migración de directorios completos, un generador de código Go, y un SDK de
+scaffolding de plugins — ver [CLI y herramientas](#cli-y-herramientas) más
+abajo.
 
-**Release actual: [v0.7.0](https://github.com/arturoeanton/go-vmnet/releases/tag/v0.7.0)** — ver
-las [notas del release](https://github.com/arturoeanton/go-vmnet/releases/tag/v0.7.0) para lo
-nuevo, y [`docs/es/api-stability.md`](docs/es/api-stability.md) para la API pública congelada y el
-compromiso de semver de este proyecto pre-1.0.
+**Release actual: [v0.7.0](https://github.com/arturoeanton/go-vmnet/releases/tag/v0.7.0)** — cubre
+el núcleo del intérprete, el checker, y la API pública congelada (ver
+[`docs/es/api-stability.md`](docs/es/api-stability.md) para el compromiso de semver). Las Fases
+3.75-3.76 llegaron a `main` después de ese tag — reportes HTML de compatibilidad, `vmnet analyze`,
+`vmnet bind`, y el SDK `dotnet new vmnet-plugin` descriptos más abajo — ver
+[`docs/es/ROADMAP.md`](docs/es/ROADMAP.md) para los commits y tags por Fase exactos.
 
 ## Esto corre un motor de JavaScript real. Dentro de un binario Go. Sin CGo.
 
@@ -45,14 +52,17 @@ un wrapper compilado en C# chiquito, para APIs que dependen de azúcar
 sintáctico exclusivo de C#).
 
 ```txt
-Estado: Fase 3.74 completa — un modelo real de Permissions/sandbox
+Estado: Fase 3.76 completa — un modelo real de Permissions sandbox
 deny-by-default con MaxStringBytes, un modelo de errores VMNET_*
 estructurado con stack traces reales en el formato de la spec, un
 evaluador general de árboles de expresión (Expression<T>.Compile()),
 una suite de tests golden auditada contra cada requisito documentado,
 una API pública de Go congelada con un compromiso real de semver, una
-suite de benchmarks real, y una caché de resolución de métodos/tokens
-(~35% menos overhead por llamada).
+suite de benchmarks real, una caché de resolución de métodos/tokens
+(~35% menos overhead por llamada), reportes HTML de compatibilidad
+autocontenidos, un analizador de migración para todo un directorio
+legacy (vmnet analyze), un generador de wrappers Go (vmnet bind), y un
+SDK de scaffolding dotnet new vmnet-plugin.
 
 Corpus actual: 19 paquetes NuGet reales chequeados con dependencias
 transitivas bajo netstandard-lite. 7 de 19 ya superan la barra del 97%
@@ -63,8 +73,7 @@ deliberadamente separados).
 
 Sigue: el resto de la Fase 4 — soporte real de Process/sockets
 (deliberadamente diferido, todavía sin demanda real del corpus), un set
-completo de comandos CLI, una matriz de CI multiplataforma, y una
-pasada final sobre el README de nivel superior.
+completo de comandos CLI, y una matriz de CI multiplataforma.
 ```
 
 **Demos verificados en tiempo de ejecución** — cada uno carga el paquete real, sin modificar,
@@ -158,7 +167,18 @@ La especificación técnica completa está en [`docs/es/spec.md`](docs/es/spec.m
 - **Checker de compatibilidad**: `vmnet check <dll>` reutiliza el pipeline
   de ejecución *real* para reportar, método por método, qué corre y qué no
   bajo un perfil dado (`minimal`/`rules`/`netstandard-lite`) — no es una
-  heurística separada adivinando.
+  heurística separada adivinando. `vmnet analyze <dir>` corre el mismo
+  checker sobre cada assembly de una carpeta `bin/` legacy completa a la
+  vez, rankeando qué tipos son los mejores candidatos de migración;
+  cualquiera de los dos también puede escribir un reporte HTML
+  autocontenido en vez de (o además de) texto plano. Ver [CLI y
+  herramientas](#cli-y-herramientas) más abajo.
+- **Generación de código**: `vmnet bind <dll>` genera funciones/métodos Go
+  idiomáticos y tipados directamente desde la metadata real de un
+  assembly, y `dotnet new vmnet-plugin` scaffoldea un proyecto de plugin
+  con la forma exacta para `CallBytes`/`CallJSON` — ambos pensados para
+  eliminar la fricción de tipear a mano literales de string
+  `Assembly.Call("Namespace.Tipo", "Método", ...)` en el uso cotidiano.
 - **NuGet**: `vmnet add`/`restore`/`packages` resuelven y descargan
   paquetes reales desde `api.nuget.org` (incluidas las dependencias
   transitivas), los cachean localmente, y se cargan con
@@ -255,7 +275,57 @@ Ejemplos corribles y documentados en [`examples/`](examples/):
 | [`examples/plugin-demo`](examples/plugin-demo) | Un plugin scaffoldeado desde `dotnet new vmnet-plugin`, con su starter generado reemplazado por una regla de negocio real, cargado vía `LoadFile` y llamado con `CallBytes`/`CallJSON` |
 | [`benchmarks/`](benchmarks) | La suite completa de benchmarks de la Fase 4: siete workloads corridos a través de vmnet y Go nativo lado a lado, más tiempo de carga en frío, overhead de invocación de método, asignaciones/op, y tiempo de restauración de paquete |
 
-## CLI
+## CLI y herramientas
+
+`vmnet inspect`/`il`/`run` son los building blocks de bajo nivel (metadata, IL decodificado,
+invocación directa). Los otros cuatro comandos de abajo son a los que el uso real recurre la
+mayoría de las veces — cada uno reutiliza el *mismo* pipeline real de ejecución/metadata sobre el
+que corre el propio intérprete, así que ninguno es una heurística separada adivinando
+compatibilidad:
+
+- **`vmnet check`** — ¿este assembly (o paquete NuGet) es seguro de cargar? Recorre cada método bajo
+  un perfil (`minimal`/`rules`/`netstandard-lite`) y reporta exactamente cuáles van a correr y
+  cuáles no, con una razón concreta para cada falta.
+  ```bash
+  vmnet check --profile=netstandard-lite mylib.dll
+  vmnet check package fluentvalidation@11.9.2
+  ```
+- **`vmnet analyze`** — el mismo chequeo, pero para toda una aplicación .NET legacy a la vez: lo
+  apuntás a una carpeta `bin/` y recorre cada `.dll` de adentro (tratando a los hermanos como
+  dependencias entre sí, exactamente como una app real desplegada), y después reporta totales, qué
+  está bloqueando el resto ("bloqueado por categoría" — Reflection, P/Invoke, un namespace BCL
+  específico, ...), y qué tipos son los mejores candidatos de migración, rankeados por su propio
+  ratio de métodos limpios.
+  ```bash
+  vmnet analyze ./legacy-dotnet/bin
+  ```
+- **`vmnet bind`** — genera código Go idiomático y tipado directamente desde la metadata real de un
+  assembly, así que llamarlo desde Go se ve como `engine.Evaluate("1 + 2")` en vez de literales de
+  string `asm.Call("Jint.Engine", "Evaluate", ...)`. Verificado contra un paquete NuGet real, sin
+  modificar (Jint 3.1.3 → 111 tipos generados, evaluación de JavaScript real funcionando de punta a
+  punta).
+  ```bash
+  vmnet bind package Jint@3.1.3 --out=./jintgo --package=jint
+  ```
+  Ver [`examples/bind-demo`](examples/bind-demo) y
+  [`docs/es/compatibility-profile.md`](docs/es/compatibility-profile.md) §3.2.
+- **`dotnet new vmnet-plugin`** — la otra dirección: scaffoldea un proyecto de plugin C# nuevo con
+  la forma exacta para `Assembly.CallBytes`/`CallJSON` (un `Entry.Invoke` de `byte[]`-entra/
+  `byte[]`-sale), así que escribir un plugin desde cero empieza con un comando en vez de un
+  `.csproj` vacío.
+  ```bash
+  dotnet new install ./templates/vmnet-plugin
+  dotnet new vmnet-plugin -n BillingRules
+  ```
+  Ver [`examples/plugin-demo`](examples/plugin-demo) y
+  [`docs/es/plugin-sdk.md`](docs/es/plugin-sdk.md).
+
+Tanto `vmnet check` como `vmnet analyze` aceptan `--html=<archivo>`, escribiendo el mismo
+resultado como una única página HTML autocontenida (sin fuentes/scripts externos) en vez de — o
+además de — texto plano, para entregarle un resultado de compatibilidad a alguien que no va a leer
+un dump de terminal.
+
+Referencia completa de comandos:
 
 ```txt
 vmnet inspect <dll>                                    # resumen de metadata
@@ -270,19 +340,6 @@ vmnet add <id>[@<version>]
 vmnet restore
 vmnet packages
 ```
-
-`--html=<archivo>` escribe el mismo resultado como una única página HTML autocontenida (sin
-fuentes/scripts externos) en vez de solo imprimir en la terminal — ver
-[`docs/es/compatibility-profile.md`](docs/es/compatibility-profile.md) §3.1 para la propia
-resolución entre assemblies y el ranking de "mejores candidatos de migración" de `vmnet analyze`, y
-§3.2 para la generación de código de `vmnet bind` (ver también
-[`examples/bind-demo`](examples/bind-demo)).
-
-¿Escribiendo un plugin desde cero en vez de llamar a un paquete existente? `dotnet new install
-./templates/vmnet-plugin && dotnet new vmnet-plugin -n BillingRules` scaffoldea un proyecto
-`Entry.Invoke` de `byte[]`-entra/`byte[]`-sale con la forma exacta para
-`Assembly.CallBytes`/`CallJSON` — ver [`docs/es/plugin-sdk.md`](docs/es/plugin-sdk.md) y
-[`examples/plugin-demo`](examples/plugin-demo).
 
 ## Arquitectura
 
