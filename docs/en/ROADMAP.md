@@ -6661,6 +6661,73 @@ cd examples/jint-advanced-demo && dotnet build -c Release && go run .
 ```
 
 ---
+## Fase 3.80 — closing Fase 3.79's last regex gap: parenthesized groups and backslash shorthand classes
+
+**Goal:** root-cause and fix the one regex gap Fase 3.79 left open — parenthesized groups
+(`(abc)`/`(?:abc)`) and backslash shorthand classes (`\d`/`\w`/`\s`) both translating incorrectly —
+rather than leave it undiagnosed. Also used this pass to re-measure the full compatibility corpus
+(19 certified packages plus the `Microsoft.Extensions.*` family) against Fase 3.79's own general
+CIL/BCL fixes, since several of those aren't Jint-specific.
+
+**Result: one missing overload — `StringBuilder.Append(string value, int startIndex, int count)`,
+the real substring-append shape — was the entire root cause of both symptoms. Regex now works for
+groups, shorthand classes, character classes, quantifiers, alternation, and anchors — everything
+Go's own RE2 engine can express (lookahead/lookbehind/backreferences remain a permanent, documented
+RE2-dialect limitation, not a bug). Separately, re-running the checker after Fase 3.79 found twelve
+of the 19 corpus packages, and twelve of the 17 `Microsoft.Extensions.*` family, had moved up —
+confirmed that Fase's fixes are genuinely general, not Jint-specific.**
+
+- **Root cause, precisely**: `Esprima.Scanner.RegExpParser.ParsePattern`'s own main loop appends a
+  parenthesized group's own opening delimiter(s) via `stringBuilder.Append(_pattern, index, 1 +
+  ((int)regExpGroupType >> 2))`, and a `\d`/`\w`/`\D`/`\W` shorthand class's own two characters via
+  the identical-shaped `stringBuilder.Append(pattern, num, 2)` — both calls to the real
+  `StringBuilder.Append(string, int, int)` substring overload. `internal/bcl/system_stringbuilder.go`'s
+  `sbAppend` only ever handled the 2-argument "stringify one value" shape every OTHER `Append`
+  overload collapses to (already documented as a real, narrow limitation for a boxed `char`
+  argument) — the 4-total-argument substring shape (receiver + string + startIndex + count) matched
+  no case at all and fell through doing nothing, silently dropping the substring instead of
+  appending it. Found by directly reading the real, decompiled IL of `ParsePattern` after Fase 3.79
+  narrowed the search to "some StringBuilder call Esprima's own regex translator makes" — the exact
+  same investigative path that had already found the `ToString(start,length)` bug one Fase earlier.
+- **Fixed** by extending `sbAppend` with a case for `len(args) == 4` with a `KindString` value and
+  two `KindI4` operands, extracting the real rune-based substring exactly like every other
+  string-indexing native in this codebase already does. Regression-tested directly
+  (`tests/fixtures/csharp/StringBuilderCapacityTest.cs`'s new `StringBuilderAppendSubstringTest`,
+  confirmed to fail — silently dropping the middle of the string — without the fix) rather than only
+  through the full Jint/Esprima pipeline, since the fixtures project has no Jint dependency to
+  exercise that pipeline directly.
+- **The compatibility corpus re-measurement** (`vmnet check package --profile=netstandard-lite
+  <id>@<version>`, run fresh against all 19 certified packages and all 17 measured
+  `Microsoft.Extensions.*` packages): twelve of the 19 moved up after Fase 3.79 landed — `Polly`
+  crossed the 97% bar (96.3% → 97.0%), `Serilog` (95.8% → 96.1%), `Jint` itself (96.4% → 96.7%,
+  reflecting this Fase's own regex fix too), and `NPOI`/`System.Text.Json`/`FluentValidation`/
+  `ClosedXML`/`Dapper`/`Humanizer.Core`/`NodaTime`/`AutoMapper`/`Newtonsoft.Json` all moved up by
+  smaller amounts. Twelve of the 17 `Microsoft.Extensions.*` packages moved up too, several
+  substantially (`Caching.Memory` 87.3% → 92.6%, `Logging.Console` 90.6% → 93.6%,
+  `Caching.Abstractions` 95.9% → 99.2%) — none of these packages were touched directly; the movement
+  is entirely from Fase 3.79's own general `constrained.`/`conv.u8`/`TimeSpan`/`Regex`/
+  `StringBuilder`/`Span<T>` fixes. One package's own number moved slightly down
+  (`Configuration.EnvironmentVariables`, 98.0% → 96.1%) for an entirely unrelated, pre-existing
+  `System.Environment.GetEnvironmentVariables`/`IDictionary`-enumeration gap this Fase never
+  touched — not a regression this Fase caused. Full updated tables in `docs/en/COMPATIBILITY.md`.
+- **`examples/jint-advanced-demo`** updated once more: `RunClassesRegexAndJson` now uses a real
+  parenthesized capturing group (`/order-(\d+)/.exec(text)[1]`) and `\d+` directly instead of the
+  `[0-9]+` character-class workaround Fase 3.79 needed; the demo's own top comment and README no
+  longer carry a "one gap remains" caveat for regex.
+
+### How to verify Fase 3.80
+
+```bash
+dotnet build tests/fixtures/csharp/Fixtures.csproj -c Release
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+go test -run "TestStringBuilderAppendSubstring" -v .
+cd examples/jint-advanced-demo && dotnet build -c Release && go run .
+```
+
+---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 
 **Goal:** turn the functional engine into an adoptable product — reliable, documented, and

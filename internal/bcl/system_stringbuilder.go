@@ -109,8 +109,29 @@ func sbAppend(args []runtime.Value) (runtime.Value, error) {
 	if err != nil {
 		return runtime.Value{}, err
 	}
-	if len(args) == 2 {
+	switch {
+	case len(args) == 2:
 		sb.buf += displayString(args[1])
+	case len(args) == 4 && args[1].Kind == runtime.KindString && args[2].Kind == runtime.KindI4 && args[3].Kind == runtime.KindI4:
+		// The real Append(string value, int startIndex, int count)
+		// substring overload (Fase 3.80) — every other Append overload
+		// here collapses to the plain "stringify the one value"
+		// 2-argument case above, but this one is a genuinely different
+		// shape (3 real arguments) that fell through doing nothing at
+		// all, silently dropping the substring instead of appending it.
+		// Found running real Esprima: Scanner.RegExpParser.ParsePattern's
+		// own `stringBuilder.Append(_pattern, index, 1 + ((int)
+		// regExpGroupType >> 2))` appends a capturing/non-capturing
+		// group's own opening delimiter(s) (`(`, `(?:`, `(?=`, ...) this
+		// way — every regex literal with at least one parenthesized
+		// group silently lost its own opening paren from the translated
+		// .NET pattern, turning `(abc)` into the invalid `abc)`.
+		runes := []rune(args[1].Str)
+		start, count := int(args[2].I4), int(args[3].I4)
+		if start < 0 || count < 0 || start+count > len(runes) {
+			return runtime.Value{}, &runtime.ManagedException{TypeName: "System.ArgumentOutOfRangeException", Message: "Index and length must refer to a location within the string."}
+		}
+		sb.buf += string(runes[start : start+count])
 	}
 	return args[0], nil
 }

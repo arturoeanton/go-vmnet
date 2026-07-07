@@ -2645,6 +2645,24 @@ func TestStringBuilderSubstringToString(t *testing.T) {
 	}
 }
 
+// TestStringBuilderAppendSubstring regresses Fase 3.80: StringBuilder.
+// Append(string value, int startIndex, int count) — the real
+// substring-append overload — must actually append the substring
+// instead of silently doing nothing. See tests/fixtures/csharp/
+// StringBuilderCapacityTest.cs's own doc comment for the real Jint/
+// Esprima regex-group/backslash-shorthand-class bug this mirrors.
+func TestStringBuilderAppendSubstring(t *testing.T) {
+	asm := loadFixture(t)
+
+	out, err := asm.Call("Vmnet.Fixtures.StringBuilderAppendSubstringTest", "Run")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got := out.Native().(string); got != "(world)" {
+		t.Errorf("Run() = %q, want %q", got, "(world)")
+	}
+}
+
 // TestRegexFeatures covers Fase 3.79's chain of real regex-support
 // fixes: the nativeRegex isinst/NativeTypeName registration (an "as
 // Regex" cast used to silently discard a real, just-constructed Regex),

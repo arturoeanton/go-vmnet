@@ -43,4 +43,30 @@ namespace Vmnet.Fixtures
             return sb.ToString(1, sb.Length - 2);
         }
     }
+
+    // Fase 3.80 golden fixture: regresses StringBuilder.Append(string
+    // value, int startIndex, int count) — the real substring-append
+    // overload silently did nothing at all (every other Append overload
+    // collapses to "stringify the one value", but this one is a
+    // genuinely different 3-real-argument shape that fell through
+    // unhandled). Found running real Jint/Esprima: Scanner.RegExpParser.
+    // ParsePattern's own `stringBuilder.Append(_pattern, index, 1 +
+    // ((int)regExpGroupType >> 2))` appends a parenthesized group's own
+    // opening delimiter(s) this way — every regex literal with a group
+    // silently lost its own opening paren from the translated .NET
+    // pattern (`(abc)` became the invalid `abc)`) — and the identical
+    // call shape (`stringBuilder.Append(pattern, num, 2)`) also appends
+    // `\d`/`\w`/`\s`/`\D`/`\W` backslash shorthand classes, which
+    // vanished from the translated pattern entirely for the same reason.
+    public static class StringBuilderAppendSubstringTest
+    {
+        public static string Run()
+        {
+            var sb = new StringBuilder();
+            sb.Append('(');
+            sb.Append("hello world", 6, 5);
+            sb.Append(')');
+            return sb.ToString();
+        }
+    }
 }

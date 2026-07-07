@@ -9,11 +9,12 @@ computational loop, function declarations/closures/recursion/arrow
 functions, array growth and higher-order methods (`.push`/`.sort`/
 `.slice`/`.reverse`/`.filter`/`.reduce`/`.map`/`.concat`), string methods,
 **ES6 classes** (inheritance, `super`, method overriding), **regular
-expressions** (`.test`/`.exec`/`.match`/`.replace`, global and
-non-global), `JSON.stringify` on real nested data with real numbers, and
-template literals — via a small compiled C# wrapper
-(`JintAdvancedWrapper.cs` in this directory) that drives `Engine.Evaluate`/
-`Engine.SetValue` directly.
+expressions — including parenthesized capturing groups and backslash
+shorthand classes (`\d`/`\w`/`\s`), not just character classes**
+(`.test`/`.exec`/`.match`/`.replace`, global and non-global),
+`JSON.stringify` on real nested data with real numbers, and template
+literals — via a small compiled C# wrapper (`JintAdvancedWrapper.cs` in
+this directory) that drives `Engine.Evaluate`/`Engine.SetValue` directly.
 
 Needs network access to nuget.org (to restore Jint) and a local `dotnet`
 SDK (to compile the wrapper — vmnet only runs already-compiled IL, it
@@ -31,10 +32,10 @@ RunSuite() = 28
 EvaluateWithData(order total) = 39
 Loop(2000) = 2.664667e+09
 RunFunctionsArraysAndStrings() = 55,3,42,1,3,5,8,9,3,5,9,8,5,3,1,5,8,9,26,HELLO WORLD,padded,H,6
-RunClassesRegexAndJson() = Processed 2 shapes and 3 orders | {"shapes":["Circle area=28","Square area=16"],"orderIds":["1234","5678","9999"],"masked":"order-XXXX, order-XXXX, order-XXXX"}
+RunClassesRegexAndJson() = Processed 2 shapes and 3 orders | {"shapes":["Circle area=28","Square area=16"],"orderIds":["1234","5678","9999"],"masked":"order-XXXX, order-XXXX, order-XXXX","firstOrder":"1234"}
 ```
 
-## What building this found: eight real bugs fixed, one real gap still open
+## What building this found: thirteen real bugs fixed, zero gaps left in what this demo exercises
 
 Building this demo's first drafts (closures, arrow-function callbacks on
 array methods, a recursive Fibonacci, an ES6 class hierarchy, `sort`/
@@ -162,19 +163,27 @@ each exact shape (`tests/fixtures/csharp/ConstrainedGenericTest.cs`,
 `RegexFeaturesTest.cs`, `TimeSpanComparisonTest.cs`) — each confirmed to
 fail without its fix and pass with it.
 
-**One real, narrower-than-it-first-looked gap remains**: regex patterns
-using a **parenthesized group** (capturing or not) or a **backslash
-shorthand class** (`\d`/`\w`/`\s`) still translate incorrectly — traced to
-Esprima's own hand-written regex-to-.NET pattern translator
-(`Scanner.RegExpParser.ParsePattern`, a `ref struct`-based state machine
-using an `Action<StringBuilder,char>?` delegate to append "processed"
-characters), not yet fully root-caused. Character classes (`[0-9]`,
-`[a-z]`, ...), literal text, quantifiers, and alternation all translate
-correctly — `RunClassesRegexAndJson` above sticks to those.
+**Fase 3.79 left one gap open, and Fase 3.80 closed it**: regex patterns
+using a parenthesized group (capturing or not) or a backslash shorthand
+class (`\d`/`\w`/`\s`) used to translate incorrectly — `(abc)` became the
+invalid pattern `abc)` (missing its own opening paren), and `\d`
+disappeared entirely. Root cause: Esprima's own regex-to-.NET pattern
+translator (`Scanner.RegExpParser.ParsePattern`) appends a group's own
+opening delimiter(s) and a shorthand class's own two characters via
+`StringBuilder.Append(string value, int startIndex, int count)` — the
+real substring-append overload, which had no native at all and silently
+did nothing (every other `Append` overload here collapses to "stringify
+the one value," a genuinely different 2-argument shape). One fix,
+`internal/bcl/system_stringbuilder.go`'s `sbAppend` gaining this
+3-argument overload, closed both symptoms at once — regression-tested in
+`tests/fixtures/csharp/StringBuilderCapacityTest.cs`'s own
+`StringBuilderAppendSubstringTest`. `RunClassesRegexAndJson` above now
+uses real groups and `\d` directly.
 
 See `docs/en/ROADMAP.md`'s own entries for this demo (Fase 3.77/3.78/
-3.79) for the complete, citable account of every finding, including exact
-error text and the precise script fragment each one reproduces with.
+3.79/3.80) for the complete, citable account of every finding, including
+exact error text and the precise script fragment each one reproduces
+with.
 
 ## Why the loop runs 2,000 iterations, not 100,000
 

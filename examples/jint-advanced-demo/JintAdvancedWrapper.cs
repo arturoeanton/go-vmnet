@@ -8,40 +8,37 @@ namespace VmnetJintAdvancedDemo
     // function declarations/closures/recursion/arrow functions, array
     // growth and higher-order methods (push/sort/slice/reverse/filter/
     // reduce/map/concat), string methods, ES6 classes (inheritance,
-    // `super`, private fields, getters), regular expressions (test/exec/
-    // match/replace, global and non-global, `Match.NextMatch`-style
-    // iteration), `JSON.stringify` on real nested data with real numbers,
-    // and template literals (including nested ones) — all real,
-    // unmodified Jint 3.1.3 IL running inside vmnet, no CGo, no dotnet
-    // runtime anywhere this Go binary actually runs.
+    // `super`, private fields, getters), regular expressions — including
+    // parenthesized capturing groups and backslash shorthand classes
+    // (`\d`/`\w`/`\s`), not just character classes — (test/exec/match/
+    // replace, global and non-global, `Match.NextMatch`-style iteration),
+    // `JSON.stringify` on real nested data with real numbers, and
+    // template literals (including nested ones) — all real, unmodified
+    // Jint 3.1.3 IL running inside vmnet, no CGo, no dotnet runtime
+    // anywhere this Go binary actually runs.
     //
-    // Getting all of that working took three Fases. Fase 3.77 found and
+    // Getting all of that working took four Fases (docs/en/ROADMAP.md has
+    // the full, citable account of every one). Fase 3.77 found and
     // root-caused three whole classes of real JavaScript that didn't run
     // at all. Fase 3.78 fixed two of them (function-object construction;
     // an overload-resolution heuristic misrouting several internal Jint
-    // calls). Fase 3.79 (docs/en/ROADMAP.md has the full account of all
-    // three) went back for the third and, chasing it down, found a much
-    // longer chain of real, narrow bugs across vmnet's own CIL/BCL
-    // support — a `constrained.`-prefixed generic interface call never
-    // being dereferenced (the actual ES6-class blocker), `conv.u8`
+    // calls). Fase 3.79 went back for the third (ES6 classes; `.concat`/
+    // `.map`/`JSON.stringify`/template literals beyond a single-digit
+    // number) and, chasing it down, found a much longer chain of real,
+    // narrow bugs — a `constrained.`-prefixed generic interface call
+    // never being dereferenced (the actual ES6-class blocker), `conv.u8`
     // sign-extending instead of zero-extending, `Span&lt;T&gt;.CopyTo`/
-    // `TryCopyTo` needing native registration to sidestep the real
-    // `sizeof`-on-an-open-generic gap entirely, and half a dozen
-    // regex/StringBuilder/TimeSpan natives that were simply never wired
-    // up (`StringBuilder.set_Capacity`/`ToString(start,length)`, a
-    // `Regex` object silently failing an `as Regex` cast, the
-    // count-limited `Match`/`Replace` overloads, `Capture.Index`/
-    // `Length`, `Match.NextMatch`, `MatchCollection`'s own indexer,
-    // `TimeSpan`'s comparison operators).
-    //
-    // One real, narrower-than-it-looks gap remains: regex patterns using
-    // a **parenthesized group** (capturing or not) or a **backslash
-    // shorthand class** (`\d`/`\w`/`\s`) still translate incorrectly —
-    // traced to Esprima's own hand-written regex-to-.NET pattern
-    // translator (`Scanner.RegExpParser.ParsePattern`), not yet fully
-    // root-caused. Character classes (`[0-9]`, `[a-z]`, ...), literal
-    // text, quantifiers, and alternation all translate correctly —
-    // `RunRegexAndClasses` below sticks to those.
+    // `TryCopyTo` sidestepping the real `sizeof`-on-an-open-generic gap
+    // entirely, and half a dozen regex/StringBuilder/TimeSpan natives
+    // that were simply never wired up. That same Fase got basic regex
+    // working (character classes, quantifiers, alternation) but left one
+    // real gap: parenthesized groups and `\d`/`\w`/`\s` shorthand classes
+    // still translated incorrectly. Fase 3.80 root-caused and fixed it —
+    // one missing overload, `StringBuilder.Append(string, int, int)`
+    // (the real substring-append shape), which Esprima's own
+    // regex-literal-to-.NET pattern translator uses for both a group's
+    // own opening delimiter(s) and a shorthand class's own two
+    // characters, silently doing nothing for either.
     public static class JintAdvancedWrapper
     {
         // RunSuite executes one script combining var/let/const (including
@@ -202,13 +199,15 @@ namespace VmnetJintAdvancedDemo
         }
 
         // RunClassesRegexAndJson exercises the third and last of Fase
-        // 3.77's originally-documented gaps, fixed in Fase 3.79 — ES6
-        // classes (inheritance, `super`, method overriding), `.map()`/
-        // `.concat()`, regular expressions (character classes,
-        // quantifiers, global and non-global `.match()`/`.replace()`),
-        // `JSON.stringify` on real nested arrays/objects with real
-        // (multi-digit) numbers, and template literals — all in one
-        // script.
+        // 3.77's originally-documented gaps — ES6 classes (inheritance,
+        // `super`, method overriding), `.map()`/`.concat()`, regular
+        // expressions (character classes, quantifiers, parenthesized
+        // capturing groups, backslash shorthand classes, global and
+        // non-global `.match()`/`.replace()`), `JSON.stringify` on real
+        // nested arrays/objects with real (multi-digit) numbers, and
+        // template literals — all in one script. Fase 3.79 fixed the
+        // first two; Fase 3.80 fixed the last real regex gap (groups and
+        // `\d`/`\w`/`\s` shorthand classes).
         public static string RunClassesRegexAndJson()
         {
             var engine = new Engine();
@@ -230,21 +229,21 @@ namespace VmnetJintAdvancedDemo
                 var shapes = [new Circle(3), new Square(4)];
                 var described = shapes.map(function (s) { return s.describe(); });
 
-                // Regular expressions: character classes, quantifiers,
-                // global match/replace (parenthesized groups and
-                // backslash shorthand classes like \d/\w/\s are the one
-                // known remaining gap — see this file's own top comment).
+                // Regular expressions: backslash shorthand classes (\d),
+                // parenthesized capturing groups, quantifiers, global
+                // match/replace.
                 var text = 'order-1234, order-5678, order-9999';
-                var orderIds = text.match(/[0-9]+/g);
-                var masked = text.replace(/[0-9]+/g, 'XXXX');
+                var orderIds = text.match(/\d+/g);
+                var masked = text.replace(/\d+/g, 'XXXX');
+                var firstOrder = /order-(\d+)/.exec(text)[1];
 
                 // JSON.stringify on real nested data with real,
-                // multi-digit numbers (Fase 3.77 could only do this for
-                // single-digit numbers).
+                // multi-digit numbers.
                 var payload = JSON.stringify({
                     shapes: described,
                     orderIds: orderIds,
-                    masked: masked
+                    masked: masked,
+                    firstOrder: firstOrder
                 });
 
                 // Template literals, including nesting.
