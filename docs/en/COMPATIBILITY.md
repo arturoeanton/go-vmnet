@@ -33,14 +33,22 @@ on purpose, for every package vmnet is measured against.
 | Package | Checker % | Demo |
 |---|---|---|
 | `DocumentFormat.OpenXml@3.1.1` | 100.0% (67,234 methods, 7 flagged) | [`examples/openxml-demo`](../../examples/openxml-demo) |
-| `NPOI@2.8.0` | 98.2% (14,202 methods, 256 flagged) | [`examples/npoi-demo`](../../examples/npoi-demo) |
-| `System.Text.Json@8.0.5` | 98.1% (3,577 methods, 69 flagged) | [`examples/system-text-json-demo`](../../examples/system-text-json-demo) |
-| `FluentValidation@11.9.2` | 98.1% (1,289 methods, 24 flagged) | [`examples/fluentvalidation-demo`](../../examples/fluentvalidation-demo) |
-| `ClosedXML@0.105.0` | 97.5% (10,444 methods, 266 flagged) | [`examples/closedxml-demo`](../../examples/closedxml-demo) |
-| `Jint@3.1.3` | 96.4% (5,414 methods, 193 flagged) | [`examples/jint-demo`](../../examples/jint-demo), [`examples/jint-nowrapper`](../../examples/jint-nowrapper) |
-| `Dapper@2.1.79` | 95.4% (1,047 methods, 48 flagged) | [`examples/dapper-demo`](../../examples/dapper-demo), [`examples/sqlite-demo`](../../examples/sqlite-demo) |
+| `NPOI@2.8.0` | 98.2% (14,202 methods, 249 flagged) | [`examples/npoi-demo`](../../examples/npoi-demo) |
+| `System.Text.Json@8.0.5` | 98.2% (3,577 methods, 66 flagged) | [`examples/system-text-json-demo`](../../examples/system-text-json-demo) |
+| `FluentValidation@11.9.2` | 98.2% (1,289 methods, 23 flagged) | [`examples/fluentvalidation-demo`](../../examples/fluentvalidation-demo) |
+| `ClosedXML@0.105.0` | 97.5% (10,444 methods, 257 flagged) | [`examples/closedxml-demo`](../../examples/closedxml-demo) |
+| `Jint@3.1.3` | 96.7% (5,414 methods, 178 flagged) | [`examples/jint-demo`](../../examples/jint-demo), [`examples/jint-nowrapper`](../../examples/jint-nowrapper), [`examples/jint-advanced-demo`](../../examples/jint-advanced-demo) |
+| `Dapper@2.1.79` | 95.5% (1,047 methods, 47 flagged) | [`examples/dapper-demo`](../../examples/dapper-demo), [`examples/sqlite-demo`](../../examples/sqlite-demo) |
 | `Microsoft.Extensions.DependencyInjection@8.0.0` | 94.1% (437 methods, 26 flagged) | [`examples/di-demo`](../../examples/di-demo) |
-| `Newtonsoft.Json@13.0.3` | 89.2% (4,064 methods, 441 flagged) | [`examples/newtonsoft-json-demo`](../../examples/newtonsoft-json-demo) |
+| `Newtonsoft.Json@13.0.3` | 89.2% (4,064 methods, 440 flagged) | [`examples/newtonsoft-json-demo`](../../examples/newtonsoft-json-demo) |
+
+Six of these nine numbers moved up in Fase 3.79 — not because that Fase targeted these packages
+directly (it was chasing Jint's own remaining gaps), but because several of its fixes are general
+CIL/BCL correctness fixes (a `constrained.`-prefixed generic interface call never being
+dereferenced, `conv.u8` sign- instead of zero-extending, `TimeSpan`'s comparison operators,
+`StringBuilder.set_Capacity`/`ToString(start,length)`, and half a dozen `Regex`/`Span<T>` natives)
+that plenty of other packages' own real code paths happen to hit too. Reproduced with the exact
+same `vmnet check package` invocation documented below, right after Fase 3.79 landed.
 
 ### Confidence notes
 
@@ -115,6 +123,14 @@ evaluates it, and returns a real result — both through a compiled wrapper and 
 all. The strongest evidence vmnet handles genuinely non-trivial, deeply object-oriented real-world
 code, not just small static-method libraries.
 
+Fase 3.77-3.79 took this from three whole documented-broken classes of real JavaScript (function
+declarations, array growth/string methods, ES6 classes/`.concat`/`.map`/`JSON.stringify`/regex) down
+to one narrower remaining gap (regex parenthesized groups and `\d`/`\w`/`\s` shorthand classes) —
+`examples/jint-advanced-demo` is the running proof, exercising closures, recursion, arrow functions,
+array higher-order methods, ES6 inheritance with `super`, regex `.test`/`.exec`/`.match`/`.replace`,
+`JSON.stringify` on real nested multi-digit data, and template literals, all in one script. See
+`docs/en/ROADMAP.md`'s Fase 3.77/3.78/3.79 entries for the complete, citable account.
+
 #### `Dapper@2.1.79`
 
 **Verified, two ways.** `dapper-demo` runs Dapper's real `SqlMapper.Query`/`Execute` against a fake
@@ -161,14 +177,14 @@ not confirmation that it does.
 | Package | Checker % |
 |---|---|
 | `Ardalis.GuardClauses@5.0.0` | 98.6% (285 methods, 4 flagged) |
-| `Humanizer.Core@2.14.1` | 98.3% (1,597 methods, 28 flagged) |
-| `Polly@8.7.0` | 96.3% (2,049 methods, 75 flagged) |
+| `Humanizer.Core@2.14.1` | 98.4% (1,597 methods, 25 flagged) |
+| `Polly@8.7.0` | 97.0% (2,049 methods, 61 flagged) |
 | `YamlDotNet@18.1.0` | 96.2% (2,182 methods, 82 flagged) |
-| `Serilog@4.3.1` | 95.8% (1,115 methods, 47 flagged) |
+| `Serilog@4.3.1` | 96.1% (1,115 methods, 43 flagged) |
 | `MediatR@14.2.0` | 95.5% (441 methods, 20 flagged) |
-| `NodaTime@3.3.2` | 94.7% (3,098 methods, 163 flagged) |
+| `NodaTime@3.3.2` | 94.8% (3,098 methods, 162 flagged) |
 | `CsvHelper@33.1.0` | 94.2% (1,393 methods, 81 flagged) |
-| `AutoMapper@16.2.0` | 94.1% (2,319 methods, 137 flagged) |
+| `AutoMapper@16.2.0` | 94.2% (2,319 methods, 135 flagged) |
 | `SimpleBase@4.0.0` | 92.6% (258 methods, 19 flagged) |
 | `Semver@2.3.0` | 92.9% (423 methods, 30 flagged) |
 
@@ -181,7 +197,10 @@ High coverage estimate; unverified by a real run.
 #### `Polly@8.7.0`
 
 High coverage estimate; unverified by a real run. Up in Fase 3.74 — `CancellationToken` had real
-natives since well before this Fase but no checker-profile allowlist entry at all.
+natives since well before this Fase but no checker-profile allowlist entry at all. **Crossed the
+97% bar in Fase 3.79** on the same general `TimeSpan`/`Regex`/`conv.u8`/`constrained.` fixes that
+moved several other packages in this doc — Polly's own retry/circuit-breaker timing logic leans on
+`TimeSpan` comparisons.
 
 #### `YamlDotNet@18.1.0`
 
@@ -190,7 +209,7 @@ Good coverage estimate; unverified by a real run.
 #### `Serilog@4.3.1`
 
 Good coverage estimate; unverified by a real run. Up in Fase 3.74 (`CancellationToken` profile
-fix).
+fix); up again in Fase 3.79 (the same general `TimeSpan`/`Regex`/`Span<T>` fixes as `Polly` above).
 
 #### `MediatR@14.2.0`
 
@@ -199,7 +218,8 @@ fix).
 
 #### `NodaTime@3.3.2`, `SimpleBase@4.0.0`, `Semver@2.3.0`
 
-Good-to-high coverage estimate; unverified by a real run.
+Good-to-high coverage estimate; unverified by a real run. `NodaTime`'s own number moved slightly in
+Fase 3.79 (`TimeSpan`/`conv.u8`).
 
 #### `CsvHelper@33.1.0`
 
@@ -229,17 +249,16 @@ recurses far beyond a safety limit added this Fase specifically to convert what 
 process crash into a graceful error — see `docs/en/ROADMAP.md` Fase 3.66's own "Found, not fixed"
 section. Tracked as [issue #1](https://github.com/arturoeanton/go-vmnet/issues/1).
 
-Not yet a working demo.
+Not yet a working demo. Checker % up slightly in Fase 3.79 (the same general `conv.u8`/
+`constrained.` fixes as several other packages in this doc).
 
 ## Aggregate numbers, and why the per-package number matters more
 
-- **Simple average across all 19 packages: 95.8%** (up from 94.45% before Fase 3.74's own
-  corpus-wide sweep — see `docs/en/ROADMAP.md` for that Fase's own methodology, in the same
-  "aggregate the checker's findings across the WHOLE corpus by real callee, not per-package" spirit
-  as the earlier Fase 3.54-3.58 sweep: `IReadOnlyDictionary\`2`/`ArraySegment\`1`/`Array.CopyTo`/
-  `Exception.Source`/`KeyNotFoundException`/`ICollection\`1.IsReadOnly` natives, plus a
-  `CancellationToken` checker-profile allowlist entry that had simply never existed despite real
-  natives backing it since well before this Fase).
+- **Simple average across all 19 packages: 95.9%** (up from 95.8% before Fase 3.79's own general
+  CIL/BCL fixes — `constrained.` receiver dereferencing, `conv.u8` zero-extension, `TimeSpan`
+  comparison operators, and half a dozen `Regex`/`StringBuilder`/`Span<T>` natives — moved twelve
+  of the nineteen; up from 94.45% before Fase 3.74's own corpus-wide sweep before that. See
+  `docs/en/ROADMAP.md` for each Fase's own methodology).
 - **Methods-weighted average: ~98.4%** — but this is dominated by `DocumentFormat.OpenXml`'s own
   67,234 analyzed methods (55% of every method analyzed across all 19 packages combined) sitting
   at 100%. A weighted average answers "what fraction of all analyzed method calls across this
@@ -249,21 +268,22 @@ Not yet a working demo.
   average. An average can hide a badly-covered package that breaks the moment someone actually
   depends on it, even while other packages compensate for it in the mean.
 
-As of this writing, 7 of 19 packages are at or above that bar:
+As of this writing, 8 of 19 packages are at or above that bar:
 
 | Package | Checker % |
 |---|---|
 | `DocumentFormat.OpenXml` | 100.0% |
 | `Ardalis.GuardClauses` | 98.6% |
-| `Humanizer.Core` | 98.3% |
+| `Humanizer.Core` | 98.4% |
 | `NPOI` | 98.2% |
-| `System.Text.Json` | 98.1% |
-| `FluentValidation` | 98.1% |
+| `System.Text.Json` | 98.2% |
+| `FluentValidation` | 98.2% |
 | `ClosedXML` | 97.5% (crossed the bar in Fase 3.74) |
+| `Polly` | 97.0% (crossed the bar in Fase 3.79) |
 
 The rest are active hardening targets, prioritized by how far below 97% they sit and by how much
-real-world usage they represent. `Jint` (96.4%) and `Polly`/`YamlDotNet` (96.3%/96.2%) are the
-closest of the remaining twelve.
+real-world usage they represent. `Jint` (96.7%) and `YamlDotNet`/`Serilog` (96.2%/96.1%) are the
+closest of the remaining eleven.
 
 ## The `Microsoft.Extensions.*` family — official Microsoft frameworks, a separate, ongoing measurement
 
@@ -271,30 +291,34 @@ Distinct from the 19-package corpus above (this project's own long-running compa
 Fase 3.60 started measuring official Microsoft `Microsoft.Extensions.*` packages specifically —
 the modern .NET building blocks (dependency injection, configuration, logging, options, caching)
 every ASP.NET Core and worker-service app is built on. Checker %, `netstandard-lite` profile, full
-transitive deps, as of Fase 3.60:
+transitive deps, refreshed after Fase 3.79 (most of this family moved — the same general
+`constrained.`/`conv.u8`/`TimeSpan`/`Regex`/`StringBuilder`/`Span<T>` fixes as the main 19-package
+corpus above):
 
 | Package | Checker % |
 |---|---|
 | `Microsoft.Extensions.Configuration.Abstractions@8.0.0` | 100.0% |
 | `Microsoft.Extensions.Options.ConfigurationExtensions@8.0.0` | 100.0% |
 | `Microsoft.Extensions.Options@8.0.0` | 99.7% |
+| `Microsoft.Extensions.Caching.Abstractions@8.0.0` | 99.2% (up from 95.9%) |
+| `Microsoft.Extensions.Logging@8.0.0` | 99.6% (up from 98.1%) |
 | `Microsoft.Extensions.Configuration.Json@8.0.0` | 98.8% |
-| `Microsoft.Extensions.Logging@8.0.0` | 98.1% |
-| `Microsoft.Extensions.Configuration.EnvironmentVariables@8.0.0` | 98.0% |
-| `Microsoft.Extensions.Logging.Abstractions@8.0.0` | 97.8% |
-| `Microsoft.Extensions.Configuration@8.0.0` | 97.2% |
-| `Microsoft.Extensions.Primitives@8.0.0` | 96.9% |
+| `Microsoft.Extensions.Logging.Abstractions@8.0.0` | 98.8% (up from 97.8%) |
+| `Microsoft.Extensions.Configuration@8.0.0` | 98.8% (up from 97.2%) |
+| `Microsoft.Extensions.Primitives@8.0.0` | 98.3% (up from 96.9%) |
+| `Microsoft.Extensions.Configuration.EnvironmentVariables@8.0.0` | 96.1% (down from 98.0% — an
+  unrelated, pre-existing `System.Environment.GetEnvironmentVariables`/`IDictionary` enumeration
+  gap; not touched by Fase 3.79, and not a regression it caused) |
 | `Microsoft.Extensions.Configuration.FileExtensions@8.0.0` | 95.9% |
-| `Microsoft.Extensions.Caching.Abstractions@8.0.0` | 95.9% |
-| `System.ComponentModel.Annotations@5.0.0` | 94.1% |
-| `Microsoft.Extensions.DependencyInjection.Abstractions@8.0.0` | 94.0% |
-| `Microsoft.Extensions.Logging.Console@8.0.0` | 90.6% |
-| `Microsoft.Extensions.Configuration.Binder@8.0.0` | 89.4% |
-| `Microsoft.Extensions.DependencyInjection@8.0.0` | 89.5% (**verified with a real demo**, above) |
-| `Microsoft.Extensions.Caching.Memory@8.0.0` | 87.3% |
+| `System.ComponentModel.Annotations@5.0.0` | 95.8% (up from 94.1%) |
+| `Microsoft.Extensions.DependencyInjection.Abstractions@8.0.0` | 95.5% (up from 94.0%) |
+| `Microsoft.Extensions.DependencyInjection@8.0.0` | 94.1% (**verified with a real demo**, above) |
+| `Microsoft.Extensions.Logging.Console@8.0.0` | 93.6% (up from 90.6%) |
+| `Microsoft.Extensions.Caching.Memory@8.0.0` | 92.6% (up from 87.3%) |
+| `Microsoft.Extensions.Configuration.Binder@8.0.0` | 90.1% (up from 89.4%) |
 
-Simple average: 95.50%. `DependencyInjection`'s own real end-to-end demo (see above) is the
-strongest proof so far: a real, unmodified official package running its actual
+Simple average: 96.9% (up from 95.5%). `DependencyInjection`'s own real end-to-end demo (see above)
+is the strongest proof so far: a real, unmodified official package running its actual
 constructor-injection logic, not just a static estimate. The rest of this family is next in line
 for the same real-run treatment.
 
