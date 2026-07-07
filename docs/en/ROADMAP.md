@@ -6842,6 +6842,84 @@ cd examples/csvhelper-demo && dotnet build CsvHelperDemoWrapper.csproj -c Releas
 ```
 
 ---
+
+## Fase 3.82 — the first real network access (`System.Net.Http`), and English-only documentation
+
+**Goal:** two independent, unrelated changes landing in the same pass. First, real, host-visible
+network access — `System.Net.Http`, scoped to the exact real corpus demand found (ClosedXML's own
+netstandard2.0 `PolyfillExtensions` shim), gated by `Permissions.AllowNetwork`, reserved since Fase
+3.59 but never enforced until now. Second, a documentation policy change: this project has carried
+a full bilingual (English/Spanish) documentation set since early on; going forward, every doc under
+`docs/` is English-only, with `README.es.md` kept as the sole Spanish artifact — a landing page
+synced with `README.md`'s own content, not a parallel deep-documentation tree that needs updating
+twice on every single Fase.
+
+**Result: `System.Net.Http.HttpClient.GetAsync` + `HttpResponseMessage` + `HttpContent.ReadAs*Async`
+now work end to end against a real HTTP server, verified with a real loopback `httptest` server (no
+real internet access needed for the test itself) and confirmed to lift ClosedXML's own checker
+number (97.5% → 97.6%, 257 → 252 flagged methods). `docs/es/` (13 files, ~2,400 lines) is removed
+from the repository; `docs/en/` is now the only documentation tree.**
+
+### `System.Net.Http` (`internal/bcl/system_net_http.go`)
+
+- **Scoped to real, measured demand, not speculative full coverage.** Running the checker against
+  `ClosedXML@0.105.0` and grepping every `System.Net.*` finding turned up exactly six members, all
+  inside one internal polyfill shim implementing newer .NET Standard 2.1 convenience methods
+  (`HttpClient.GetByteArrayAsync`/`GetStreamAsync`/`GetStringAsync`) on top of the older,
+  netstandard2.0-available primitives: `HttpClient.GetAsync`, `HttpResponseMessage.
+  EnsureSuccessStatusCode`/`get_Content`, and `HttpContent.ReadAsStreamAsync`/
+  `ReadAsByteArrayAsync`/`ReadAsStringAsync`. No POST/PUT, no request headers, no
+  `HttpRequestMessage` construction anywhere in the certified corpus — none of those are
+  implemented; a real caller needing them gets the ordinary "unsupported BCL method" error, not a
+  silent wrong answer.
+- **Every request runs synchronously to completion** before `GetAsync` returns — an
+  already-completed (or already-faulted, on any transport failure) `Task<HttpResponseMessage>`,
+  matching this project's synchronous async model throughout (`system_task.go`'s own doc comment):
+  a real compiler-generated async state machine's `MoveNext()` still runs start-to-finish in one
+  call, needing no interpreter changes.
+- **Gated by `Permissions.AllowNetwork`** (`internal/interpreter/permissions.go`'s new `gateNetwork`)
+  — the first native this project has ever gated on that specific capability, previously reserved
+  but unenforced since Fase 3.59's own `Permissions` model landed. Denied the same way every other
+  capability is: no real connection is even attempted.
+- Regression-tested against a real local `httptest.Server` (`tests/fixtures/csharp/
+  HttpClientTest.cs` + `TestHttpClient_GetAsync`, `vmnet_test.go`) — denied-by-default, a real GET
+  round-trip, `ReadAsByteArrayAsync`, `IsSuccessStatusCode` on a 404, and `EnsureSuccessStatusCode`
+  throwing a real `HttpRequestException` — confirmed to fail without the feature via a temporary
+  `git stash`. The fixture's async methods each have a plain synchronous `RunXxx` entry point that
+  unwraps the `Task` via `GetAwaiter().GetResult()` (same convention as `Async.cs`'s own
+  `AsyncTest` fixture) — calling an `async Task<T>` method directly via `Assembly.Call` returns the
+  `Task` object itself, not its unwrapped result, the same gotcha this Fase's own test run into
+  before finding the right calling shape.
+
+### English-only documentation
+
+- **`docs/es/` removed entirely** (`api-stability.md`, `architecture.md`, `compatibility-profile.md`,
+  `COMPATIBILITY.md`, `nuget-support.md`, `plugin-sdk.md`, `ROADMAP.md`, `security.md`, `spec.md`,
+  `supported-bcl.md`, `supported-il.md`, `adr/0001-pure-go-core.md`, `adr/0002-package-layout.md`) —
+  every one of these had needed a true, hand-maintained translation kept in sync with its English
+  counterpart on every single Fase, a maintenance cost that scaled with the project's own growth
+  rather than staying fixed.
+- **`README.es.md` stays**, rewritten to match this Fase's own `README.md` updates (the `v0.9.0`
+  release, the CsvHelper/HTTP additions) with every `docs/es/*` link repointed to its `docs/en/*`
+  equivalent — a landing page for Spanish-speaking readers, not a duplicate documentation tree.
+- **`CONTRIBUTING.md`** updated: its own instruction to "mirror a new ADR in `docs/es/adr/`" is gone,
+  replaced with a plain statement of the new English-only policy and `README.es.md`'s own exception.
+- Every historical Fase entry elsewhere in this file that mentions a `docs/es/*` path is left
+  untouched — this is a historical record of what actually happened at the time, not a set of live
+  navigation links to keep working forever.
+
+### How to verify Fase 3.82
+
+```bash
+dotnet build tests/fixtures/csharp/Fixtures.csproj -c Release
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+go test -run "TestHttpClient_GetAsync" -v .
+```
+
+---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 
 **Goal:** turn the functional engine into an adoptable product — reliable, documented, and

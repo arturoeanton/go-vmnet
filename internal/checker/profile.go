@@ -379,6 +379,14 @@ func init() {
 		"System.IO.TextReader::",
 		"System.IO.IOException",
 		"System.IO.EndOfStreamException",
+		// System.Net.Http (Fase 3.82) — see internal/bcl/system_net_http.go's
+		// own doc comment for the narrow, real-corpus-scoped surface this
+		// covers (HttpClient.GetAsync + HttpResponseMessage +
+		// HttpContent.ReadAs*Async only).
+		"System.Net.Http.HttpClient::",
+		"System.Net.Http.HttpResponseMessage::",
+		"System.Net.Http.HttpContent::",
+		"System.Net.Http.HttpRequestException",
 		"System.Xml.XmlWriter::",
 		"System.Xml.XmlWriterSettings::",
 		"System.Xml.Linq.XDocument::",

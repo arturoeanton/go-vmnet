@@ -67,6 +67,7 @@ row describing what it exercises.
   module in the description (e.g. "Fase 1 · /pe: RVA→offset").
 - Add tests alongside the code, not in a separate PR.
 - If the PR introduces a non-trivial architecture decision, document it as
-  an ADR in `docs/en/adr/` — and mirror it in `docs/es/adr/` so both stay
-  true translations of each other, per this repo's bilingual documentation
-  convention.
+  an ADR in `docs/en/adr/`. Documentation is English-only (Fase 3.82) —
+  the sole exception is `README.es.md`, a Spanish landing page kept in
+  sync with `README.md`'s own content; every deeper doc lives only under
+  `docs/en/`.

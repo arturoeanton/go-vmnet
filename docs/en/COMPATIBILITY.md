@@ -36,7 +36,7 @@ on purpose, for every package vmnet is measured against.
 | `NPOI@2.8.0` | 98.2% (14,202 methods, 249 flagged) | [`examples/npoi-demo`](../../examples/npoi-demo) |
 | `System.Text.Json@8.0.5` | 98.2% (3,577 methods, 66 flagged) | [`examples/system-text-json-demo`](../../examples/system-text-json-demo) |
 | `FluentValidation@11.9.2` | 98.2% (1,289 methods, 23 flagged) | [`examples/fluentvalidation-demo`](../../examples/fluentvalidation-demo) |
-| `ClosedXML@0.105.0` | 97.5% (10,444 methods, 257 flagged) | [`examples/closedxml-demo`](../../examples/closedxml-demo) |
+| `ClosedXML@0.105.0` | 97.6% (10,444 methods, 252 flagged) | [`examples/closedxml-demo`](../../examples/closedxml-demo) |
 | `Jint@3.1.3` | 96.7% (5,414 methods, 178 flagged) | [`examples/jint-demo`](../../examples/jint-demo), [`examples/jint-nowrapper`](../../examples/jint-nowrapper), [`examples/jint-advanced-demo`](../../examples/jint-advanced-demo) |
 | `Dapper@2.1.79` | 95.5% (1,047 methods, 47 flagged) | [`examples/dapper-demo`](../../examples/dapper-demo), [`examples/sqlite-demo`](../../examples/sqlite-demo) |
 | `CsvHelper@33.1.0` | 94.5% (1,393 methods, 76 flagged) | [`examples/csvhelper-demo`](../../examples/csvhelper-demo) |
@@ -116,6 +116,10 @@ subject of a real, fixed non-deterministic hang (Fase 3.44) — now stable acros
 **Crossed the 97% bar in Fase 3.74**: `IReadOnlyDictionary\`2` (a real `Dictionary\`2` receiver
 dispatches to it identically to `IDictionary\`2`, verified with a real round-trip test) accounted
 for the largest single chunk of what was flagged.
+
+Up again in Fase 3.82: `System.Net.Http.HttpClient.GetAsync`/`HttpResponseMessage`/
+`HttpContent.ReadAs*Async` — the exact real surface an internal netstandard2.0 polyfill shim
+(`PolyfillExtensions`) needs — went from unsupported to real, gated by `Permissions.AllowNetwork`.
 
 #### `Jint@3.1.3`
 

@@ -11,9 +11,12 @@ real execution pipeline: a compatibility checker, a whole-directory
 migration analyzer, a Go wrapper code generator, and a plugin scaffolding
 SDK — see [CLI and tooling](#cli-and-tooling) below.
 
-**Current release: [v0.8.0](https://github.com/arturoeanton/go-vmnet/releases/tag/v0.8.0)** — adds
-HTML compatibility reports, `vmnet analyze`, `vmnet bind`, and the `dotnet new vmnet-plugin` SDK
-described below on top of `v0.7.0`'s interpreter core, checker, and frozen public API (see
+**Current release: [v0.9.0](https://github.com/arturoeanton/go-vmnet/releases/tag/v0.9.0)** — adds a
+working `examples/csvhelper-demo` (CsvHelper's real, reflection-only `AutoMap()` path, no `ClassMap`
+registered at all), the project's first real, host-visible network access
+(`System.Net.Http.HttpClient`/`HttpResponseMessage`/`HttpContent`, gated by the existing
+`Permissions.AllowNetwork` capability), and a hardened Jint/Esprima pass (ES6 classes, real regex
+groups and shorthand classes), on top of `v0.8.0`'s tooling and `v0.7.0`'s frozen public API (see
 [`docs/en/api-stability.md`](docs/en/api-stability.md) for the semver commitment and
 [`docs/en/ROADMAP.md`](docs/en/ROADMAP.md) for the exact commits and per-Fase tags).
 
@@ -69,9 +72,13 @@ corpus: 95.8% (see docs/en/COMPATIBILITY.md for the always-current
 per-package breakdown — checker %, real demo, and confidence kept
 deliberately separate).
 
-Next: the rest of Fase 4 — real Process/socket support (deliberately
-deferred, no real corpus demand found so far), a complete CLI command
-set, and a cross-platform CI matrix.
+Since then: CsvHelper's real AutoMap() reflection path now works end to
+end (examples/csvhelper-demo), and the first real network access has
+landed (System.Net.Http.HttpClient, gated by Permissions.AllowNetwork) —
+see docs/en/ROADMAP.md's Fase 3.81/3.82 entries.
+
+Next: real Process/raw-socket support (deliberately deferred, no real
+corpus demand found for either so far) and a cross-platform CI matrix.
 ```
 
 **Runtime-verified demos** — each one loads the real, unmodified package from nuget.org and
@@ -86,6 +93,7 @@ compares its output against real .NET:
 | [System.Text.Json](examples/system-text-json-demo) / [Newtonsoft.Json](examples/newtonsoft-json-demo) | Real JSON parsing |
 | [Dapper](examples/dapper-demo) | `Query`/`Execute` over a fake in-memory ADO.NET provider |
 | [Dapper + Microsoft.Data.Sqlite](examples/sqlite-demo) | The same real Dapper code over a real, Go-native SQLite provider — independently verified with the real `sqlite3` CLI |
+| [CsvHelper](examples/csvhelper-demo) | `CsvReader.GetRecords<T>()` with **no `ClassMap` registered** — CsvHelper's own reflection-only `AutoMap()` path |
 | [FluentValidation](examples/fluentvalidation-demo) | Real object validation, including a numeric range validator |
 | [Microsoft.Extensions.DependencyInjection](examples/di-demo) | Microsoft's own official DI container resolving real constructor injection |
 | [Permissions](examples/permissions-demo) | The deny-by-default `Permissions` gate — the same compiled C# run three times against three different capability grants |
@@ -178,10 +186,13 @@ The full technical specification is in [`docs/en/spec.md`](docs/en/spec.md).
   limits, a panic anywhere in interpreted code recovered at the API
   boundary (a broken or adversarial plugin can't crash the host process),
   and a real, deny-by-default `Permissions` gate (`AllowFileRead`/
-  `AllowFileWrite`) in front of every native that touches real disk I/O.
-  This is a **stability-plus-file-I/O** boundary today, not yet a full
-  trust boundary (no network/process-spawning surface exists at all yet,
-  by design) — see [`docs/en/security.md`](docs/en/security.md) for the
+  `AllowFileWrite`/`AllowNetwork`) in front of every native that touches
+  real disk I/O or the network — `AllowNetwork` gates the one real,
+  outbound HTTP surface that exists today (`System.Net.Http.HttpClient.
+  GetAsync` plus `HttpResponseMessage`/`HttpContent`). This is a
+  **stability-plus-file-I/O-plus-outbound-HTTP** boundary today, not yet a
+  full trust boundary (no process-spawning surface exists at all yet, by
+  design) — see [`docs/en/security.md`](docs/en/security.md) for the
   honest threat model before running untrusted C# through vmnet.
 
 See [`docs/en/ROADMAP.md`](docs/en/ROADMAP.md) for the full phase-by-phase
@@ -256,6 +267,7 @@ Runnable, documented examples in [`examples/`](examples/):
 | [`examples/calculator`](examples/calculator) | An arithmetic/loop workload run through vmnet, native Go, and (optionally) real CoreCLR side by side, for a correctness-and-speed comparison |
 | [`examples/dapper-demo`](examples/dapper-demo) | The real Dapper NuGet package's own `SqlMapper.Query`/`Execute`, run against a minimal fake in-memory ADO.NET provider — no real database, no dotnet SDK needed at runtime |
 | [`examples/sqlite-demo`](examples/sqlite-demo) | The same real Dapper code running against vmnet's own real, Go-native `Microsoft.Data.Sqlite` provider — a genuine embedded SQLite `.db` file, independently re-opened and integrity-checked by the real `sqlite3` CLI afterward |
+| [`examples/csvhelper-demo`](examples/csvhelper-demo) | The real CsvHelper NuGet package's `CsvReader.GetRecords<T>()` with zero `ClassMap` registered — CsvHelper's own reflection-only `AutoMap()` path constructing the record type and every member map purely at runtime |
 | [`examples/fluentvalidation-demo`](examples/fluentvalidation-demo) | The real FluentValidation NuGet package validating a real object, including a numeric range validator (`GreaterThanOrEqualTo`) dispatched through a generic base/derived validator hierarchy |
 | [`examples/di-demo`](examples/di-demo) | Microsoft's own official `Microsoft.Extensions.DependencyInjection` container resolving a service whose constructor depends on another registered service, unmodified |
 | [`examples/permissions-demo`](examples/permissions-demo) | The same compiled C# run three times against three different `Permissions` grants — denied, file-read-only, and fully granted (independently re-read from Go to confirm a real file, not an in-memory illusion) |

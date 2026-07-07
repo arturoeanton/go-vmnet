@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -2908,4 +2910,83 @@ func TestBooleanTryParse(t *testing.T) {
 			t.Errorf("TryParseRoundTrip(%q) = %q, want %q", tt.text, got, tt.want)
 		}
 	}
+}
+
+// TestHttpClient_GetAsync regresses Fase 3.82: real, host-visible
+// System.Net.Http support (HttpClient.GetAsync + HttpResponseMessage +
+// HttpContent.ReadAs*Async), gated by Permissions.AllowNetwork exactly
+// like every other real-I/O capability in this project — the exact shape
+// ClosedXML's own netstandard2.0 PolyfillExtensions shim uses (see
+// tests/fixtures/csharp/HttpClientTest.cs's own doc comment). Uses a real
+// loopback HTTP server (httptest), never the actual internet, so this
+// needs no VMNET_NETWORK_TESTS gate.
+func TestHttpClient_GetAsync(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/hello":
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("hello from vmnet"))
+		case "/notfound":
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	t.Run("denied by default", func(t *testing.T) {
+		asm := loadFixtureWithPermissions(t, nil)
+		_, err := asm.Call("Vmnet.Fixtures.HttpClientTest", "RunGetString", String(srv.URL+"/hello"))
+		if err == nil {
+			t.Fatal("GetStringViaGetAsync with no Permissions granted succeeded, want UnauthorizedAccessException")
+		}
+		var ex *runtime.ManagedException
+		if !errors.As(err, &ex) || ex.TypeName != "System.UnauthorizedAccessException" {
+			t.Errorf("GetStringViaGetAsync error = %v, want a System.UnauthorizedAccessException", err)
+		}
+	})
+
+	t.Run("granted: real GET request round-trips through a real loopback HTTP server", func(t *testing.T) {
+		asm := loadFixtureWithPermissions(t, func(p *Permissions) { p.AllowNetwork = true })
+		out, err := asm.Call("Vmnet.Fixtures.HttpClientTest", "RunGetString", String(srv.URL+"/hello"))
+		if err != nil {
+			t.Fatalf("GetStringViaGetAsync error = %v", err)
+		}
+		if got := out.Native().(string); got != "hello from vmnet" {
+			t.Errorf("GetStringViaGetAsync() = %q, want %q", got, "hello from vmnet")
+		}
+	})
+
+	t.Run("ReadAsByteArrayAsync", func(t *testing.T) {
+		asm := loadFixtureWithPermissions(t, func(p *Permissions) { p.AllowNetwork = true })
+		out, err := asm.Call("Vmnet.Fixtures.HttpClientTest", "RunGetByteCount", String(srv.URL+"/hello"))
+		if err != nil {
+			t.Fatalf("GetByteCountViaGetAsync error = %v", err)
+		}
+		want := int32(len("hello from vmnet"))
+		if got := out.Native().(int32); got != want {
+			t.Errorf("GetByteCountViaGetAsync() = %d, want %d", got, want)
+		}
+	})
+
+	t.Run("IsSuccessStatusCode is false for a 404", func(t *testing.T) {
+		asm := loadFixtureWithPermissions(t, func(p *Permissions) { p.AllowNetwork = true })
+		out, err := asm.Call("Vmnet.Fixtures.HttpClientTest", "RunIsSuccess", String(srv.URL+"/notfound"))
+		if err != nil {
+			t.Fatalf("IsSuccessViaGetAsync error = %v", err)
+		}
+		if got := out.Native().(int32); got != 0 {
+			t.Errorf("IsSuccessViaGetAsync(404) = true, want false")
+		}
+	})
+
+	t.Run("EnsureSuccessStatusCode throws a real HttpRequestException on 404", func(t *testing.T) {
+		asm := loadFixtureWithPermissions(t, func(p *Permissions) { p.AllowNetwork = true })
+		_, err := asm.Call("Vmnet.Fixtures.HttpClientTest", "RunEnsureSuccessThrowsOn404", String(srv.URL+"/notfound"))
+		if err == nil {
+			t.Fatal("EnsureSuccessThrowsOn404 succeeded, want a propagated HttpRequestException")
+		}
+		var ex *runtime.ManagedException
+		if !errors.As(err, &ex) || ex.TypeName != "System.Net.Http.HttpRequestException" {
+			t.Errorf("EnsureSuccessThrowsOn404 error = %v, want a System.Net.Http.HttpRequestException", err)
+		}
+	})
 }

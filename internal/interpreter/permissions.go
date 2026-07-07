@@ -79,6 +79,13 @@ var permissionGatedBCLNatives = map[string]permissionGate{
 	// which documented this as a real, unrestricted-file-I/O finding
 	// before a Permissions model existed to gate it at all.
 	"Microsoft.Data.Sqlite.SqliteConnection::Open": gateFileReadAndWrite,
+
+	// Fase 3.82: the first real, host-visible network access
+	// (internal/bcl/system_net_http.go) — a genuine outbound HTTP
+	// request, gated by AllowNetwork exactly like Permissions.AllowNetwork's
+	// own doc comment always said it eventually would be, rather than
+	// retrofitted after the fact the way the two file natives above were.
+	"System.Net.Http.HttpClient::GetAsync": gateNetwork,
 }
 
 // permissionGatedBCLCtors mirrors permissionGatedBCLNatives for
@@ -115,6 +122,18 @@ func gateFileReadAndWrite(p *runtime.Permissions, args []runtime.Value) error {
 		return err
 	}
 	return gateFileWrite(p, args)
+}
+
+// gateNetwork backs System.Net.Http.HttpClient::GetAsync (Fase 3.82) — the
+// first native this project has ever gated on AllowNetwork, previously
+// reserved but unenforced (see Permissions.AllowNetwork's own doc
+// comment). Denied the same way every other capability here is: no real
+// connection is even attempted.
+func gateNetwork(p *runtime.Permissions, args []runtime.Value) error {
+	if p == nil || !p.AllowNetwork {
+		return unauthorized("An attempt was made to access the network")
+	}
+	return nil
 }
 
 // gateByFileModeArg1 backs both System.IO.FileStream::.ctor (args[0] is

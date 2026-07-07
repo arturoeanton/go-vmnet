@@ -13,11 +13,21 @@ migración de directorios completos, un generador de código Go, y un SDK de
 scaffolding de plugins — ver [CLI y herramientas](#cli-y-herramientas) más
 abajo.
 
-**Release actual: [v0.8.0](https://github.com/arturoeanton/go-vmnet/releases/tag/v0.8.0)** — agrega
-reportes HTML de compatibilidad, `vmnet analyze`, `vmnet bind`, y el SDK `dotnet new vmnet-plugin`
-descriptos más abajo, sobre el núcleo del intérprete, el checker, y la API pública congelada de
-`v0.7.0` (ver [`docs/es/api-stability.md`](docs/es/api-stability.md) para el compromiso de semver y
-[`docs/es/ROADMAP.md`](docs/es/ROADMAP.md) para los commits y tags por Fase exactos).
+**Release actual: [v0.9.0](https://github.com/arturoeanton/go-vmnet/releases/tag/v0.9.0)** — agrega
+un `examples/csvhelper-demo` funcionando (el camino real de `AutoMap()` de CsvHelper, basado solo en
+reflexión, sin ningún `ClassMap` registrado), el primer acceso de red real y visible desde el host
+que tiene este proyecto (`System.Net.Http.HttpClient`/`HttpResponseMessage`/`HttpContent`, protegido
+por la capacidad `Permissions.AllowNetwork` ya existente), y un endurecimiento de Jint/Esprima
+(clases ES6, grupos de regex reales y clases abreviadas), sobre las herramientas de `v0.8.0` y la API
+pública congelada de `v0.7.0` (ver [`docs/en/api-stability.md`](docs/en/api-stability.md) para el
+compromiso de semver y [`docs/en/ROADMAP.md`](docs/en/ROADMAP.md) para los commits y tags por Fase
+exactos).
+
+**Nota sobre el idioma de la documentación:** desde la Fase 3.82, toda la documentación profunda del
+proyecto vive solo en inglés bajo `docs/en/`. Este archivo (`README.es.md`) es la única excepción —
+una página de aterrizaje en español mantenida en sincronía con el contenido de `README.md` — para
+que quien prefiera español tenga un punto de entrada, sin duplicar el mantenimiento de docenas de
+páginas técnicas en dos idiomas.
 
 ## Esto corre un motor de JavaScript real. Dentro de un binario Go. Sin CGo.
 
@@ -70,13 +80,19 @@ SDK de scaffolding dotnet new vmnet-plugin.
 Corpus actual: 19 paquetes NuGet reales chequeados con dependencias
 transitivas bajo netstandard-lite. 7 de 19 ya superan la barra del 97%
 individual (subiendo de 5); promedio simple a través del corpus: 95.8%
-(ver docs/es/COMPATIBILITY.md para el desglose por paquete siempre
+(ver docs/en/COMPATIBILITY.md para el desglose por paquete siempre
 actualizado — % de checker, demo real, y confianza, mantenidos
 deliberadamente separados).
 
-Sigue: el resto de la Fase 4 — soporte real de Process/sockets
-(deliberadamente diferido, todavía sin demanda real del corpus), un set
-completo de comandos CLI, y una matriz de CI multiplataforma.
+Desde entonces: el camino real de AutoMap() de CsvHelper ya funciona de
+punta a punta (examples/csvhelper-demo), y aterrizó el primer acceso de
+red real (System.Net.Http.HttpClient, protegido por
+Permissions.AllowNetwork) — ver las entradas de la Fase 3.81/3.82 en
+docs/en/ROADMAP.md.
+
+Sigue: soporte real de Process/sockets crudos (deliberadamente diferido,
+todavía sin demanda real del corpus para ninguno de los dos) y una matriz
+de CI multiplataforma.
 ```
 
 **Demos verificados en tiempo de ejecución** — cada uno carga el paquete real, sin modificar,
@@ -91,6 +107,7 @@ desde nuget.org, y compara su salida contra .NET real:
 | [System.Text.Json](examples/system-text-json-demo) / [Newtonsoft.Json](examples/newtonsoft-json-demo) | Parseo de JSON real |
 | [Dapper](examples/dapper-demo) | `Query`/`Execute` sobre un proveedor ADO.NET fake en memoria |
 | [Dapper + Microsoft.Data.Sqlite](examples/sqlite-demo) | El mismo código real de Dapper sobre un proveedor SQLite real y nativo en Go — verificado de forma independiente con el CLI real de `sqlite3` |
+| [CsvHelper](examples/csvhelper-demo) | `CsvReader.GetRecords<T>()` con **ningún `ClassMap` registrado** — el propio camino de `AutoMap()` de CsvHelper, basado solo en reflexión |
 | [FluentValidation](examples/fluentvalidation-demo) | Validación de objetos real, incluyendo un validador de rango numérico |
 | [Microsoft.Extensions.DependencyInjection](examples/di-demo) | El propio contenedor de DI oficial de Microsoft resolviendo inyección de constructor real |
 | [Permissions](examples/permissions-demo) | La puerta `Permissions` deny-by-default — el mismo C# compilado corrido tres veces contra tres otorgamientos de capacidad distintos |
@@ -120,13 +137,14 @@ falta— en vez de fallar a mitad de la ejecución. Chequeado hoy contra 19
 paquetes NuGet reales y populares, 7 de los cuales ya superan una barra
 del 97% individual bajo el perfil `netstandard-lite` de vmnet — pero
 ningún número solo es el que importa: ver
-[`docs/es/COMPATIBILITY.md`](docs/es/COMPATIBILITY.md) para el desglose
+[`docs/en/COMPATIBILITY.md`](docs/en/COMPATIBILITY.md) para el desglose
 completo por paquete, que deliberadamente mantiene separados el
 porcentaje del checker estático, si existe un demo real corriendo, y una
 nota de confianza honesta para cada paquete, en vez de colapsarlos en un
 solo puntaje.
 
-La especificación técnica completa está en [`docs/es/spec.md`](docs/es/spec.md).
+La especificación técnica completa está en [`docs/en/spec.md`](docs/en/spec.md)
+(en inglés).
 
 ## Qué funciona hoy de verdad
 
@@ -191,14 +209,17 @@ La especificación técnica completa está en [`docs/es/spec.md`](docs/es/spec.m
   panic dentro del código interpretado se recupera en el borde de la API
   (un plugin roto o adversarial no puede tirar abajo el proceso host), y
   una puerta `Permissions` real deny-by-default (`AllowFileRead`/
-  `AllowFileWrite`) delante de cada nativo que toca I/O de disco real.
-  Hoy esto es un límite de **estabilidad-más-I/O-de-archivo**, todavía no
-  un límite de confianza completo (no existe superficie de red/generación
-  de procesos en absoluto todavía, a propósito) — ver
-  [`docs/es/security.md`](docs/es/security.md) para el modelo de
+  `AllowFileWrite`/`AllowNetwork`) delante de cada nativo que toca I/O de
+  disco real o la red — `AllowNetwork` protege la única superficie de red
+  saliente real que existe hoy (`System.Net.Http.HttpClient.GetAsync`
+  más `HttpResponseMessage`/`HttpContent`). Hoy esto es un límite de
+  **estabilidad-más-I/O-de-archivo-más-HTTP-saliente**, todavía no un
+  límite de confianza completo (no existe superficie de generación de
+  procesos en absoluto todavía, a propósito) — ver
+  [`docs/en/security.md`](docs/en/security.md) para el modelo de
   amenazas honesto antes de correr C# no confiable a través de vmnet.
 
-Ver [`docs/es/ROADMAP.md`](docs/es/ROADMAP.md) para el historial completo fase
+Ver [`docs/en/ROADMAP.md`](docs/en/ROADMAP.md) para el historial completo fase
 por fase — incluido cada bug de correctitud real encontrado y arreglado en
 el camino (comparación con/sin signo, un deadlock de reentrancia en un
 `.cctor`, un bug de aliasing en el default de un campo struct que hacía
@@ -263,7 +284,7 @@ Ejemplos corribles y documentados en [`examples/`](examples/):
 | [`examples/nuget-basic`](examples/nuget-basic) | Agregar y restaurar un paquete NuGet real publicado, y llamar una función real de ese paquete |
 | [`examples/jint-demo`](examples/jint-demo) | Ejecución de JavaScript real vía el paquete NuGet Jint real + toda su cadena de dependencias, manejado a través de un pequeño wrapper compilado en C# |
 | [`examples/jint-nowrapper`](examples/jint-nowrapper) | El mismo demo de Jint sin ningún wrapper de C# — `Assembly.New`/`Instance.Call` manejando `Jint.Engine` directamente desde Go |
-| [`examples/jint-advanced-demo`](examples/jint-advanced-demo) | JavaScript real llevado más lejos — `var`/`let`/`const`, literales de objeto/array anidados, operadores, `Math.*`, datos estructurados desde Go — más seis bugs reales que encontró y arregló, y tres brechas más profundas y abiertas que encontró y documentó en vez de disimular |
+| [`examples/jint-advanced-demo`](examples/jint-advanced-demo) | JavaScript real llevado más lejos — `var`/`let`/`const`, literales de objeto/array anidados, operadores, `Math.*`, datos estructurados desde Go — más varios bugs reales que encontró y arregló, y brechas más profundas y abiertas que encontró y documentó en vez de disimular |
 | [`examples/npoi-demo`](examples/npoi-demo) | Leer un archivo `.xls` legacy real (strings, números, una celda con fórmula) vía el paquete NuGet NPOI real, sin wrapper de C# |
 | [`examples/system-text-json-demo`](examples/system-text-json-demo) | Parsear JSON real vía el paquete System.Text.Json real, sin wrapper de C# |
 | [`examples/newtonsoft-json-demo`](examples/newtonsoft-json-demo) | Parsear JSON real vía el DOM "LINQ to JSON" de Newtonsoft.Json real, sin wrapper de C# |
@@ -272,6 +293,7 @@ Ejemplos corribles y documentados en [`examples/`](examples/):
 | [`examples/calculator`](examples/calculator) | Una carga de aritmética/loop corrida a través de vmnet, Go nativo y (opcionalmente) CoreCLR real, lado a lado, para una comparación de corrección y velocidad |
 | [`examples/dapper-demo`](examples/dapper-demo) | El propio `SqlMapper.Query`/`Execute` del paquete NuGet Dapper real, corrido contra un proveedor ADO.NET fake mínimo en memoria — sin base de datos real, sin necesitar el SDK de .NET en tiempo de ejecución |
 | [`examples/sqlite-demo`](examples/sqlite-demo) | El mismo código real de Dapper corriendo contra el propio proveedor `Microsoft.Data.Sqlite` real y nativo en Go de vmnet — un archivo `.db` de SQLite embebido genuino, reabierto de forma independiente y verificado con `PRAGMA integrity_check` por el CLI real de `sqlite3` después |
+| [`examples/csvhelper-demo`](examples/csvhelper-demo) | El propio `CsvReader.GetRecords<T>()` del paquete NuGet CsvHelper real con cero `ClassMap` registrado — el propio camino de `AutoMap()` de CsvHelper, basado solo en reflexión, construyendo el tipo de registro y cada mapa de miembro puramente en tiempo de ejecución |
 | [`examples/fluentvalidation-demo`](examples/fluentvalidation-demo) | El paquete NuGet FluentValidation real validando un objeto real, incluyendo un validador de rango numérico (`GreaterThanOrEqualTo`) despachado a través de una jerarquía de validadores base/derivada genérica |
 | [`examples/di-demo`](examples/di-demo) | El propio contenedor oficial `Microsoft.Extensions.DependencyInjection` de Microsoft resolviendo un servicio cuyo constructor depende de otro servicio registrado, sin modificar |
 | [`examples/permissions-demo`](examples/permissions-demo) | El mismo C# compilado corrido tres veces contra tres otorgamientos distintos de `Permissions` — denegado, solo-lectura-de-archivo, y completamente otorgado (releído de forma independiente desde Go para confirmar un archivo real, no una ilusión en memoria) |
@@ -312,7 +334,7 @@ compatibilidad:
   vmnet bind package Jint@3.1.3 --out=./jintgo --package=jint
   ```
   Ver [`examples/bind-demo`](examples/bind-demo) y
-  [`docs/es/compatibility-profile.md`](docs/es/compatibility-profile.md) §3.2.
+  [`docs/en/compatibility-profile.md`](docs/en/compatibility-profile.md) §3.2.
 - **`dotnet new vmnet-plugin`** — la otra dirección: scaffoldea un proyecto de plugin C# nuevo con
   la forma exacta para `Assembly.CallBytes`/`CallJSON` (un `Entry.Invoke` de `byte[]`-entra/
   `byte[]`-sale), así que escribir un plugin desde cero empieza con un comando en vez de un
@@ -322,7 +344,7 @@ compatibilidad:
   dotnet new vmnet-plugin -n BillingRules
   ```
   Ver [`examples/plugin-demo`](examples/plugin-demo) y
-  [`docs/es/plugin-sdk.md`](docs/es/plugin-sdk.md).
+  [`docs/en/plugin-sdk.md`](docs/en/plugin-sdk.md).
 
 Tanto `vmnet check` como `vmnet analyze` aceptan `--html=<archivo>`, escribiendo el mismo
 resultado como una única página HTML autocontenida (sin fuentes/scripts externos) en vez de — o
@@ -353,9 +375,9 @@ vmnet packages
 
 La API pública y el CLI viven en la raíz del repo; todo lo demás es
 detalle de implementación bajo `internal/`. Ver
-[`docs/es/architecture.md`](docs/es/architecture.md) para el pipeline completo,
+[`docs/en/architecture.md`](docs/en/architecture.md) para el pipeline completo,
 el layout de paquetes, y notas del estado actual, y
-[`docs/es/adr/`](docs/es/adr) para las decisiones de diseño ya tomadas (por qué
+[`docs/en/adr/`](docs/en/adr) para las decisiones de diseño ya tomadas (por qué
 Go puro, por qué el layout de paquetes se desvía de la spec original,
 ...).
 
@@ -376,7 +398,7 @@ dependencia del runtime de `vmnet`:
 dotnet build tests/fixtures/csharp/Fixtures.csproj -c Release
 ```
 
-Ver [`CONTRIBUTING.md`](CONTRIBUTING.md) antes de mandar un PR.
+Ver [`CONTRIBUTING.md`](CONTRIBUTING.md) antes de mandar un PR (en inglés).
 
 ## Licencia
 
