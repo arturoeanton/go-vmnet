@@ -59,6 +59,7 @@ func init() {
 	// directly rather than duplicating them.
 	register("System.Int16::ToString", true, int32ToString)
 	register("System.Int16::GetHashCode", true, int32GetHashCode)
+	register("System.Int16::TryParse", true, int16TryParse)
 	register("System.Byte::ToString", true, int32ToString)
 	register("System.Byte::GetHashCode", true, int32GetHashCode)
 	// SByte/UInt16 also widen to a plain KindI4 on the stack (same
@@ -74,6 +75,7 @@ func init() {
 	register("System.UInt32::ToString", true, uint32ToString)
 	register("System.UInt64::ToString", true, uint64ToString)
 	register("System.Single::ToString", true, singleToString)
+	register("System.Single::TryParse", true, singleTryParse)
 	// System.Decimal (Fase 3.53) — see decimalCtorInPlace's own doc
 	// comment for why this codebase's total lack of a distinct Decimal
 	// representation still lets ToString work correctly for every real
@@ -254,6 +256,41 @@ func singleToString(args []runtime.Value) (runtime.Value, error) {
 	return runtime.String(strconv.FormatFloat(float64(v.R4), 'G', -1, 32)), nil
 }
 
+// singleTryParse backs Single.TryParse(string, out float) — mirrors
+// doubleTryParse's own shape exactly (system_misc.go), including the
+// ReadOnlySpan<char> overload, just narrowed to 32 bits (Fase 3.83,
+// found via CsvHelper's own SingleConverter.ConvertFromString, whose
+// entire body is a bare `float.TryParse(text, out var result)`).
+func singleTryParse(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 2 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Single.TryParse expects (string, out float)")
+	}
+	text := args[0].Str
+	switch {
+	case args[0].Kind == runtime.KindString:
+		// text already set above
+	case args[0].Kind == runtime.KindStruct || args[0].Kind == runtime.KindRef:
+		s, ok := spanCharArg(args[0])
+		if !ok {
+			return runtime.Value{}, fmt.Errorf("bcl: System.Single.TryParse expects (string, out float)")
+		}
+		text = s
+	default:
+		return runtime.Value{}, fmt.Errorf("bcl: System.Single.TryParse expects (string, out float)")
+	}
+	out := args[len(args)-1]
+	if out.Kind != runtime.KindRef || out.Ref == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Single.TryParse expects an out parameter")
+	}
+	f, err := strconv.ParseFloat(strings.TrimSpace(text), 32)
+	if err != nil {
+		*out.Ref = runtime.Float32(0)
+		return runtime.Bool(false), nil
+	}
+	*out.Ref = runtime.Float32(float32(f))
+	return runtime.Bool(true), nil
+}
+
 // int32GetHashCode returns the value itself, matching real
 // Int32.GetHashCode's documented identity behavior.
 func int32GetHashCode(args []runtime.Value) (runtime.Value, error) {
@@ -421,6 +458,32 @@ func int32TryParse(args []runtime.Value) (runtime.Value, error) {
 		return runtime.Bool(true), nil
 	}
 	n, err := strconv.ParseInt(strings.TrimSpace(args[0].Str), 10, 32)
+	if err != nil {
+		*out.Ref = runtime.Int32(0)
+		return runtime.Bool(false), nil
+	}
+	*out.Ref = runtime.Int32(int32(n))
+	return runtime.Bool(true), nil
+}
+
+// int16TryParse backs Int16.TryParse(string, out short) — Int16 widens to
+// a plain KindI4 on the stack, same as Int32 (see the ToString/
+// GetHashCode reuse comment above), so this mirrors int32TryParse's own
+// shape exactly except for the bit width passed to strconv.ParseInt (16,
+// not 32) — real short.TryParse rejects a value outside -32768..32767,
+// which ParseInt's own bitSize argument already enforces (Fase 3.83,
+// found via CsvHelper's own BooleanConverter.ConvertFromString, whose
+// second fallback attempt — after a bare bool.TryParse — is
+// `short.TryParse(text, out result)`, checking for a literal "0"/"1").
+func int16TryParse(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 2 || args[0].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Int16.TryParse expects (string, out short)")
+	}
+	out := args[len(args)-1]
+	if out.Kind != runtime.KindRef || out.Ref == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Int16.TryParse expects an out parameter")
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(args[0].Str), 10, 16)
 	if err != nil {
 		*out.Ref = runtime.Int32(0)
 		return runtime.Bool(false), nil

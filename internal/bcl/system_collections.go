@@ -368,7 +368,18 @@ func disposeNoop(args []runtime.Value) (runtime.Value, error) {
 // (Select/Where/ToList/...) as something the rest of the program can keep
 // treating as a normal collection.
 func NewListValue(items []runtime.Value) runtime.Value {
-	return runtime.ObjRef(&runtime.Object{Native: &nativeList{items: items, typeName: "System.Collections.Generic.List`1"}})
+	return NewListValueTyped(items, "System.Collections.Generic.List`1")
+}
+
+// NewListValueTyped is NewListValue with an explicit typeName (Fase
+// 3.83) — for the one other real caller that needs a nativeList-backed
+// value NOT tagged as List`1: System.Collections.ArrayList shares this
+// exact same struct (see nativeList's own doc comment) but must keep
+// reporting its own real type name to NativeTypeName/receiverTypeName's
+// virtual-dispatch chain walk, the same reasoning typeName exists on
+// nativeList at all for.
+func NewListValueTyped(items []runtime.Value, typeName string) runtime.Value {
+	return runtime.ObjRef(&runtime.Object{Native: &nativeList{items: items, typeName: typeName}})
 }
 
 // NativeListItems returns a native-backed List<T>'s items, if native is

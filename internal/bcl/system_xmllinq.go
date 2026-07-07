@@ -61,6 +61,21 @@ func init() {
 	register("System.Xml.Linq.XName::op_Implicit", true, xNameIdentity)
 	register("System.Xml.Linq.XName::get_LocalName", true, xNameIdentity)
 	register("System.Xml.Linq.XName::Get", true, xNameGet)
+	// XNamespace (Fase 3.83, found via ClosedXML's own internals) —
+	// modeled the same way XName already is: a plain string (the
+	// namespace URI), since namespace URIs are dropped throughout this
+	// file and matched only by local name (this func's own doc comment
+	// above). get_Namespace returns "" (a stand-in "no namespace"
+	// XNamespace) rather than the real URI, since nothing here tracks
+	// which namespace an already-parsed element's name really came from;
+	// XNamespace::op_Addition (`ns + "localName"`, the common way real
+	// code builds a namespace-qualified XName) drops the namespace
+	// operand entirely and returns just the local name, consistent with
+	// every other namespace-blind lookup in this file.
+	register("System.Xml.Linq.XName::get_Namespace", true, xNameGetNamespace)
+	register("System.Xml.Linq.XNamespace::get_NamespaceName", true, xNameIdentity)
+	register("System.Xml.Linq.XNamespace::ToString", true, xNameIdentity)
+	register("System.Xml.Linq.XNamespace::op_Addition", true, xNamespaceOpAddition)
 }
 
 func xDocumentLoad(args []runtime.Value) (runtime.Value, error) {
@@ -68,13 +83,24 @@ func xDocumentLoad(args []runtime.Value) (runtime.Value, error) {
 		return runtime.Value{}, fmt.Errorf("bcl: XDocument.Load expects a source")
 	}
 	if args[0].Kind == runtime.KindString {
-		return runtime.Value{}, fmt.Errorf("bcl: XDocument.Load(string) (a file path/URI) is not supported — only Load(Stream) is")
+		return runtime.Value{}, fmt.Errorf("bcl: XDocument.Load(string) (a file path/URI) is not supported — only Load(Stream)/Load(TextReader) is")
 	}
-	ms, err := asMemoryStream(args[:1])
-	if err != nil {
-		return runtime.Value{}, fmt.Errorf("bcl: XDocument.Load: only a MemoryStream-backed source is supported")
+	var data []byte
+	if ms, err := asMemoryStream(args[:1]); err == nil {
+		data = ms.buf[ms.pos:]
+	} else if sr, ok := nativeOf[*nativeStringReader](args[0]); ok {
+		// Load(TextReader) — a StringReader/StreamReader source (Fase
+		// 3.83, found via ClosedXML's own internals reading an .xlsx zip
+		// part through a real StreamReader rather than handing XDocument.
+		// Load the raw Stream directly). Both TextReader implementations
+		// this codebase has share the identical nativeStringReader
+		// backing (system_io_stringreader.go/system_io_streamreader.go),
+		// so this one branch covers either.
+		data = []byte(string(sr.runes[sr.pos:]))
+	} else {
+		return runtime.Value{}, fmt.Errorf("bcl: XDocument.Load: only a MemoryStream/TextReader-backed source is supported")
 	}
-	root, err := parseXMLTree(ms.buf[ms.pos:])
+	root, err := parseXMLTree(data)
 	if err != nil {
 		return runtime.Value{}, &runtime.ManagedException{TypeName: "System.Xml.XmlException", Message: err.Error()}
 	}
@@ -283,4 +309,18 @@ func xNameGet(args []runtime.Value) (runtime.Value, error) {
 		return runtime.Value{}, fmt.Errorf("bcl: XName.Get expects a local name string")
 	}
 	return args[0], nil
+}
+
+func xNameGetNamespace(args []runtime.Value) (runtime.Value, error) {
+	return runtime.String(""), nil
+}
+
+// xNamespaceOpAddition backs `XNamespace + string` (args[0] the
+// namespace, args[1] the local name) — the namespace is dropped, same
+// posture xNameGetNamespace's own doc comment documents.
+func xNamespaceOpAddition(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 2 || args[1].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: XNamespace.op_Addition expects (XNamespace, string)")
+	}
+	return args[1], nil
 }

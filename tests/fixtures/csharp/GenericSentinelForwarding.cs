@@ -8,7 +8,9 @@ namespace Vmnet.Fixtures
     // forwarding shapes found getting CsvHelper's own AutoMap() reflection
     // path (examples/csvhelper-demo) to work end to end, none of which
     // ir.Call.MethodGenericArgs's existing "!!N" (method-level MVAR)
-    // sentinel handling (Fase 3.60) covered on its own.
+    // sentinel handling (Fase 3.60) covered on its own. NestedGenericSentinel
+    // gained a fourth case in Fase 3.83 (DirectTypeofWrapped) closing the
+    // one gap this file's own Fase 3.81 doc comment had left open.
 
     public class SentinelTarget
     {
@@ -77,12 +79,6 @@ namespace Vmnet.Fixtures
         // resolveForwardedGenericArgs (now a substring scan, not a
         // whole-string match).
         //
-        // NOTE: a DIRECT `typeof(SentinelWrapper<TWrapped>)` ldtoken (as
-        // opposed to forwarding into another generic METHOD call the way
-        // this does) is a separate, still-open gap —
-        // resolveClosedTypeSpecName (internal/ir/builder.go) hasn't been
-        // widened to the same sentinel-substring handling, since no real
-        // corpus caller has needed it yet.
         public static string NameOfWrapped<TWrapped>()
         {
             return NameOf<SentinelWrapper<TWrapped>>();
@@ -91,6 +87,27 @@ namespace Vmnet.Fixtures
         public static string NameOfWrappedTargetCaller()
         {
             return NameOfWrapped<SentinelTarget>();
+        }
+
+        // A DIRECT `typeof(SentinelWrapper<TWrapped>)` ldtoken (as opposed
+        // to forwarding into another generic METHOD call the way
+        // NameOfWrapped above does) is a separate shape — a `ldtoken`
+        // TypeSpec that's itself a SigGenericInst with TWrapped nested
+        // inside, not a bare SigGenericParam, so neither
+        // IsMethodGenericParam nor IsClassGenericParam gets set for it.
+        // Fixed in Fase 3.83: resolveClosedTypeSpecName (internal/ir/
+        // builder.go) now uses the same sigTypeFullNameGenericArg
+        // NameOfWrapped's own MethodSpec case already used, and eval.go's
+        // own ir.LoadTypeToken case resolves the resulting nested
+        // sentinel via the same substring scan.
+        public static string DirectTypeofWrapped<TWrapped>()
+        {
+            return typeof(SentinelWrapper<TWrapped>).FullName;
+        }
+
+        public static string DirectTypeofWrappedTargetCaller()
+        {
+            return DirectTypeofWrapped<SentinelTarget>();
         }
     }
 

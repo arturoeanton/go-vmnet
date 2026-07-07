@@ -40,6 +40,14 @@ const (
 
 func main() {
 	vm := vmnet.New()
+	// AllowFileWrite (Fase 3.83): ClosedXML's own real internals call
+	// System.IO.Path.GetTempFileName() while parsing the workbook's zip
+	// parts — previously never reached at all (masked by the List<T>
+	// (IEnumerable<T>) construction bug this same Fase fixed elsewhere
+	// silently short-circuiting an earlier real code path with an
+	// always-empty list). A real, empty 0-byte temp file, same as every
+	// other real Path.GetTempFileName() call in this codebase.
+	vm.Permissions().AllowFileWrite = true
 
 	if err := vm.NuGet().Add("ClosedXML", "0.105.0"); err != nil {
 		log.Fatalf("NuGet().Add: %v", err)

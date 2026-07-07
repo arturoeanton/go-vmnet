@@ -693,6 +693,46 @@ func (m *Machine) newObj(in newObjArgs, depth int, instrCount *int64) (runtime.V
 		return runtime.StructVal(s), nil
 	}
 
+	// List<T>(IEnumerable<T> collection)/ArrayList(ICollection c) — a
+	// bcl.NativeCtor (bcl.LookupCtor below) has no Machine access to drive
+	// a real source's own enumeration protocol, so the plain registerCtor
+	// entries for both types never even read their own args, silently
+	// building an empty list regardless of what's passed (Fase 3.83,
+	// found via CsvHelper's own `new List<Product>(csv.
+	// GetRecords<Product>())` — a genuine plugin iterator as the source,
+	// though the same gap applies to copying from an already-materialized
+	// vmnet-native list/array too, via m.enumerateAll's own fast path).
+	// The other real 1-arg overload on both types, `int capacity`, is
+	// unaffected — a plain KindI4 is never mistaken for something to
+	// enumerate, so it falls through to the ordinary bcl.LookupCtor path
+	// below unchanged.
+	if (in.TypeFullName == "System.Collections.Generic.List`1" || in.TypeFullName == "System.Collections.ArrayList") &&
+		len(in.Args) == 1 && in.Args[0].Kind != runtime.KindI4 {
+		items, err := m.enumerateAll(in.Args[0], depth, instrCount)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		return bcl.NewListValueTyped(items, in.TypeFullName), nil
+	}
+
+	// System.IO.StreamReader(Stream[, ...]) — a bcl.NativeCtor has no
+	// Machine access to drive the real Stream argument's own Read(byte[],
+	// int, int) method, needed when it isn't one of this codebase's own
+	// native-backed streams (Fase 3.83, found via ClosedXML's own real
+	// .xlsx zip-part reading — a genuine, resolvable plugin Stream
+	// subclass, previously never reached at all, masked by the List<T>
+	// fix just above short-circuiting some earlier real code path).
+	// bcl.MemoryStreamBytesFromCurrentPosition covers the fast path (an
+	// already-materialized nativeMemoryStream); readAllBytesFromStream's
+	// own real Read loop covers everything else.
+	if in.TypeFullName == "System.IO.StreamReader" && len(in.Args) >= 1 {
+		data, err := m.readAllBytesFromStream(in.Args[0], depth, instrCount)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		return bcl.NewStreamReaderFromBytes(data), nil
+	}
+
 	if ctor, ok := bcl.LookupCtor(in.TypeFullName); ok {
 		if gate, gated := permissionGatedBCLCtors[in.TypeFullName]; gated {
 			if denyErr := gate(m.Permissions, in.Args); denyErr != nil {
@@ -804,4 +844,45 @@ type newObjArgs struct {
 	// as long as the object exists — nil for a non-generic class or a
 	// native constructor call with no IR-level newobj site.
 	ClassGenericArgs []string
+}
+
+// readAllBytesFromStream reads stream to completion (Fase 3.83,
+// System.IO.StreamReader's own Machine-aware construction special case
+// above) — bcl.MemoryStreamBytesFromCurrentPosition's fast path first (an
+// already-materialized vmnet-native MemoryStream/FileStream), falling
+// back to driving stream's own real Stream.Read(byte[], int, int) method
+// in a loop (virtual=true, so a real plugin Stream subclass's own
+// concrete override runs, exactly like any other real virtual call this
+// project already makes) until it reports 0 bytes read, the same
+// real-CLR-contract every genuine Stream.Read caller relies on.
+func (m *Machine) readAllBytesFromStream(stream runtime.Value, depth int, instrCount *int64) ([]byte, error) {
+	if data, ok := bcl.MemoryStreamBytesFromCurrentPosition(stream); ok {
+		out := make([]byte, len(data))
+		copy(out, data)
+		return out, nil
+	}
+	const chunkSize = 8192
+	var all []byte
+	for {
+		elems := make([]runtime.Value, chunkSize)
+		for i := range elems {
+			elems[i] = runtime.Int32(0)
+		}
+		buf := runtime.ArrRef(&runtime.Array{Elems: elems})
+		result, _, err := m.call("System.IO.Stream::Read", []runtime.Value{stream, buf, runtime.Int32(0), runtime.Int32(chunkSize)}, true, depth, instrCount, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		n := int(result.I4)
+		if n <= 0 {
+			break
+		}
+		for i := 0; i < n; i++ {
+			all = append(all, byte(buf.Arr.Elems[i].I4))
+		}
+		if n < chunkSize {
+			break
+		}
+	}
+	return all, nil
 }

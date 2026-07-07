@@ -39,9 +39,9 @@ on purpose, for every package vmnet is measured against.
 | `ClosedXML@0.105.0` | 97.6% (10,444 methods, 252 flagged) | [`examples/closedxml-demo`](../../examples/closedxml-demo) |
 | `Jint@3.1.3` | 96.7% (5,414 methods, 178 flagged) | [`examples/jint-demo`](../../examples/jint-demo), [`examples/jint-nowrapper`](../../examples/jint-nowrapper), [`examples/jint-advanced-demo`](../../examples/jint-advanced-demo) |
 | `Dapper@2.1.79` | 95.5% (1,047 methods, 47 flagged) | [`examples/dapper-demo`](../../examples/dapper-demo), [`examples/sqlite-demo`](../../examples/sqlite-demo) |
-| `CsvHelper@33.1.0` | 94.5% (1,393 methods, 76 flagged) | [`examples/csvhelper-demo`](../../examples/csvhelper-demo) |
+| `CsvHelper@33.1.0` | 94.8% (1,393 methods, 73 flagged) | [`examples/csvhelper-demo`](../../examples/csvhelper-demo) |
 | `Microsoft.Extensions.DependencyInjection@8.0.0` | 94.1% (437 methods, 26 flagged) | [`examples/di-demo`](../../examples/di-demo) |
-| `Newtonsoft.Json@13.0.3` | 89.2% (4,064 methods, 440 flagged) | [`examples/newtonsoft-json-demo`](../../examples/newtonsoft-json-demo) |
+| `Newtonsoft.Json@13.0.3` | 89.2% (4,064 methods, 438 flagged) | [`examples/newtonsoft-json-demo`](../../examples/newtonsoft-json-demo) |
 
 Six of these nine numbers moved up in Fase 3.79 — not because that Fase targeted these packages
 directly (it was chasing Jint's own remaining gaps), but because several of its fixes are general
@@ -158,10 +158,11 @@ in Fase 3.81 (eight distinct bugs: closed-generic identity across `Type.GetConst
 compiler-generated iterator's class-level generic parameter not surviving a forwarded generic-method
 call, the same sentinel not surviving one level of nesting inside a closed generic type,
 `System.String.Join` given a real plugin `IEnumerable<string>`, and several missing
-`System.Linq.Expressions` factories). One known, narrower gap remains:
-`new List<T>(somePluginIEnumerable)` silently constructs an empty list rather than driving the
-source's real enumeration protocol — see `docs/en/ROADMAP.md` Fase 3.81's own account and
-`examples/csvhelper-demo/README.md`.
+`System.Linq.Expressions` factories). Up again in Fase 3.83: `new List<T>(somePluginIEnumerable)`
+(previously constructing a silently-empty list) and `Single.TryParse`
+(`CsvHelper.TypeConversion.SingleConverter`'s own entire `ConvertFromString` body) both fixed —
+`csvhelper-demo`'s own wrapper now uses `new List<Product>(csv.GetRecords<Product>())` directly
+instead of a manual `foreach`/`Add()` loop.
 
 #### `Microsoft.Extensions.DependencyInjection@8.0.0`
 
@@ -188,6 +189,9 @@ dynamic-typing surface (`JValue+JValueDynamicProxy`) is a real, unimplemented ga
 exercise. Don't read the demo passing as "this whole package works." Tracked as
 [issue #3](https://github.com/arturoeanton/go-vmnet/issues/3).
 
+Ticked up slightly in Fase 3.83 (the same `List<T>`/`ArrayList` constructor fix as `CsvHelper`'s
+own entry above).
+
 ## Packages measured by the checker only (no demo yet)
 
 No demo existing yet is not a red flag by itself — every one of the packages above started here
@@ -203,8 +207,8 @@ not confirmation that it does.
 | `YamlDotNet@18.1.0` | 96.2% (2,182 methods, 82 flagged) |
 | `Serilog@4.3.1` | 96.1% (1,115 methods, 43 flagged) |
 | `MediatR@14.2.0` | 95.5% (441 methods, 20 flagged) |
-| `NodaTime@3.3.2` | 94.8% (3,098 methods, 162 flagged) |
-| `AutoMapper@16.2.0` | 94.2% (2,319 methods, 135 flagged) |
+| `NodaTime@3.3.2` | 94.8% (3,098 methods, 160 flagged) |
+| `AutoMapper@16.2.0` | 94.3% (2,319 methods, 133 flagged) |
 | `SimpleBase@4.0.0` | 92.6% (258 methods, 19 flagged) |
 | `Semver@2.3.0` | 92.9% (423 methods, 30 flagged) |
 
@@ -239,7 +243,8 @@ fix).
 #### `NodaTime@3.3.2`, `SimpleBase@4.0.0`, `Semver@2.3.0`
 
 Good-to-high coverage estimate; unverified by a real run. `NodaTime`'s own number moved slightly in
-Fase 3.79 (`TimeSpan`/`conv.u8`).
+Fase 3.79 (`TimeSpan`/`conv.u8`) and again in Fase 3.83 (the same `List<T>`/`ArrayList` constructor
+fix as `CsvHelper`'s own entry above).
 
 #### `AutoMapper@16.2.0`
 
@@ -247,7 +252,7 @@ Fase 3.66 root-caused and fixed the Fase 3.65 `ValueTuple` NRE for real (a gener
 `Enumerable.FirstOrDefault/LastOrDefault/SingleOrDefault<T>` typed-default gap) AND fixed a real,
 deep TypeMap-registration bug (`typeof(TSource)`/`typeof(TDestination)` never resolving inside a
 generic class's own instance methods — a genuinely new, general capability, class-level generic
-type parameter tracking).
+type parameter tracking). Up again in Fase 3.83 (the same `List<T>`/`ArrayList` constructor fix).
 
 A real, unmodified `AutoMapper` now gets past its own static initialization, reflection layer,
 constructor-selection machinery, AND the TypeMap-registration step — but its real

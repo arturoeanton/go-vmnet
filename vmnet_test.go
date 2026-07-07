@@ -2990,3 +2990,122 @@ func TestHttpClient_GetAsync(t *testing.T) {
 		}
 	})
 }
+
+// TestDirectTypeofWrapped regresses Fase 3.83: a DIRECT
+// `typeof(Closed<T>)` ldtoken whose own closed generic argument is
+// itself the enclosing generic method's still-open type parameter (a
+// SigGenericInst, not a bare SigGenericParam, so neither
+// IsMethodGenericParam nor IsClassGenericParam gets set for it) —
+// resolveClosedTypeSpecName previously used SigTypeFullName directly,
+// losing the nested parameter to its own "" degenerate answer. See
+// tests/fixtures/csharp/GenericSentinelForwarding.cs's own doc comment.
+func TestDirectTypeofWrapped(t *testing.T) {
+	asm := loadFixture(t)
+
+	out, err := asm.Call("Vmnet.Fixtures.NestedGenericSentinel", "DirectTypeofWrappedTargetCaller")
+	if err != nil {
+		t.Fatalf("DirectTypeofWrappedTargetCaller() error = %v", err)
+	}
+	want := "Vmnet.Fixtures.SentinelWrapper`1[[Vmnet.Fixtures.SentinelTarget]]"
+	if got := out.Native().(string); got != want {
+		t.Errorf("DirectTypeofWrappedTargetCaller() = %q, want %q", got, want)
+	}
+}
+
+// TestListCtorFromEnumerable regresses Fase 3.83: List<T>(IEnumerable<T>
+// collection)/ArrayList(ICollection c) given a real source (a plugin
+// iterator, or an already-materialized vmnet-native list) — the
+// registered constructor never read its own arguments at all, silently
+// building an empty list regardless of what was passed. See
+// tests/fixtures/csharp/QuickWins383.cs's own doc comment.
+func TestListCtorFromEnumerable(t *testing.T) {
+	asm := loadFixture(t)
+
+	t.Run("real plugin iterator source", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.ListCtorFromEnumerable", "FromCustomIterator")
+		if err != nil {
+			t.Fatalf("FromCustomIterator() error = %v", err)
+		}
+		want := int32(3*1000 + 60) // Count=3, sum=10+20+30=60
+		if got := out.Native().(int32); got != want {
+			t.Errorf("FromCustomIterator() = %d, want %d", got, want)
+		}
+	})
+
+	t.Run("already-materialized vmnet-native list source", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.ListCtorFromEnumerable", "FromExistingList")
+		if err != nil {
+			t.Fatalf("FromExistingList() error = %v", err)
+		}
+		want := int32(2*100 + 1*10 + 2) // Count=2, [0]=1, [1]=2
+		if got := out.Native().(int32); got != want {
+			t.Errorf("FromExistingList() = %d, want %d", got, want)
+		}
+	})
+
+	t.Run("List<T>(int capacity) is unaffected, stays empty", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.ListCtorFromEnumerable", "WithCapacityStillEmpty")
+		if err != nil {
+			t.Fatalf("WithCapacityStillEmpty() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 0 {
+			t.Errorf("WithCapacityStillEmpty() = %d, want 0", got)
+		}
+	})
+
+	t.Run("ArrayList shares the same fix", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.ListCtorFromEnumerable", "ArrayListFromExistingList")
+		if err != nil {
+			t.Fatalf("ArrayListFromExistingList() error = %v", err)
+		}
+		want := int32(2*100 + 7*10 + 8) // Count=2, [0]=7, [1]=8
+		if got := out.Native().(int32); got != want {
+			t.Errorf("ArrayListFromExistingList() = %d, want %d", got, want)
+		}
+	})
+}
+
+// TestNarrowTryParse regresses Fase 3.83: Int16.TryParse/Single.TryParse
+// were simply missing — found via CsvHelper's own
+// BooleanConverter/SingleConverter.ConvertFromString.
+func TestNarrowTryParse(t *testing.T) {
+	asm := loadFixture(t)
+
+	t.Run("Int16.TryParse", func(t *testing.T) {
+		tests := []struct {
+			text string
+			want string
+		}{
+			{"42", "True:42"},
+			{"not a number", "False:0"},
+		}
+		for _, tt := range tests {
+			out, err := asm.Call("Vmnet.Fixtures.NarrowTryParseTest", "Int16RoundTrip", String(tt.text))
+			if err != nil {
+				t.Fatalf("Int16RoundTrip(%q) error = %v", tt.text, err)
+			}
+			if got := out.Native().(string); got != tt.want {
+				t.Errorf("Int16RoundTrip(%q) = %q, want %q", tt.text, got, tt.want)
+			}
+		}
+	})
+
+	t.Run("Single.TryParse", func(t *testing.T) {
+		tests := []struct {
+			text string
+			want string
+		}{
+			{"3.5", "True:3.5"},
+			{"not a number", "False:0"},
+		}
+		for _, tt := range tests {
+			out, err := asm.Call("Vmnet.Fixtures.NarrowTryParseTest", "SingleRoundTrip", String(tt.text))
+			if err != nil {
+				t.Fatalf("SingleRoundTrip(%q) error = %v", tt.text, err)
+			}
+			if got := out.Native().(string); got != tt.want {
+				t.Errorf("SingleRoundTrip(%q) = %q, want %q", tt.text, got, tt.want)
+			}
+		}
+	})
+}

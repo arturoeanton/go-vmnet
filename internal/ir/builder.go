@@ -1073,6 +1073,20 @@ func resolveTypeSpecName(md *metadata.Metadata, rid uint32) (string, error) {
 // typeof(T) path (System.Type reflection needs GetGenericArguments() to
 // work), unlike resolveTypeSpecName above which every other TypeSpec
 // consumer in this file still uses (they only need the open generic name).
+//
+// Uses sigTypeFullNameGenericArg, not SigTypeFullName directly (Fase
+// 3.83) — a closed generic instantiation reached this way can itself
+// carry the enclosing method/class's own still-open generic parameter
+// NESTED inside one of its own type arguments (e.g. `typeof(Wrapper
+// <TWrapped>)` inside a generic method — a TypeSpec whose Kind is
+// SigGenericInst, not a bare SigGenericParam, so the ldtoken builder
+// case above never sets IsMethodGenericParam/IsClassGenericParam for
+// it). sigTypeFullNameGenericArg emits "!!N"/"!N" sentinels for that
+// nested parameter instead of SigTypeFullName's own "" degenerate
+// answer — resolved at runtime by eval.go's own ir.LoadTypeToken case,
+// the same substring-scan substitution ir.Call/ir.NewObj's own
+// forwarding already relies on (see resolveForwardedGenericArgs's doc
+// comment).
 func resolveClosedTypeSpecName(md *metadata.Metadata, rid uint32) (string, error) {
 	sig, err := md.TypeSpecSignature(rid)
 	if err != nil {
@@ -1082,7 +1096,7 @@ func resolveClosedTypeSpecName(md *metadata.Metadata, rid uint32) (string, error
 	if err != nil {
 		return "", err
 	}
-	return SigTypeFullName(md, t)
+	return sigTypeFullNameGenericArg(md, t)
 }
 
 // SigTypeFullName resolves any parsed SigType to a reflection-style full

@@ -25,18 +25,15 @@ namespace CsvHelperDemo
         // DefaultClassMap<Product> via reflection (Type.GetConstructor(s),
         // Expression.New/Lambda/Compile), then a compiled Expression-tree
         // delegate reading each column by name and converting it through
-        // CsvHelper's own real TypeConverters.
+        // CsvHelper's own real TypeConverters. List<Product>(IEnumerable
+        // <Product>) drives GetRecords<T>()'s own real iterator directly
+        // (Fase 3.83) rather than a manual foreach + Add() loop.
         public static List<Product> ReadProducts(string csvText)
         {
             using (var reader = new StringReader(csvText))
             using (var csv = new CsvReader(reader, CultureInfo.InvariantCulture))
             {
-                var products = new List<Product>();
-                foreach (var product in csv.GetRecords<Product>())
-                {
-                    products.Add(product);
-                }
-                return products;
+                return new List<Product>(csv.GetRecords<Product>());
             }
         }
     }

@@ -71,11 +71,11 @@ output for the same compiled DLL. Full account in `docs/en/ROADMAP.md`; highligh
   the first argument is itself a recognized `Expression` node at all).
 - `Enumerable.SequenceEqual` and `Boolean.TryParse` were simply missing.
 
-## A known, separate limitation found but not fixed here
+## One more fixed since (Fase 3.83)
 
 `new List<Product>(csv.GetRecords<Product>())` — the `List<T>(IEnumerable<T> collection)`
-constructor given a real plugin iterator as its source — silently produces an **empty** list
-instead of driving the source's real enumeration protocol (unlike `m.enumerateAll`, which several
-LINQ/BCL natives already use for exactly this). `CsvHelperDemoWrapper.cs` works around it with a
-plain `foreach` + `Add()` loop instead, which is also the more common way real CsvHelper code is
-usually written. Left undocumented as a Fase until it blocks a real, load-bearing case.
+constructor given a real plugin iterator as its source — used to silently produce an **empty**
+list instead of driving the source's real enumeration protocol. `CsvHelperDemoWrapper.cs` first
+shipped with a `foreach` + `Add()` workaround; now that the constructor itself drives
+`m.enumerateAll` like every other real-source-consuming native already did, it uses
+`new List<Product>(csv.GetRecords<Product>())` directly.

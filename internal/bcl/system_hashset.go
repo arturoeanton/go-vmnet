@@ -55,6 +55,22 @@ func init() {
 	registerCtor("System.Collections.Generic.HashSet`1", func([]runtime.Value) (*runtime.Object, error) {
 		return &runtime.Object{Native: &nativeHashSet{typeName: "System.Collections.Generic.HashSet`1"}}, nil
 	})
+	// A plugin/BCL-package class subclassing HashSet<T> directly chains to
+	// its base via a plain, non-virtual `call HashSet\`1::.ctor(this[,
+	// args])` — not `newobj` (Fase 3.83, found via ClosedXML/OpenXml's own
+	// real internals: this native was simply missing entirely, unlike
+	// List`1/Dictionary`2's own long-registered in-place ctors for this
+	// exact pattern — surfaced as a hard "unsupported BCL method" crash
+	// the moment Fase 3.83's own List<T>/ArrayList real-enumeration fix
+	// started actually running real downstream code paths that used to
+	// silently no-op against an always-empty list). Any real constructor
+	// argument (capacity, an IEnumerable<T>/IComparer<T> to seed from) is
+	// ignored, same documented scope every other in-place ctor native in
+	// this codebase already accepts (listCtorInPlace, dictCtorInPlace) —
+	// turns a hard crash back into the same "silently empty" gap
+	// List<T>'s own newobj path had before its own Fase 3.83 fix, not a
+	// wrong-data regression this specific case has been found to need yet.
+	register("System.Collections.Generic.HashSet`1::.ctor", false, hashSetCtorInPlace)
 	register("System.Collections.Generic.HashSet`1::Add", true, hashSetAdd)
 	register("System.Collections.Generic.HashSet`1::Contains", true, hashSetContains)
 	register("System.Collections.Generic.HashSet`1::Remove", true, hashSetRemove)
@@ -73,6 +89,9 @@ func init() {
 	registerCtor("System.Collections.Generic.SortedSet`1", func([]runtime.Value) (*runtime.Object, error) {
 		return &runtime.Object{Native: &nativeHashSet{typeName: "System.Collections.Generic.SortedSet`1", sorted: true}}, nil
 	})
+	// Same in-place base-chaining ctor HashSet`1 needed above, mirrored
+	// for its sorted sibling.
+	register("System.Collections.Generic.SortedSet`1::.ctor", false, sortedSetCtorInPlace)
 	register("System.Collections.Generic.SortedSet`1::Add", true, hashSetAdd)
 	register("System.Collections.Generic.SortedSet`1::Contains", true, hashSetContains)
 	register("System.Collections.Generic.SortedSet`1::Remove", true, hashSetRemove)
@@ -101,6 +120,27 @@ func asHashSet(args []runtime.Value) (*nativeHashSet, error) {
 		return nil, fmt.Errorf("bcl: receiver is not a HashSet")
 	}
 	return hs, nil
+}
+
+// hashSetCtorInPlace/sortedSetCtorInPlace back HashSet`1/SortedSet`1's own
+// in-place ".ctor" (Fase 3.83) — see their own register() call's doc
+// comment above for why this exists at all. Mirrors listCtorInPlace/
+// dictCtorInPlace's exact "ignore every argument, just wire up the
+// receiver's own Native backing" shape.
+func hashSetCtorInPlace(args []runtime.Value) (runtime.Value, error) {
+	if len(args) == 0 || args[0].Kind != runtime.KindObject || args[0].Obj == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: HashSet`1 constructor called without a receiver")
+	}
+	args[0].Obj.Native = &nativeHashSet{typeName: "System.Collections.Generic.HashSet`1"}
+	return runtime.Value{}, nil
+}
+
+func sortedSetCtorInPlace(args []runtime.Value) (runtime.Value, error) {
+	if len(args) == 0 || args[0].Kind != runtime.KindObject || args[0].Obj == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: SortedSet`1 constructor called without a receiver")
+	}
+	args[0].Obj.Native = &nativeHashSet{typeName: "System.Collections.Generic.SortedSet`1", sorted: true}
+	return runtime.Value{}, nil
 }
 
 // hashSetAdd returns whether the item was newly added (real HashSet<T>.Add

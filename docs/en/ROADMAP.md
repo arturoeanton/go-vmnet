@@ -6920,6 +6920,115 @@ go test -run "TestHttpClient_GetAsync" -v .
 ```
 
 ---
+
+## Fase 3.83 — three narrow, real gaps from the same corpus audit, closed
+
+**Goal:** three small, independent, already-scoped gaps found auditing the same real corpus that
+drove Fase 3.81/3.82 — each one either an exact sibling of a fix already landed (same root cause
+shape, different call site) or a one-line widening of a fix already in place.
+
+**Result: all three confirmed to fail without their own fix (temporary `git stash`), all three
+verified against a real, standalone `tests/fixtures/csharp` fixture with no CsvHelper/NuGet
+dependency.**
+
+- **`List<T>(IEnumerable<T> collection)`/`ArrayList(ICollection c)` never read their own
+  constructor argument at all**, silently building an empty collection regardless of what was
+  passed — the exact same "a plain `bcl.NativeCtor` has no `Machine` access to drive a real
+  source's own enumeration protocol" gap Fase 3.81 found and fixed for `System.String.Join`, just at
+  a different call site (`Machine.newObj`, `internal/interpreter/calls.go`) never even reached by
+  Fase 3.81's own fix. Fixed by intercepting both types' single-argument constructor before the
+  ordinary `bcl.LookupCtor` dispatch, driving `m.enumerateAll` (the exact same helper `stringJoin`
+  already uses) whenever the argument isn't a plain `int` (the other real 1-arg overload on both
+  types, `capacity`, is unaffected). `examples/csvhelper-demo`'s own wrapper, which had shipped with
+  a `foreach`/`Add()` workaround documented as a known, separate limitation, now uses
+  `new List<Product>(csv.GetRecords<Product>())` directly.
+- **`Boolean.TryParse` (Fase 3.81) had two real, narrower siblings**: `Int16.TryParse` and
+  `Single.TryParse`, both simply missing — found via `CsvHelper.TypeConversion.BooleanConverter`'s
+  own fallback (`short.TryParse` after a bare `bool.TryParse` fails) and
+  `SingleConverter.ConvertFromString`'s entire body (a bare `float.TryParse`). Both mirror their
+  existing 32/64-bit siblings' own shape exactly (`int32TryParse`/`doubleTryParse`), narrowed to 16
+  bits / `float32`.
+- **A direct `typeof(Closed<T>)` ldtoken, where `Closed<T>`'s own type argument is the enclosing
+  generic method's still-open parameter, didn't survive** — explicitly flagged as a known, separate
+  gap in Fase 3.81's own fixture doc comment (`GenericSentinelForwarding.cs`'s
+  `NestedGenericSentinel`), since a `ldtoken` on a closed `TypeSpec` compiles to a `SigGenericInst`,
+  not a bare `SigGenericParam`, so neither `IsMethodGenericParam` nor `IsClassGenericParam` gets set
+  for it — `resolveClosedTypeSpecName` (`internal/ir/builder.go`) called `SigTypeFullName` directly
+  instead of `sigTypeFullNameGenericArg`, losing the nested parameter to `SigTypeFullName`'s own `""`
+  degenerate answer for any generic parameter, bare or nested. One-line fix (swap which function it
+  calls); `eval.go`'s own `ir.LoadTypeToken` case needed a new `else if` branch to run the existing
+  substring-scan substitution (`replaceGenericParamSentinels`) against the resulting name, since
+  neither of its two existing branches (method-level/class-level bare parameter) fires for this
+  shape.
+
+### The List<T>/ArrayList fix's own real blast radius: four more gaps it silently exposed
+
+The `List<T>`/`ArrayList` constructor fix above is a genuine correctness fix, but it changes
+behavior far beyond CsvHelper: any real program whose internal logic was silently receiving an
+always-empty list from a real source now receives that source's actual contents — which can, in
+turn, cause code paths to run for the first time that were previously **masked**, not merely
+untested. Both `examples/closedxml-demo` and `examples/openxml-demo` regressed the moment this
+landed, deterministically (confirmed via 4 repeated runs, not flaky), verified with a background
+agent before this Fase was allowed to ship. Bisected with `git stash` on individual files down to
+this one constructor fix; tracing it through revealed a chain of four more real, pre-existing gaps,
+each one closed rather than working around the symptom:
+
+1. **`HashSet<T>`/`SortedSet<T>` had no in-place `.ctor` native at all** for the base-chaining
+   pattern (`call HashSet\`1::.ctor(this[, args])`, the same shape `List<T>`'s own
+   `listCtorInPlace`/`Dictionary<K,V>`'s own `dictCtorInPlace` have long had) — a real, resolvable
+   plugin/BCL-package class subclassing `HashSet<T>` directly, now actually reached once its own
+   constructor argument stopped being silently discarded upstream, crashed with a hard
+   "unsupported BCL method" error instead of the graceful "ignore constructor arguments, same as
+   every sibling in-place ctor" fallback every other collection type already had. Fixed by adding
+   `hashSetCtorInPlace`/`sortedSetCtorInPlace`, mirroring `listCtorInPlace`'s exact scope.
+2. **`System.IO.StreamReader` didn't exist at all** — ClosedXML's own real internals read one of
+   its zip parts through a `StreamReader` wrapping a genuine, resolvable plugin `Stream` subclass
+   (not one of this codebase's own native-backed streams), previously never reached. Backed by the
+   exact same `nativeStringReader` struct/Read/Peek/ReadLine/ReadToEnd natives `StringReader`
+   already uses (`internal/bcl/system_io_stringreader.go`) — only construction differs, and since a
+   plain `bcl.NativeCtor` has no `Machine` access to drive the real `Stream.Read(byte[], int, int)`
+   loop this source needs, it's a `Machine.newObj` special case (`internal/interpreter/calls.go`'s
+   new `readAllBytesFromStream`) exactly like the `List<T>`/`ArrayList` fix above — a fast path for
+   an already-materialized native `MemoryStream`/`FileStream`
+   (`bcl.MemoryStreamBytesFromCurrentPosition`), falling back to a real virtual `Stream.Read` loop
+   for anything else (the real plugin subclass's own actual compiled IL runs, unmodified).
+3. **`XDocument.Load` only accepted a `MemoryStream`-backed source**, rejecting the now-common
+   `Load(TextReader)` shape (a `StreamReader`/`StringReader` source) with an explicit, deliberate
+   error rather than a crash — widened `xDocumentLoad` (`internal/bcl/system_xmllinq.go`) to accept
+   either, both ending at the identical `parseXMLTree([]byte)` call.
+4. **`System.Xml.Linq.XNamespace` didn't exist at all** — `XName.get_Namespace` (a real, common
+   call once actual namespace-qualified XML content gets parsed, rather than the earlier, simpler
+   code path this masked) had nothing to return. Modeled the same way `XName` already is (a plain
+   string — namespace URIs are dropped throughout `system_xmllinq.go`, matched only by local name):
+   `get_Namespace` returns `""`, and `XNamespace::op_Addition` (`ns + "localName"`, the common way
+   real code builds a namespace-qualified name) drops the namespace operand and returns just the
+   local name, consistent with every other namespace-blind lookup already in that file.
+
+`examples/closedxml-demo` now needs `Permissions.AllowFileWrite` granted (`main.go` updated) —
+ClosedXML's own real internals call `System.IO.Path.GetTempFileName()` while parsing the workbook's
+zip parts, a real, expected capability request this demo simply never made before, since that code
+path was never reached at all. Verified stable across 4 repeated runs, identical output to before
+this whole cascade started; `examples/openxml-demo` needed no such grant and now passes unchanged.
+None of these four fixes register through `bcl.Lookup`/`bcl.LookupCtor` in a way the static checker
+(`internal/checker`) can see (three are `Machine.newObj`/plain-native additions the checker has no
+model for at all) — `ClosedXML`'s own checker percentage is unchanged by this section, only by the
+`Boolean`/`Int16`/`Single.TryParse` additions above.
+
+### How to verify Fase 3.83
+
+```bash
+dotnet build tests/fixtures/csharp/Fixtures.csproj -c Release
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+go test -run "TestDirectTypeofWrapped|TestListCtorFromEnumerable|TestNarrowTryParse|TestHttpClient_GetAsync" -v .
+cd examples/csvhelper-demo && dotnet build CsvHelperDemoWrapper.csproj -c Release && go run .
+cd ../closedxml-demo && go run . && go run . && go run . && go run .  # 4x, checking for the exact regression this Fase found and fixed
+cd ../openxml-demo && go run .
+```
+
+---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 
 **Goal:** turn the functional engine into an adoptable product — reliable, documented, and

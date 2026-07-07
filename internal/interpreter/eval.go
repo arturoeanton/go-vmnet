@@ -916,8 +916,7 @@ func (m *Machine) runFrame(frame *Frame, method *runtime.Method, depth int, inst
 				} else {
 					typeName = ""
 				}
-			}
-			if in.IsClassGenericParam {
+			} else if in.IsClassGenericParam {
 				// typeof(T) on the ENCLOSING CLASS's own generic parameter
 				// (Fase 3.66) — resolved from the CURRENT method's own
 				// receiver object (frame.Args[0], always true for an
@@ -938,6 +937,23 @@ func (m *Machine) runFrame(frame *Frame, method *runtime.Method, depth int, inst
 						typeName = args[in.ClassGenericParamIndex]
 					}
 				}
+			} else if strings.Contains(typeName, "!") {
+				// typeof(Closed<T>) directly on a closed generic
+				// instantiation whose OWN type argument is itself the
+				// enclosing method/class's still-open generic parameter
+				// (Fase 3.83) — e.g. `typeof(Wrapper<TWrapped>)` inside a
+				// generic method, a `ldtoken` TypeSpec that's a
+				// SigGenericInst, not a bare SigGenericParam, so neither
+				// IsMethodGenericParam nor IsClassGenericParam is set;
+				// resolveClosedTypeSpecName (internal/ir/builder.go) now
+				// emits "!!N"/"!N" sentinels NESTED inside the closed
+				// name (e.g. "Wrapper`1[[!!0]]") via the same
+				// sigTypeFullNameGenericArg ir.methodSpecGenericArgNames
+				// already used — resolved here the same way ir.Call/
+				// ir.NewObj's own forwarding already does, a substring
+				// scan against this frame's own MethodGenericArgs/
+				// ClassGenericArgs.
+				typeName = replaceGenericParamSentinels(typeName, frame.MethodGenericArgs, frameClassGenericArgs(frame))
 			}
 			frame.push(bcl.NewTypeValue(typeName))
 
