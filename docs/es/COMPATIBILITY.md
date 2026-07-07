@@ -40,6 +40,7 @@ tres separadas, a propósito, para cada paquete contra el que se mide vmnet.
 | `ClosedXML@0.105.0` | 97.5% (10.444 métodos, 257 marcados) | [`examples/closedxml-demo`](../../examples/closedxml-demo) |
 | `Jint@3.1.3` | 96.7% (5.414 métodos, 178 marcados) | [`examples/jint-demo`](../../examples/jint-demo), [`examples/jint-nowrapper`](../../examples/jint-nowrapper), [`examples/jint-advanced-demo`](../../examples/jint-advanced-demo) |
 | `Dapper@2.1.79` | 95.5% (1.047 métodos, 47 marcados) | [`examples/dapper-demo`](../../examples/dapper-demo), [`examples/sqlite-demo`](../../examples/sqlite-demo) |
+| `CsvHelper@33.1.0` | 94.5% (1.393 métodos, 76 marcados) | [`examples/csvhelper-demo`](../../examples/csvhelper-demo) |
 | `Microsoft.Extensions.DependencyInjection@8.0.0` | 94.1% (437 métodos, 26 marcados) | [`examples/di-demo`](../../examples/di-demo) |
 | `Newtonsoft.Json@13.0.3` | 89.2% (4.064 métodos, 440 marcados) | [`examples/newtonsoft-json-demo`](../../examples/newtonsoft-json-demo) |
 
@@ -154,6 +155,24 @@ Quedan dos brechas arquitectónicas reales, permanentes y documentadas (una limi
 `typeof(T)` en métodos genéricos, y una feature de regex de Dapper que el motor RE2 de Go nunca
 puede compilar) — ver `docs/en/ROADMAP.md` Fase 3.52/3.53.
 
+#### `CsvHelper@33.1.0`
+
+**Verificado.** `csvhelper-demo` corre `CsvReader.GetRecords<T>()` **sin ningún `ClassMap`
+registrado**, forzando a que el propio camino de `AutoMap()` de CsvHelper, basado solo en reflexión
+(`Type.GetConstructor(s)`, `Expression.New`/`Lambda`/`Compile`), construya el tipo de registro y
+cada mapa de miembro puramente en tiempo de ejecución — exactamente la brecha que este documento
+había marcado antes como "todavía no es un demo funcionando", arreglada de verdad en la Fase 3.81
+(ocho bugs distintos: identidad de genérico cerrado a través de
+`Type.GetConstructor()`/`ConstructorInfo.Invoke()`, la misma identidad perdida de forma inversa en
+tiempo de construcción, el parámetro genérico a nivel de clase de un iterador generado por el
+compilador que no sobrevivía a una llamada a método genérico reenviada, el mismo centinela que no
+sobrevivía a quedar anidado un nivel dentro de un tipo genérico cerrado, `System.String.Join`
+recibiendo un `IEnumerable<string>` real de un plugin, y varias fábricas de
+`System.Linq.Expressions` faltantes). Queda una brecha conocida y más estrecha:
+`new List<T>(algúnIEnumerablePlugin)` construye silenciosamente una lista vacía en lugar de
+conducir el protocolo de enumeración real de la fuente — ver el propio relato de la Fase 3.81 en
+`docs/es/ROADMAP.md` y `examples/csvhelper-demo/README.md`.
+
 #### `Microsoft.Extensions.DependencyInjection@8.0.0`
 
 **Verificado para inyección de constructor real** — el propio contenedor de DI oficial de
@@ -197,7 +216,6 @@ funciona.
 | `Serilog@4.3.1` | 96.1% (1.115 métodos, 43 marcados) |
 | `MediatR@14.2.0` | 95.5% (441 métodos, 20 marcados) |
 | `NodaTime@3.3.2` | 94.8% (3.098 métodos, 162 marcados) |
-| `CsvHelper@33.1.0` | 94.2% (1.393 métodos, 81 marcados) |
 | `AutoMapper@16.2.0` | 94.2% (2.319 métodos, 135 marcados) |
 | `SimpleBase@4.0.0` | 92.6% (258 métodos, 19 marcados) |
 | `Semver@2.3.0` | 92.9% (423 métodos, 30 marcados) |
@@ -236,20 +254,6 @@ Estimación de cobertura moderada; no verificado por una corrida real. Subió en
 
 Estimación de cobertura buena-a-alta; no verificado por una corrida real. El propio número de
 `NodaTime` se movió levemente en la Fase 3.79 (`TimeSpan`/`conv.u8`).
-
-#### `CsvHelper@33.1.0`
-
-La Fase 3.66 arregló de verdad la brecha de clave-array de `Dictionary` de la Fase 3.64 (su propio
-codificador de claves ahora maneja un componente de clave con forma de array). Un
-`csv.GetRecords<T>()` real y sin modificar ahora supera eso Y un segundo bug real (la propia cadena
-`Type.BaseType.GetGenericArguments()` de `ClassMap.GetGenericType()`, arreglada por una nueva
-capacidad general de rastreo de parámetros de tipo genérico a nivel de clase) — pero su camino de
-construcción basado en `AutoMap()` todavía pierde la identidad genérica cerrada en la frontera de
-reflection de `Type.GetConstructor()`, una simplificación separada, deliberada y preexistente (ver
-la propia sección "Encontrado, no arreglado" de la Fase 3.66 en `docs/es/ROADMAP.md`). Rastreado
-como el [issue #2](https://github.com/arturoeanton/go-vmnet/issues/2).
-
-Todavía no es un demo funcionando.
 
 #### `AutoMapper@16.2.0`
 

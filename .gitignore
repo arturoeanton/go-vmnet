@@ -92,6 +92,12 @@ examples/di-demo/obj/
 examples/fluentvalidation-demo/bin/
 examples/fluentvalidation-demo/obj/
 
+# .NET build output for the examples/csvhelper-demo wrapper (same
+# rationale as jint-demo above — CsvHelperDemoWrapper.cs is committed
+# source, the compiled CsvHelperDemoWrapper.dll it produces is not)
+examples/csvhelper-demo/bin/
+examples/csvhelper-demo/obj/
+
 # same rationale — Bench.cs is committed source, its compiled Bench.dll
 # and .vmnet/ package cache are build artifacts.
 benchmarks/bin/

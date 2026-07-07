@@ -158,6 +158,25 @@ func evalExprNode(m *Machine, node runtime.Value, env map[*runtime.Object]runtim
 		if err != nil {
 			return runtime.Value{}, err
 		}
+		if typeName == "" {
+			// The string-name Call(Expression, string, Type[],
+			// Expression[]) overload (Fase 3.81) — there's no MethodInfo
+			// naming a declaring type up front, so it's resolved here
+			// instead, straight off the receiver's own real runtime type
+			// (exactly what real .NET itself does: GetMethod resolves
+			// against the instance expression's static .Type, and since
+			// vmnet has no separate "static type of this expression"
+			// concept, the receiver's actual concrete type is the closest,
+			// and for every real caller found so far — CsvHelper's own
+			// TypeConverter.ConvertFromString/IWriter.WriteField — always
+			// correct, since the instance is always a plain
+			// Expression.Constant(someConcreteInstance)).
+			rtn, ok := receiverTypeName(receiver)
+			if !ok {
+				return runtime.Value{}, fmt.Errorf("interpreter: compiled expression: can't determine %q's own receiver type", methodName)
+			}
+			typeName = rtn
+		}
 		callArgs := append([]runtime.Value{receiver}, evaluatedArgs...)
 		// virtual=true: matches ordinary compiled callvirt sites
 		// elsewhere in this project — typeName is the statically-known
@@ -183,7 +202,16 @@ func evalExprNode(m *Machine, node runtime.Value, env map[*runtime.Object]runtim
 		// suffix, no forwarding-resolution needed (this evaluator has no
 		// notion of an enclosing generic method's own open type
 		// parameter at all).
-		return m.newObj(newObjArgs{TypeFullName: typeName, CtorFullName: typeName + "::.ctor", Args: evaluatedArgs, ClassGenericArgs: bcl.ClosedGenericArgs(typeName)}, depth, instrCount)
+		//
+		// newObjArgs.TypeFullName/CtorFullName below use the OPEN name
+		// (Fase 3.81, same fix as Machine.New's own — see its doc
+		// comment): newObj's own m.ResolveType/m.call resolve a real
+		// TypeDef/MethodDef, always indexed by the open name for a
+		// generic class (ECMA-335). ClassGenericArgs still carries the
+		// real closed instantiation, parsed from typeName before it gets
+		// stripped.
+		openTypeName := bcl.GenericOpenName(typeName)
+		return m.newObj(newObjArgs{TypeFullName: openTypeName, CtorFullName: openTypeName + "::.ctor", Args: evaluatedArgs, ClassGenericArgs: bcl.ClosedGenericArgs(typeName)}, depth, instrCount)
 
 	case bcl.ExprNodeNewArrayInit:
 		_, elemNodes, _ := bcl.NewArrayExpressionParts(node)
@@ -389,6 +417,22 @@ func evalExprNode(m *Machine, node runtime.Value, env map[*runtime.Object]runtim
 			return lv, nil
 		}
 		return evalExprNode(m, right, env, depth, instrCount, exprDepth+1)
+
+	case bcl.ExprNodeArrayIndex:
+		arrNode, idxNode, _ := bcl.ArrayIndexExpressionParts(node)
+		arrVal, err := evalExprNode(m, arrNode, env, depth, instrCount, exprDepth+1)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		idxVal, err := evalExprNode(m, idxNode, env, depth, instrCount, exprDepth+1)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		idx, err := arrayIndex(arrVal, idxVal, "Expression.ArrayIndex")
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		return arrVal.Arr.Elems[idx], nil
 
 	case bcl.ExprNodeBinaryCompare:
 		opType, left, right, _ := bcl.BinaryCompareExpressionParts(node)

@@ -7094,6 +7094,134 @@ cd examples/jint-advanced-demo && dotnet build -c Release && go run .
 ```
 
 ---
+
+## Fase 3.81 — el camino real de `AutoMap()` de CsvHelper, de punta a punta
+
+**Objetivo:** cerrar la brecha que `docs/es/COMPATIBILITY.md` había marcado para CsvHelper (94.2%,
+solo checker, sin demo) — la construcción de `ClassMap` basada en reflexión de `AutoMap()` perdía la
+identidad de genérico cerrado en el límite de `Type.GetConstructor()` — resolviéndola de verdad y
+publicando `examples/csvhelper-demo`: `CsvReader.GetRecords<T>()` **sin ningún `ClassMap`
+registrado**, forzando a que corra sin modificaciones el propio camino de `AutoMap()` de CsvHelper,
+basado solo en reflexión.
+
+**Resultado: ocho bugs distintos y reales, cada uno encontrado siguiendo la cadena real
+`GetRecords<T>()` → `ValidateHeader<T>()`/`RecordManager.GetReadDelegate<T>()` →
+`RecordCreatorFactory`/`ObjectRecordCreator` → `CsvContext.AutoMap(Type)` → la construcción
+compilada de `Expression.New`/`Lambda` de `ObjectResolver`/`ObjectCreator` — verificado de punta a
+punta contra un CSV real de 4 columnas (string/int/double/bool) sin código de mapeo explícito en
+ningún lado.**
+
+- **Se perdía la identidad de genérico cerrado a través de
+  `Type.GetConstructor()`/`ConstructorInfo.Invoke()`.** `GetConstructor(s)` recorta correctamente
+  el sufijo `[[...]]` de un tipo genérico cerrado para buscar el `TypeDef` real (siempre indexado
+  por el nombre abierto — ECMA-335: un `TypeDef` por genérico abierto, nunca uno por instanciación
+  cerrada), pero luego horneaba ese MISMO nombre recortado en el `ConstructorInfo` devuelto.
+  Cualquier construcción posterior a través de él (`ConstructorInfo.Invoke`,
+  `Expression.New(ctor).Compile()`) llegaba a `Machine.New` con un nombre ya abierto, sin
+  argumentos de tipo cerrados que analizar. Se arregló llevando TANTO el nombre abierto (para
+  búsquedas de `ResolveMember`) COMO el nombre cerrado original (para la construcción) en
+  `nativeConstructorInfo` (`internal/bcl/system_reflection.go`), con un nuevo accesor
+  `ConstructorInfoConstructTypeFullName` distinto del ya existente
+  `ConstructorInfoTypeFullName`/`ConstructorInfoParts` orientado a búsquedas.
+- **El error inverso, encontrado inmediatamente al surgir con el primer arreglo**: tanto
+  `Machine.New` (`internal/interpreter/eval.go`) como el caso `ExprNodeNew` del propio evaluador de
+  árboles de expresión compilados (`internal/interpreter/exprcompile.go`) construían
+  `newObjArgs.TypeFullName`/`CtorFullName` a partir del nombre CERRADO directamente — exactamente
+  el error inverso al primero. El propio `m.ResolveType`/`m.call` de `Machine.newObj` siempre
+  necesitan el nombre ABIERTO (igual que cualquier sitio `newobj` de IL real compilado, donde
+  `ir.NewObj.TypeFullName` siempre es abierto por construcción); la instanciación cerrada se lleva
+  aparte vía `ClassGenericArgs`. Antes de este arreglo, toda instancia de genérico cerrado
+  construida por reflexión fallaba con "type ... not found" para un nombre como
+  `DefaultClassMap\`1[[Person]]`, que ninguna fila de `TypeDef` tiene jamás.
+- **El parámetro genérico a nivel de clase de un iterador generado por el compilador no
+  sobrevivía al reenviarse a otra llamada a método genérico.** El propio state machine de
+  `CsvReader.GetRecords<T>()` (`<GetRecords>d__91<T>`) no es genérico en sí mismo — su
+  `MoveNext()` llama a `ValidateHeader<T>()` usando T como el propio parámetro genérico de la
+  CLASE ENVOLVENTE, compilando a un `MethodSpec` instanciado con `!0` (la notación VAR de
+  ECMA-335 para un parámetro a nivel de clase), no `!!0` (MVAR, el caso a nivel de método ya
+  manejado desde la Fase 3.60). `ir.methodSpecGenericArgNames` solo emitía el centinela `!!N` para
+  un parámetro a nivel de método, cayendo a `""` para uno a nivel de clase — perdiendo
+  silenciosamente el tipo cerrado en este salto específico. Se arregló emitiendo un centinela
+  paralelo `!N` (`ir.sigTypeFullNameGenericArg`, `internal/ir/builder.go`), resuelto en tiempo de
+  ejecución desde el propio `ClassGenericArgs` del objeto receptor del frame ACTUAL
+  (`frameClassGenericArgs`, `internal/interpreter/eval.go`) en lugar de
+  `frame.MethodGenericArgs`.
+- **El mismo centinela a nivel de clase no sobrevivía al quedar anidado un nivel dentro de un tipo
+  genérico cerrado.** `CsvContext.AutoMap<T>()` reenviando T a
+  `ObjectResolver.Current.Resolve<DefaultClassMap<T>>()` instancia un `MethodSpec` con
+  `DefaultClassMap\`1[[!!0]]`, no un `!!0` desnudo — un `SigGenericInst` cuyo propio argumento
+  anidado es el centinela, no el centinela en sí. `resolveForwardedGenericArgs`
+  (`internal/interpreter/eval.go`) exigía una coincidencia exacta de la cadena completa; se amplió
+  a un escaneo real de subcadena (`replaceGenericParamSentinels`) que sustituye `!!N`/`!N` donde
+  sea que aparezcan dentro de un nombre resuelto más grande, no solo cuando son la cadena entera.
+- **`System.String.Join` recibiendo un `IEnumerable<string>` real, definido por un plugin** — el
+  propio `MemberNameCollection` de CsvHelper, una clase compilada genuina con su propio iterador
+  `yield return this[i]`, no una lista/arreglo nativo de vmnet — **formateaba silenciosamente el
+  objeto de la colección sin enumerar como una única cadena de marcador de posición opaca,
+  idéntica para cada instancia distinta.** La propia clave de caché por miembro de
+  `GetFieldIndex` (`string.Join("_", memberMap.Data.Names) + index`) colapsaba a todo miembro
+  después del primero a exactamente la misma clave, así que su `namedIndexCache` trataba a cada
+  miembro posterior como una repetición de la búsqueda del ÍNDICE de columna ya cacheado del
+  PRIMER miembro — la columna *Age* leía silenciosamente el texto crudo de la columna *Name*, sin
+  ningún error hasta que el valor de tipo incorrecto finalmente fallaba la conversión a `Int32`
+  varias llamadas después. `bcl.stringJoin` no tenía acceso a `Machine` para conducir un protocolo
+  real de `GetEnumerator`/`MoveNext`/`get_Current`, solo los caminos rápidos de arreglo/lista
+  nativa. Se movió el registro del registro plano de `bcl.Lookup` a un nuevo override
+  Machine-aware en `internal/interpreter/linq.go` (recayendo en `m.enumerateAll` para cualquier
+  cosa que no sea ya un arreglo o lista nativa de vmnet) — el propio `resolvableMethod` del checker
+  necesitó una entrada correspondiente (`internal/checker/analyzer.go`), ya que deja de encontrar
+  `System.String::Join` vía `bcl.Lookup`.
+- **Varias fábricas de `System.Linq.Expressions.Expression` faltantes**, todas encontradas
+  construyendo los delegados de construcción y asignación de miembros compilados propios de
+  `ObjectCreator`/`ExpressionManager`: `Expression.ArrayIndex` (indexación del arreglo de
+  argumentos del constructor); `Expression.Bind` (`MemberAssignment`, consumido solo vía sus
+  propias propiedades `.Member`/`.Expression` — el accesor `Member` registrado bajo la clase base
+  abstracta `MemberBinding`, nunca sobrescrito, el mismo razonamiento que el propio registro de la
+  Fase 3.53 de `MemberInfo.DeclaringType`); `Expression.MakeMemberAccess` (la propia fábrica
+  general de `Expression.Property`, reutilizada sin cambios para un segundo argumento
+  `PropertyInfo`); el overload de nombre-de-cadena `Call(Expression instance, string methodName,
+  Type[] typeArguments, params Expression[] arguments)` (resuelto contra el tipo real en tiempo de
+  ejecución del receptor en tiempo de evaluación, ya que no hay un `MethodInfo` que indique un tipo
+  declarante de antemano — y su propio `params Expression[] arguments` siempre compila a
+  exactamente un único argumento de arreglo real, nunca varios argumentos finales separados, sin
+  importar cuántas expresiones haya pasado el propio código fuente C#); y el overload no genérico
+  `Lambda(Type delegateType, Expression body, params ParameterExpression[] parameters)`
+  (desambiguado del genérico `Lambda<TDelegate>(body, params)` de arriba según si el primer
+  argumento es en sí mismo un nodo `Expression` reconocido — un valor `Type` real nunca lo es).
+- **`Enumerable.SequenceEqual` y `Boolean.TryParse` simplemente faltaban** — el primero necesario
+  para `MemberMapCollection.Find`, el segundo para el propio primer intento de análisis de
+  `BooleanConverter.ConvertFromString`.
+- **Una brecha separada y más estrecha encontrada pero dejada abierta**: `new
+  List<T>(algúnIEnumerablePluginReal)` — el constructor `List<T>(IEnumerable<T> collection)`
+  recibiendo un iterador de plugin real, a diferencia de una lista/arreglo nativo de vmnet —
+  construye silenciosamente una lista VACÍA en lugar de conducir el protocolo de enumeración real
+  de la fuente. El propio wrapper de `examples/csvhelper-demo` lo evita con un simple bucle
+  `foreach` + `Add()` (también la forma más común en que se escribe realmente el código de
+  CsvHelper); se deja sin documentar como una Fase numerada hasta que bloquee un caso real y con
+  peso propio.
+
+Probado con regresión directamente (`tests/fixtures/csharp/GenericSentinelForwarding.cs`, un
+fixture independiente sin dependencia de CsvHelper/NuGet, cubriendo el centinela a nivel de clase,
+el centinela anidado, `String.Join` sobre un `IEnumerable<string>` personalizado, y
+`Boolean.TryParse` — cada uno confirmado que falla sin su propio arreglo vía un `git stash`
+temporal de cada cambio de código fuente) en lugar de solo a través del pipeline completo de
+CsvHelper. La propia corrida de punta a punta de `examples/csvhelper-demo` es la confirmación a
+nivel de integración; `docs/en/COMPATIBILITY.md`/`docs/es/COMPATIBILITY.md` mueven CsvHelper de la
+tabla "solo checker, sin demo" a la tabla de demo real.
+
+### Cómo verificar la Fase 3.81
+
+```bash
+dotnet build tests/fixtures/csharp/Fixtures.csproj -c Release
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+go test -run "TestClassLevelGenericSentinelForwarding|TestNestedGenericSentinelForwarding|TestStringJoinOverCustomIEnumerable|TestBooleanTryParse" -v .
+cd examples/csvhelper-demo && dotnet build CsvHelperDemoWrapper.csproj -c Release && go run .
+```
+
+---
 ## Fase 4 — v1.0 listo para producción ("Ready to ship")
 
 **Objetivo:** convertir el motor funcional en un producto adoptable, confiable, documentado y

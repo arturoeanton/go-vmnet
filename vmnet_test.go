@@ -2816,3 +2816,96 @@ func TestCustomAttributes(t *testing.T) {
 		}
 	})
 }
+
+// TestClassLevelGenericSentinelForwarding regresses Fase 3.81: a
+// compiler-generated iterator's MoveNext() (declared on a generic class
+// closing over the original method's own T as a CLASS-level parameter,
+// not itself a generic method) calling back into another generic method
+// using that same T — the exact shape CsvHelper's own GetRecords<T>()
+// calling ValidateHeader<T>() is. Before this fix, the forwarded "!0"
+// (VAR) sentinel had no runtime record to resolve against at all (only
+// "!!0", MVAR, was handled), silently resolving to an empty type name.
+// See tests/fixtures/csharp/GenericSentinelForwarding.cs's own doc
+// comment.
+func TestClassLevelGenericSentinelForwarding(t *testing.T) {
+	asm := loadFixture(t)
+
+	out, err := asm.Call("Vmnet.Fixtures.ClassLevelSentinel", "IterateNameOfTargetCaller")
+	if err != nil {
+		t.Fatalf("IterateNameOfTargetCaller() error = %v", err)
+	}
+	want := "Vmnet.Fixtures.SentinelTarget"
+	if got := out.Native().(string); got != want {
+		t.Errorf("IterateNameOfTargetCaller() = %q, want %q", got, want)
+	}
+}
+
+// TestNestedGenericSentinelForwarding regresses Fase 3.81: a generic
+// method's own T forwarded NESTED inside a closed generic instantiation
+// of another type (a MethodSpec instantiated with
+// "SentinelWrapper`1[[!!0]]", not a bare "!!0") — the exact shape
+// CsvHelper's own CsvContext.AutoMap<T>() forwarding T into
+// ObjectResolver.Current.Resolve<DefaultClassMap<T>>() is. Before this
+// fix, the sentinel only survived when it was the WHOLE argument string,
+// not nested one level inside a closed generic type — see
+// tests/fixtures/csharp/GenericSentinelForwarding.cs's own doc comment.
+func TestNestedGenericSentinelForwarding(t *testing.T) {
+	asm := loadFixture(t)
+
+	out, err := asm.Call("Vmnet.Fixtures.NestedGenericSentinel", "NameOfWrappedTargetCaller")
+	if err != nil {
+		t.Fatalf("NameOfWrappedTargetCaller() error = %v", err)
+	}
+	want := "Vmnet.Fixtures.SentinelWrapper`1[[Vmnet.Fixtures.SentinelTarget]]"
+	if got := out.Native().(string); got != want {
+		t.Errorf("NameOfWrappedTargetCaller() = %q, want %q", got, want)
+	}
+}
+
+// TestStringJoinOverCustomIEnumerable regresses Fase 3.81:
+// System.String.Join(string, IEnumerable<string>) given a real,
+// plugin-defined IEnumerable<string> (its own compiler-generated
+// iterator, not a vmnet-native List<T>/array) — the exact shape
+// CsvHelper's own MemberNameCollection is. Before this fix, bcl's own
+// plain-native Join had no Machine access to drive GetEnumerator/
+// MoveNext/get_Current, so it silently formatted the un-enumerated
+// collection object itself as one opaque placeholder string instead of
+// joining its real elements — see
+// tests/fixtures/csharp/GenericSentinelForwarding.cs's own doc comment.
+func TestStringJoinOverCustomIEnumerable(t *testing.T) {
+	asm := loadFixture(t)
+
+	out, err := asm.Call("Vmnet.Fixtures.StringJoinOverCustomEnumerable", "JoinTwo", String("Name"), String("Age"))
+	if err != nil {
+		t.Fatalf("JoinTwo() error = %v", err)
+	}
+	want := "Name_Age"
+	if got := out.Native().(string); got != want {
+		t.Errorf("JoinTwo() = %q, want %q", got, want)
+	}
+}
+
+// TestBooleanTryParse regresses Fase 3.81: Boolean.TryParse(string, out
+// bool) was simply missing — found via CsvHelper's own
+// BooleanConverter.ConvertFromString.
+func TestBooleanTryParse(t *testing.T) {
+	asm := loadFixture(t)
+
+	tests := []struct {
+		text string
+		want string
+	}{
+		{"true", "True:True"},
+		{"False", "True:False"},
+		{"not a bool", "False:False"},
+	}
+	for _, tt := range tests {
+		out, err := asm.Call("Vmnet.Fixtures.BooleanTryParseTest", "TryParseRoundTrip", String(tt.text))
+		if err != nil {
+			t.Fatalf("TryParseRoundTrip(%q) error = %v", tt.text, err)
+		}
+		if got := out.Native().(string); got != tt.want {
+			t.Errorf("TryParseRoundTrip(%q) = %q, want %q", tt.text, got, tt.want)
+		}
+	}
+}

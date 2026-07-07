@@ -229,7 +229,15 @@ func resolvableMethod(md *metadata.Metadata, fullName string) bool {
 		fullName == "System.Collections.Concurrent.ConcurrentDictionary`2::GetOrAdd" ||
 		fullName == "System.Linq.Expressions.Expression`1::Compile" ||
 		fullName == "System.Linq.Expressions.LambdaExpression::Compile" ||
-		fullName == "System.Text.RegularExpressions.Regex::Replace" {
+		fullName == "System.Text.RegularExpressions.Regex::Replace" ||
+		// System.String::Join (Fase 3.81) moved from bcl.Lookup to a
+		// Machine-aware override (internal/interpreter/linq.go's own
+		// stringJoin) so it can drive a real plugin IEnumerable<string>'s
+		// own iteration protocol (CsvHelper's own MemberNameCollection,
+		// the case that found this) — bcl.Lookup no longer finds it at
+		// all, so the checker needs its own entry here, same reason every
+		// other one-off Machine-aware native in this list has one.
+		fullName == "System.String::Join" {
 		return true
 	}
 	if asyncMachineTargets[fullName] {
@@ -580,6 +588,7 @@ var linqTargets = map[string]bool{
 	"System.Linq.Enumerable::Reverse":          true,
 	"System.Linq.Enumerable::AsEnumerable":     true,
 	"System.Linq.Enumerable::ToHashSet":        true,
+	"System.Linq.Enumerable::SequenceEqual":    true,
 	// Not System.Linq.Enumerable, but the same "resolved through a
 	// Machine-aware registry, not bcl.Lookup" reason applies (Fase 3.32):
 	// List<T>.ForEach needs to invoke its Action<T> argument.

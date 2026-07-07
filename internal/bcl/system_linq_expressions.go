@@ -155,6 +155,18 @@ func init() {
 	register("System.Linq.Expressions.Expression::Parameter", true, expressionParameter)
 	register("System.Linq.Expressions.Expression::Variable", true, expressionParameter)
 	register("System.Linq.Expressions.Expression::Property", true, expressionProperty)
+	// MakeMemberAccess(Expression, MemberInfo) is Property's own general
+	// factory (Fase 3.81, found via CsvHelper's own ExpressionManager
+	// building `Expression.Assign(Expression.MakeMemberAccess(instance,
+	// b.Member), b.Expression)` for each mapped member) — expressionProperty
+	// already handles a PropertyInfo 2nd argument (the only MemberInfo
+	// kind CsvHelper's own real member/reference maps ever carry here,
+	// since Person-shaped record types are mapped by public property, not
+	// field), so the exact same implementation applies unchanged. A
+	// FieldInfo 2nd argument isn't modeled (falls through to
+	// expressionProperty's own silent-empty degenerate case) — no real
+	// corpus caller needs it yet.
+	register("System.Linq.Expressions.Expression::MakeMemberAccess", true, expressionProperty)
 	register("System.Linq.Expressions.Expression::Lambda", true, expressionLambda)
 	register("System.Linq.Expressions.LambdaExpression::get_Body", true, lambdaExpressionGetBody)
 	register("System.Linq.Expressions.LambdaExpression::get_Parameters", true, lambdaExpressionGetParameters)
@@ -168,6 +180,15 @@ func init() {
 	register("System.Linq.Expressions.Expression::Call", true, expressionCall)
 	register("System.Linq.Expressions.Expression::New", true, expressionNew)
 	register("System.Linq.Expressions.Expression::NewArrayInit", true, expressionNewArrayInit)
+	register("System.Linq.Expressions.Expression::ArrayIndex", true, expressionArrayIndex)
+	register("System.Linq.Expressions.Expression::Bind", true, expressionBind)
+	// Member is declared (and never overridden) on the abstract MemberBinding
+	// base, not MemberAssignment itself — real IL callvirts target
+	// MemberBinding::get_Member directly, same reasoning as MemberInfo.
+	// DeclaringType's own registration under the base MemberInfo name
+	// (reflection.go).
+	register("System.Linq.Expressions.MemberBinding::get_Member", true, memberAssignmentGetMember)
+	register("System.Linq.Expressions.MemberAssignment::get_Expression", true, memberAssignmentGetExpression)
 	register("System.Linq.Expressions.Expression::Convert", true, expressionConvert)
 	register("System.Linq.Expressions.Expression::ConvertChecked", true, expressionConvert)
 	register("System.Linq.Expressions.Expression::Assign", true, expressionAssign)
@@ -305,20 +326,34 @@ func expressionProperty(args []runtime.Value) (runtime.Value, error) {
 	return runtime.ObjRef(&runtime.Object{Native: &nativeMemberExpression{propertyName: name, expression: args[0]}}), nil
 }
 
-// expressionLambda backs Expression.Lambda<TDelegate>(Expression body,
-// params ParameterExpression[] parameters) — a generic method, but
-// TDelegate is never consulted (see exprcompile.go's own doc comment for
-// why Compile() doesn't need it either), so this is registered as a
-// plain native rather than needing genericMachineRegistry.
+// expressionLambda backs BOTH real Lambda factories: the generic
+// Lambda<TDelegate>(Expression body, params ParameterExpression[]
+// parameters) — TDelegate is never consulted (see exprcompile.go's own
+// doc comment for why Compile() doesn't need it either) — and the
+// non-generic Lambda(Type delegateType, Expression body, params
+// ParameterExpression[] parameters) (Fase 3.81, found via CsvHelper's own
+// ObjectRecordCreator building `Expression.Lambda(typeof(Func<>).
+// MakeGenericType(recordType), body)`, needed since the record type is
+// only known at runtime — no TDelegate to close over at compile time).
+// Disambiguated by whether args[0] is itself a recognized Expression node
+// at all: a real Type value (delegateType) never is, so it can never be
+// confused with a real body expression.
 func expressionLambda(args []runtime.Value) (runtime.Value, error) {
 	if len(args) == 0 {
 		return runtime.Value{}, nil
 	}
-	var params []runtime.Value
-	if len(args) > 1 {
-		params = exprArgsFrom(args[1])
+	bodyIdx := 0
+	if KindOfExprNode(args[0]) == ExprNodeNone {
+		if len(args) < 2 {
+			return runtime.Value{}, fmt.Errorf("bcl: Expression.Lambda(Type, ...) expects a body expression")
+		}
+		bodyIdx = 1
 	}
-	return runtime.ObjRef(&runtime.Object{Native: &nativeLambdaExpression{body: args[0], parameters: params}}), nil
+	var params []runtime.Value
+	if len(args) > bodyIdx+1 {
+		params = exprArgsFrom(args[bodyIdx+1])
+	}
+	return runtime.ObjRef(&runtime.Object{Native: &nativeLambdaExpression{body: args[bodyIdx], parameters: params}}), nil
 }
 
 func lambdaExpressionGetBody(args []runtime.Value) (runtime.Value, error) {
@@ -358,6 +393,7 @@ func memberExpressionGetExpression(args []runtime.Value) (runtime.Value, error) 
 // recalled from memory — a wrong constant here would be a silent
 // mismatch, not a crash).
 const (
+	exprTypeArrayIndex          = 2
 	exprTypeCall                = 6
 	exprTypeConstant            = 9
 	exprTypeConvert             = 10
@@ -443,6 +479,8 @@ func expressionGetNodeType(args []runtime.Value) (runtime.Value, error) {
 			return runtime.Int32(exprTypeCoalesce), nil
 		case *nativeTryExpression:
 			return runtime.Int32(exprTypeTry), nil
+		case *nativeArrayIndexExpression:
+			return runtime.Int32(exprTypeArrayIndex), nil
 		}
 	}
 	return runtime.Value{}, fmt.Errorf("bcl: Expression.NodeType: receiver isn't one of the Expression shapes this subsystem models (see system_linq_expressions.go's own doc comment)")
@@ -511,6 +549,19 @@ func expressionGetType(args []runtime.Value) (runtime.Value, error) {
 			return expressionGetType([]runtime.Value{n.left})
 		case *nativeTryExpression:
 			return expressionGetType([]runtime.Value{n.body})
+		case *nativeArrayIndexExpression:
+			// Real .NET reports array.Type.GetElementType() — approximated
+			// by stripping a trailing "[]" off the array sub-expression's
+			// own .Type when it's array-shaped, else the "System.Object"
+			// default above (every real caller found so far immediately
+			// wraps this in an explicit Expression.Convert anyway, so this
+			// answer is rarely, if ever, load-bearing on its own).
+			arrType, err := expressionGetType([]runtime.Value{n.array})
+			if err == nil {
+				if arrName, ok := TypeFullNameOf(arrType); ok && strings.HasSuffix(arrName, "[]") {
+					name = strings.TrimSuffix(arrName, "[]")
+				}
+			}
 		}
 	}
 	return NewTypeValue(name), nil
@@ -534,6 +585,37 @@ func expressionConstant(args []runtime.Value) (runtime.Value, error) {
 // Expression[]) instance — always exactly 3. Arity alone disambiguates
 // them (see this file's own top doc comment).
 func expressionCall(args []runtime.Value) (runtime.Value, error) {
+	// Call(Expression instance, string methodName, Type[] typeArguments,
+	// params Expression[] arguments) — the string-name overload (Fase
+	// 3.81, found via CsvHelper's own ExpressionManager/
+	// PrimitiveRecordCreator/PrimitiveRecordWriter/ObjectRecordWriter, all
+	// of which build `Expression.Call(Expression.Constant(converterOrWriter),
+	// "ConvertFromString"/"WriteField"/..., null, ...)`). Unlike every
+	// other shape below, there's no MethodInfo here to name a declaring
+	// type up front — the method is resolved against instance's own real
+	// runtime type at EVALUATION time instead (exprcompile.go's
+	// ExprNodeCall case, triggered by typeName == "", something a real
+	// MethodInfo's declaring type can never be). A bare string in
+	// position 1 can never be confused with a MethodInfo/Expression node,
+	// so this check runs before the arity-based disambiguation below.
+	//
+	// `params Expression[] arguments` always compiles down to exactly ONE
+	// real 4th argument — a genuine `Expression[]` array the C# compiler
+	// builds at the call site, regardless of how many individual
+	// expressions the caller's own source passed (one, several, or zero)
+	// — never several separate trailing arguments. args[3] (when present)
+	// is unwrapped via exprArgsFrom accordingly, not sliced directly.
+	if len(args) >= 3 && args[1].Kind == runtime.KindString {
+		var callArgs []runtime.Value
+		if len(args) > 3 {
+			callArgs = exprArgsFrom(args[3])
+		}
+		return runtime.ObjRef(&runtime.Object{Native: &nativeCallExpression{
+			instance:   args[0],
+			methodName: args[1].Str,
+			args:       callArgs,
+		}}), nil
+	}
 	var instance, methodArg, argsArg runtime.Value
 	switch len(args) {
 	case 2:
@@ -574,6 +656,26 @@ func expressionCall(args []runtime.Value) (runtime.Value, error) {
 			argsArg = runtime.ArrRef(&runtime.Array{Elems: []runtime.Value{args[1], args[2]}})
 		} else {
 			instance, methodArg, argsArg = args[0], args[1], args[2]
+		}
+	case 4:
+		// Same disambiguation posture, one arg wider (Fase 3.81): Call(
+		// MethodInfo method, Expression arg0, Expression arg1, Expression
+		// arg2) — STATIC, three bare args, no array — vs Call(Expression
+		// instance, MethodInfo method, Expression arg0, Expression arg1) —
+		// instance + method + two bare args. The far more common 4-arg
+		// shape this project has actually hit (CsvHelper's own
+		// TypeConverter.ConvertFromString/WriteField calls) is the
+		// string-name overload intercepted above before this switch ever
+		// runs; this MethodInfo-based case only fires for a genuine
+		// MethodInfo-carrying 4-arg call.
+		if _, _, ok := MethodInfoParts(args[0]); ok {
+			instance = runtime.Null()
+			methodArg = args[0]
+			argsArg = runtime.ArrRef(&runtime.Array{Elems: []runtime.Value{args[1], args[2], args[3]}})
+		} else {
+			instance = args[0]
+			methodArg = args[1]
+			argsArg = runtime.ArrRef(&runtime.Array{Elems: []runtime.Value{args[2], args[3]}})
 		}
 	default:
 		return runtime.Value{}, fmt.Errorf("bcl: Expression.Call: unsupported argument shape (%d args)", len(args))
@@ -624,7 +726,14 @@ func expressionNew(args []runtime.Value) (runtime.Value, error) {
 	if typeName, ok := TypeFullNameOf(args[0]); ok {
 		return runtime.ObjRef(&runtime.Object{Native: &nativeNewExpression{typeName: typeName}}), nil
 	}
-	typeName, _, ok := ConstructorInfoParts(args[0])
+	// The CLOSED name (Fase 3.81), not ConstructorInfoParts's own open
+	// one — this nativeNewExpression eventually feeds Machine.New/newObj
+	// the same way ConstructorInfo.Invoke does (Expression.New(ctor).
+	// Compile()/Invoke() is exactly the pattern CsvHelper's own
+	// AutoMap()-based construction uses), and only a still-closed name
+	// has any ClassGenericArgs for Machine.New to find. See
+	// nativeConstructorInfo.closedTypeFullName's own doc comment.
+	typeName, ok := ConstructorInfoConstructTypeFullName(args[0])
 	if !ok {
 		return runtime.Value{}, fmt.Errorf("bcl: Expression.New: 1st argument is not a Type or ConstructorInfo")
 	}
@@ -759,6 +868,75 @@ func BinaryCompareExpressionParts(v runtime.Value) (opType int, left, right runt
 		return 0, runtime.Value{}, runtime.Value{}, false
 	}
 	return b.opType, b.left, b.right, true
+}
+
+// nativeArrayIndexExpression backs Expression.ArrayIndex(array, index)
+// (Fase 3.81, found via CsvHelper's own ObjectCreator.CreateInstanceFunc —
+// `Expression.Convert(Expression.ArrayIndex(parameterExpression,
+// Expression.Constant(j)), paramType)`, building `(ParamType)args[j]` for
+// each constructor argument off a real `object[] args` parameter). Only
+// ever evaluated, never rebuilt/visited (unlike MemberExpression's own
+// exprvisitor.go handling) — no real caller found so far needs to walk
+// into one.
+type nativeArrayIndexExpression struct {
+	array, index runtime.Value
+}
+
+func expressionArrayIndex(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 2 {
+		return runtime.Value{}, fmt.Errorf("bcl: Expression.ArrayIndex expects (Expression array, Expression index)")
+	}
+	return runtime.ObjRef(&runtime.Object{Native: &nativeArrayIndexExpression{array: args[0], index: args[1]}}), nil
+}
+
+// ArrayIndexExpressionParts exposes array/index to exprcompile.go's own
+// evaluator, mirroring BinaryCompareExpressionParts/CoalesceExpressionParts.
+func ArrayIndexExpressionParts(v runtime.Value) (array, index runtime.Value, ok bool) {
+	a, ok := nativeOf[*nativeArrayIndexExpression](v)
+	if !ok {
+		return runtime.Value{}, runtime.Value{}, false
+	}
+	return a.array, a.index, true
+}
+
+// nativeMemberAssignment backs System.Linq.Expressions.MemberAssignment,
+// returned by Expression.Bind(MemberInfo, Expression) (Fase 3.81, found
+// via CsvHelper's own ExpressionManager building a member/reference map's
+// MemberAssignment list). Unlike every other native type in this file,
+// this is NOT itself an Expression subtype in real .NET (MemberBinding is
+// a separate base hierarchy, only ever nested inside a
+// MemberInitExpression/ListInitExpression) — deliberately never wired
+// into KindOfExprNode/expressionGetNodeType/expressionGetType, same
+// posture as nativeCatchBlock below: real callers found so far only ever
+// read a MemberAssignment's own .Member/.Expression properties back
+// (CreateInstanceAndAssignMembers's own `assignments.Select((MemberAssignment
+// b) => Expression.Assign(Expression.MakeMemberAccess(instance, b.Member),
+// b.Expression))`), never evaluate it as a tree node in its own right.
+type nativeMemberAssignment struct {
+	member, expr runtime.Value
+}
+
+func expressionBind(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 2 {
+		return runtime.Value{}, fmt.Errorf("bcl: Expression.Bind expects (MemberInfo member, Expression expression)")
+	}
+	return runtime.ObjRef(&runtime.Object{Native: &nativeMemberAssignment{member: args[0], expr: args[1]}}), nil
+}
+
+func memberAssignmentGetMember(args []runtime.Value) (runtime.Value, error) {
+	ma, ok := nativeOf[*nativeMemberAssignment](firstArg(args))
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: MemberAssignment.Member: receiver is not a MemberAssignment")
+	}
+	return ma.member, nil
+}
+
+func memberAssignmentGetExpression(args []runtime.Value) (runtime.Value, error) {
+	ma, ok := nativeOf[*nativeMemberAssignment](firstArg(args))
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: MemberAssignment.Expression: receiver is not a MemberAssignment")
+	}
+	return ma.expr, nil
 }
 
 // nativeCoalesceExpression backs Expression.Coalesce(left, right) — the
@@ -1176,6 +1354,7 @@ const (
 	ExprNodeThrow
 	ExprNodeCoalesce
 	ExprNodeTry
+	ExprNodeArrayIndex
 )
 
 // KindOfExprNode identifies v's own real Expression node kind, or
@@ -1222,6 +1401,8 @@ func KindOfExprNode(v runtime.Value) ExprNodeKind {
 		return ExprNodeCoalesce
 	case *nativeTryExpression:
 		return ExprNodeTry
+	case *nativeArrayIndexExpression:
+		return ExprNodeArrayIndex
 	default:
 		return ExprNodeNone
 	}

@@ -779,10 +779,22 @@ func resolveCallTarget(md *metadata.Metadata, token uint32) (fullName string, ha
 // typeof(TImplementation) on ITS OWN generic parameter, itself only
 // reached by forwarding the CALLER's generic arguments this same way).
 // A type-level (class) generic parameter forward (SigVar, not SigMVar —
-// GenericParamIsMethod false) has no such runtime record to resolve
-// against (vmnet doesn't track a live object's own closed generic type
-// arguments at all) — falls through to SigTypeFullName's existing ""
-// degenerate behavior, unchanged.
+// GenericParamIsMethod false) gets the same treatment as of Fase 3.81,
+// with its own `!N` (single-bang) sentinel — distinct from `!!N` so the
+// two can never collide — resolved at runtime against the CURRENTLY
+// EXECUTING frame's own receiver object's runtime.Object.ClassGenericArgs
+// (populated at ITS `newobj` site, Fase 3.66) rather than against
+// frame.MethodGenericArgs. This is exactly the shape a compiler-generated
+// iterator/async state machine produces: its MoveNext() is not itself
+// generic, but is declared on a generic class (e.g. `<GetRecords>d__91
+// <T>`) closing over the original method's own T as a CLASS-level
+// parameter — a call from inside MoveNext() back out to another generic
+// method using that same T (CsvHelper's own `GetRecords<T>()` calling
+// `ValidateHeader<T>()`, which itself evaluates `typeof(T)`) compiles to
+// a MethodSpec instantiated with `!0`, not `!!0`. Before this fix,
+// `!0` fell through to SigTypeFullName's "" degenerate behavior exactly
+// like any other unresolvable generic argument, silently losing the
+// closed type identity across this specific hop.
 func methodSpecGenericArgNames(md *metadata.Metadata, instantiation []byte) ([]string, error) {
 	types, err := metadata.ParseMethodSpec(instantiation)
 	if err != nil {
@@ -802,17 +814,67 @@ func methodSpecGenericArgNames(md *metadata.Metadata, instantiation []byte) ([]s
 func sigTypeListGenericArgNames(md *metadata.Metadata, types []metadata.SigType) ([]string, error) {
 	names := make([]string, len(types))
 	for i, t := range types {
-		if t.Kind == metadata.SigGenericParam && t.GenericParamIsMethod {
-			names[i] = fmt.Sprintf("!!%d", t.GenericParamIndex)
-			continue
-		}
-		name, err := SigTypeFullName(md, t)
+		name, err := sigTypeFullNameGenericArg(md, t)
 		if err != nil {
 			return nil, err
 		}
 		names[i] = name
 	}
 	return names, nil
+}
+
+// sigTypeFullNameGenericArg resolves t exactly like SigTypeFullName does,
+// except a GenericParam reference (VAR/MVAR) becomes a "!!N"/"!N"
+// sentinel instead of SigTypeFullName's own "" degenerate answer — AT ANY
+// NESTING DEPTH, not just when t itself is a bare GenericParam (Fase
+// 3.81, found via CsvHelper's own CsvContext.AutoMap<T>() forwarding T
+// into `ObjectResolver.Current.Resolve<DefaultClassMap<T>>()` — a
+// MethodSpec instantiated with a CLOSED GENERIC TYPE, `DefaultClassMap
+// <!!0>`, not a bare `!!0` on its own, so the sentinel needs to survive
+// one level of SigGenericInst nesting to reach eval.go's own
+// resolveForwardedGenericArgs, which now scans for the sentinel as a
+// substring rather than requiring an exact whole-string match — see its
+// own doc comment). Only SigSZArray and SigGenericInst can nest a
+// GenericParam (a class/value type's own generic instantiation, or an
+// array of one), so only those two recurse into this function instead of
+// SigTypeFullName; every other kind is identical either way and just
+// delegates.
+func sigTypeFullNameGenericArg(md *metadata.Metadata, t metadata.SigType) (string, error) {
+	switch t.Kind {
+	case metadata.SigGenericParam:
+		if t.GenericParamIsMethod {
+			return fmt.Sprintf("!!%d", t.GenericParamIndex), nil
+		}
+		return fmt.Sprintf("!%d", t.GenericParamIndex), nil
+	case metadata.SigSZArray:
+		if t.Elem == nil {
+			return "", fmt.Errorf("ir: array type signature with no element type")
+		}
+		elemName, err := sigTypeFullNameGenericArg(md, *t.Elem)
+		if err != nil {
+			return "", err
+		}
+		return elemName + "[]", nil
+	case metadata.SigGenericInst:
+		openName, err := resolveTypeToken(md, t.Token)
+		if err != nil {
+			return "", err
+		}
+		if len(t.Args) == 0 {
+			return openName, nil
+		}
+		argNames := make([]string, len(t.Args))
+		for i, arg := range t.Args {
+			argName, err := sigTypeFullNameGenericArg(md, arg)
+			if err != nil {
+				return "", err
+			}
+			argNames[i] = argName
+		}
+		return openName + "[[" + strings.Join(argNames, "],[") + "]]", nil
+	default:
+		return SigTypeFullName(md, t)
+	}
 }
 
 // typeSpecInstantiationArgNames resolves a closed generic CLASS

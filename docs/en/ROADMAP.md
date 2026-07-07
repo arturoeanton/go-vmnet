@@ -6728,6 +6728,120 @@ cd examples/jint-advanced-demo && dotnet build -c Release && go run .
 ```
 
 ---
+
+## Fase 3.81 — CsvHelper's real `AutoMap()` reflection path, end to end
+
+**Goal:** close the gap `docs/en/COMPATIBILITY.md` had flagged for CsvHelper (94.2%, checker-only,
+no demo) — `AutoMap()`'s reflection-based `ClassMap` construction losing closed-generic identity at
+the `Type.GetConstructor()` boundary — by root-causing it for real and shipping
+`examples/csvhelper-demo`: `CsvReader.GetRecords<T>()` with **no `ClassMap` registered at all**,
+forcing CsvHelper's own reflection-only `AutoMap()` path to run unmodified.
+
+**Result: eight distinct, real bugs, each found by tracing the real chain
+`GetRecords<T>()` → `ValidateHeader<T>()`/`RecordManager.GetReadDelegate<T>()` →
+`RecordCreatorFactory`/`ObjectRecordCreator` → `CsvContext.AutoMap(Type)` →
+`ObjectResolver`/`ObjectCreator`'s own compiled `Expression.New`/`Lambda` construction — verified
+end to end against a real 4-column CSV (string/int/double/bool) with zero explicit mapping code
+anywhere.**
+
+- **Closed-generic identity lost across `Type.GetConstructor()`/`ConstructorInfo.Invoke()`.**
+  `GetConstructor(s)` correctly strips a closed generic type's `[[...]]` suffix to look up the real
+  `TypeDef` (always indexed by the open name — ECMA-335: one `TypeDef` per open generic, never one
+  per closed instantiation), but then baked that *same stripped* name into the returned
+  `ConstructorInfo`. Any later construction through it (`ConstructorInfo.Invoke`,
+  `Expression.New(ctor).Compile()`) reached `Machine.New` with an already-open name, with no closed
+  type arguments left to parse. Fixed by carrying BOTH the open name (for `ResolveMember` lookups)
+  and the original closed name (for construction) on `nativeConstructorInfo`
+  (`internal/bcl/system_reflection.go`), with a new `ConstructorInfoConstructTypeFullName` accessor
+  distinct from the existing lookup-oriented `ConstructorInfoTypeFullName`/`ConstructorInfoParts`.
+- **The inverse mistake, found immediately once the first fix surfaced it**: `Machine.New`
+  (`internal/interpreter/eval.go`) and the compiled-expression-tree evaluator's own `ExprNodeNew`
+  case (`internal/interpreter/exprcompile.go`) both built `newObjArgs.TypeFullName`/`CtorFullName`
+  from the CLOSED name directly — the exact inverse of the first bug. `Machine.newObj`'s own
+  `m.ResolveType`/`m.call` always need the OPEN name (matching every real compiled `newobj` IL
+  site, where `ir.NewObj.TypeFullName` is always open by construction); the closed instantiation is
+  carried separately via `ClassGenericArgs`. Before this fix, every reflection-constructed closed
+  generic instance failed with "type ... not found" for a name like
+  `DefaultClassMap\`1[[Person]]`, which no `TypeDef` row ever has.
+- **A compiler-generated iterator's class-level generic parameter didn't survive forwarding into
+  another generic method call.** `CsvReader.GetRecords<T>()`'s own state machine
+  (`<GetRecords>d__91<T>`) is not itself generic — its `MoveNext()` calls `ValidateHeader<T>()`
+  using T as the ENCLOSING CLASS's own generic parameter, compiling to a `MethodSpec` instantiated
+  with `!0` (ECMA-335's VAR notation for a class-level parameter), not `!!0` (MVAR, the
+  already-handled method-level case from Fase 3.60). `ir.methodSpecGenericArgNames` only ever
+  emitted the `!!N` sentinel for a method-level parameter, falling through to `""` for a
+  class-level one — silently losing the closed type at this specific hop. Fixed by emitting a
+  parallel `!N` sentinel (`ir.sigTypeFullNameGenericArg`, `internal/ir/builder.go`), resolved at
+  runtime from the CURRENT frame's own receiver object's `ClassGenericArgs`
+  (`frameClassGenericArgs`, `internal/interpreter/eval.go`) rather than `frame.MethodGenericArgs`.
+- **The same class-level sentinel didn't survive being nested one level inside a closed generic
+  type.** `CsvContext.AutoMap<T>()` forwarding T into `ObjectResolver.Current.Resolve<
+  DefaultClassMap<T>>()` instantiates a `MethodSpec` with `DefaultClassMap\`1[[!!0]]`, not a bare
+  `!!0` — a `SigGenericInst` whose own nested argument is the sentinel, not the sentinel itself.
+  `resolveForwardedGenericArgs` (`internal/interpreter/eval.go`) required an exact whole-string
+  match; widened to a real substring scan (`replaceGenericParamSentinels`) that substitutes `!!N`/
+  `!N` wherever they appear inside a larger resolved name, not just when they're the entire string.
+- **`System.String.Join` given a real, plugin-defined `IEnumerable<string>`** — CsvHelper's own
+  `MemberNameCollection`, a genuine compiled class with its own `yield return this[i]` iterator,
+  not a vmnet-native list/array — **silently formatted the un-enumerated collection object itself
+  as one opaque placeholder string, identical for every distinct instance.**
+  `GetFieldIndex`'s own per-member cache key (`string.Join("_", memberMap.Data.Names) + index`)
+  collapsed every member after the first to the exact same key, so its `namedIndexCache` treated
+  every later member as a repeat lookup of the FIRST member's own already-cached column index —
+  the *Age* column silently read the *Name* column's raw text, with no error at all until the
+  wrong-typed value finally failed `Int32` conversion several calls later. `bcl.stringJoin` had no
+  `Machine` access to drive a real `GetEnumerator`/`MoveNext`/`get_Current` protocol at all, only
+  the array/native-list fast paths. Moved the registration from `bcl.Lookup`'s plain-native
+  registry to a new Machine-aware `internal/interpreter/linq.go` override (falling back to
+  `m.enumerateAll` for anything that isn't already an array or vmnet-native list) — the checker's
+  own `resolvableMethod` needed a matching entry added (`internal/checker/analyzer.go`), since it
+  no longer finds `System.String::Join` via `bcl.Lookup`.
+- **Several missing `System.Linq.Expressions.Expression` factories**, all found building
+  `ObjectCreator`'s/`ExpressionManager`'s own compiled construction and member-assignment
+  delegates: `Expression.ArrayIndex` (constructor-argument-array indexing); `Expression.Bind`
+  (`MemberAssignment`, consumed only via its own `.Member`/`.Expression` properties — the `Member`
+  accessor registered under the abstract `MemberBinding` base, never overridden, same reasoning as
+  `MemberInfo.DeclaringType`'s own Fase 3.53 registration); `Expression.MakeMemberAccess`
+  (`Expression.Property`'s own general factory, reused unchanged for a `PropertyInfo` 2nd
+  argument); the string-name `Call(Expression instance, string methodName, Type[] typeArguments,
+  params Expression[] arguments)` overload (resolved against the receiver's real runtime type at
+  evaluation time, since there's no `MethodInfo` naming a declaring type up front — and its own
+  `params Expression[] arguments` always compiles to exactly one real array argument, never several
+  separate trailing ones, regardless of how many expressions the C# source itself passed); and the
+  non-generic `Lambda(Type delegateType, Expression body, params ParameterExpression[] parameters)`
+  overload (disambiguated from the generic `Lambda<TDelegate>(body, params)` above by whether the
+  first argument is itself a recognized `Expression` node at all — a real `Type` value never is).
+- **`Enumerable.SequenceEqual` and `Boolean.TryParse` were simply missing** — the former needed by
+  `MemberMapCollection.Find`, the latter by `BooleanConverter.ConvertFromString`'s own first parse
+  attempt.
+- **A separate, narrower gap found but left open**: `new List<T>(someRealPluginIEnumerable)` — the
+  `List<T>(IEnumerable<T> collection)` constructor given a real plugin iterator, as opposed to a
+  vmnet-native list/array — silently constructs an EMPTY list instead of driving the source's real
+  enumeration protocol. `examples/csvhelper-demo`'s own wrapper works around it with a plain
+  `foreach` + `Add()` loop (also the more common way real CsvHelper code is written); left
+  undocumented as a numbered Fase until it blocks a real, load-bearing case.
+
+Regression-tested directly (`tests/fixtures/csharp/GenericSentinelForwarding.cs`, a standalone
+fixture with no CsvHelper/NuGet dependency, covering the class-level sentinel, the nested sentinel,
+`String.Join` over a custom `IEnumerable<string>`, and `Boolean.TryParse` — each confirmed to fail
+without its own fix via a temporary `git stash` of every source change) rather than only through
+the full CsvHelper pipeline. `examples/csvhelper-demo`'s own end-to-end run is the integration-level
+confirmation; `docs/en/COMPATIBILITY.md`/`docs/es/COMPATIBILITY.md` move CsvHelper from the
+"checker-only, no demo" table into the real-demo table.
+
+### How to verify Fase 3.81
+
+```bash
+dotnet build tests/fixtures/csharp/Fixtures.csproj -c Release
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+go test -run "TestClassLevelGenericSentinelForwarding|TestNestedGenericSentinelForwarding|TestStringJoinOverCustomIEnumerable|TestBooleanTryParse" -v .
+cd examples/csvhelper-demo && dotnet build CsvHelperDemoWrapper.csproj -c Release && go run .
+```
+
+---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 
 **Goal:** turn the functional engine into an adoptable product — reliable, documented, and

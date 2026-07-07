@@ -684,6 +684,22 @@ func typeIsAssignableFrom(m *Machine, args []runtime.Value, depth int, instrCoun
 	if target == candidate || target == "System.Object" {
 		return runtime.Bool(true), nil
 	}
+	// A well-known BCL reflection wrapper type (ConstructorInfo/MethodInfo/
+	// FieldInfo/PropertyInfo, ...) has no real TypeDef anywhere — it's
+	// synthetic, vmnet-native (Fase 3.81; see bcl.NativeBaseTypeName's own
+	// doc comment) — so m.ResolveType(candidate) below can never walk this
+	// chain on its own. Checked before ResolveType since these names can
+	// never resolve to a real type regardless.
+	for c := candidate; c != ""; {
+		if c == target {
+			return runtime.Bool(true), nil
+		}
+		next, ok := bcl.NativeBaseTypeName(c)
+		if !ok {
+			break
+		}
+		c = next
+	}
 	if m.ResolveType == nil {
 		return runtime.Bool(false), nil
 	}
@@ -787,10 +803,19 @@ func typeGetConstructor(m *Machine, args []runtime.Value, depth int, instrCount 
 	if len(args) < 2 {
 		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetConstructor expects (this, Type[], ...)")
 	}
-	typeFullName, ok := typeFullNameOfOpen(args[0])
+	// closedTypeFullName (Fase 3.81) is the receiver's own name BEFORE
+	// typeFullNameOfOpen strips any closed generic "[[...]]" suffix —
+	// carried on the resulting ConstructorInfo purely so real
+	// construction through it (ConstructorInfo.Invoke, Expression.
+	// New(ctor).Compile()) can still reach Machine.New with the closed
+	// name, even though the open name below is what the ResolveMember
+	// lookup itself needs. See nativeConstructorInfo.closedTypeFullName's
+	// own doc comment (internal/bcl/system_reflection.go).
+	closedTypeFullName, ok := bcl.TypeFullNameOf(args[0])
 	if !ok {
 		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetConstructor receiver is not a Type")
 	}
+	typeFullName := bcl.GenericOpenName(closedTypeFullName)
 	var paramNames []string
 	found := false
 	for _, a := range args[1:] {
@@ -812,7 +837,7 @@ func typeGetConstructor(m *Machine, args []runtime.Value, depth int, instrCount 
 	if _, ok := m.ResolveMember(typeFullName, ".ctor", paramNames); !ok {
 		return runtime.Null(), nil
 	}
-	return bcl.NewConstructorInfoValue(typeFullName), nil
+	return bcl.NewConstructorInfoValue(typeFullName, closedTypeFullName), nil
 }
 
 // typeGetConstructors backs Type.GetConstructors() (Fase 3.52, plural,
@@ -826,10 +851,13 @@ func typeGetConstructors(m *Machine, args []runtime.Value, depth int, instrCount
 	if len(args) < 1 {
 		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetConstructors expects a receiver")
 	}
-	typeFullName, ok := typeFullNameOfOpen(args[0])
+	// See typeGetConstructor's own doc comment (Fase 3.81) for why the
+	// closed name is carried alongside the open one.
+	closedTypeFullName, ok := bcl.TypeFullNameOf(args[0])
 	if !ok {
 		return runtime.Value{}, fmt.Errorf("interpreter: Type.GetConstructors receiver is not a Type")
 	}
+	typeFullName := bcl.GenericOpenName(closedTypeFullName)
 	if m.ResolveMemberParams == nil {
 		return runtime.ArrRef(runtime.NewArray(0)), nil
 	}
@@ -845,7 +873,7 @@ func typeGetConstructors(m *Machine, args []runtime.Value, depth int, instrCount
 	// two call sites deliberately stay independent) can't disagree.
 	elems := make([]runtime.Value, len(paramTypes))
 	for i := range paramTypes {
-		elems[i] = bcl.NewConstructorInfoValueAt(typeFullName, i)
+		elems[i] = bcl.NewConstructorInfoValueAt(typeFullName, closedTypeFullName, i)
 	}
 	return runtime.ArrRef(&runtime.Array{Elems: elems}), nil
 }
@@ -1257,7 +1285,12 @@ func constructorInfoInvoke(m *Machine, args []runtime.Value, depth int, instrCou
 	if len(args) != 2 {
 		return runtime.Value{}, fmt.Errorf("interpreter: ConstructorInfo.Invoke expects (this, object[])")
 	}
-	typeFullName, ok := bcl.ConstructorInfoTypeFullName(args[0])
+	// The CLOSED name (Fase 3.81), not ConstructorInfoTypeFullName's own
+	// open one — Machine.New parses ClassGenericArgs straight out of
+	// whatever name it's given, and only a still-closed name has any to
+	// find. See nativeConstructorInfo.closedTypeFullName's own doc
+	// comment (internal/bcl/system_reflection.go).
+	typeFullName, ok := bcl.ConstructorInfoConstructTypeFullName(args[0])
 	if !ok {
 		return runtime.Value{}, fmt.Errorf("interpreter: ConstructorInfo.Invoke receiver is not a ConstructorInfo")
 	}

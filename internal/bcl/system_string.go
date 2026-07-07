@@ -25,7 +25,13 @@ func init() {
 	register("System.String::Equals", true, stringEquals)
 	register("System.String::op_Equality", true, stringEquals)
 	register("System.String::op_Inequality", true, stringNotEquals)
-	register("System.String::Join", true, stringJoin)
+	// System.String::Join is registered as a Machine-aware native instead
+	// (internal/interpreter's own stringJoin, Fase 3.81) — a real plugin
+	// IEnumerable<string> (as opposed to a vmnet-native list/array) needs
+	// Machine access to actually enumerate, which a plain bcl.Native like
+	// every other registration in this file can't provide. See that
+	// override's own doc comment for the real, load-bearing case this
+	// fixed (CsvHelper's own MemberNameCollection).
 	register("System.String::IsNullOrEmpty", true, stringIsNullOrEmpty)
 	register("System.String::IsNullOrWhiteSpace", true, stringIsNullOrWhiteSpace)
 	register("System.String::StartsWith", true, stringStartsWith)
@@ -140,44 +146,6 @@ func stringContains(args []runtime.Value) (runtime.Value, error) {
 		return runtime.Value{}, fmt.Errorf("bcl: System.String.Contains expects a string argument")
 	}
 	return runtime.Bool(strings.Contains(args[0].Str, args[1].Str)), nil
-}
-
-// stringJoin backs every String.Join overload: the params-array shape
-// (4+ elements, or an explicit array argument) collapses to the same
-// element-expansion Format already does; non-string elements go through
-// displayString like Concat's boxed-argument case. A List<T> argument
-// (the compiler picks the IEnumerable<string> overload for
-// `Join(sep, someList)`, which vmnet doesn't dispatch through a real
-// enumerator here — reading the native backing directly is equivalent
-// and far simpler) is unwrapped the same way.
-func stringJoin(args []runtime.Value) (runtime.Value, error) {
-	if len(args) < 1 || args[0].Kind != runtime.KindString {
-		return runtime.Value{}, fmt.Errorf("bcl: System.String.Join expects a separator string")
-	}
-	sep := args[0].Str
-	values := args[1:]
-	if len(values) == 1 {
-		switch {
-		case values[0].Kind == runtime.KindArray:
-			values = values[0].Arr.Elems
-		case values[0].Kind == runtime.KindObject && values[0].Obj != nil:
-			// NativeListItems (not a direct *nativeList assertion) so this
-			// also covers a LINQ OrderBy/ThenBy result (bcl.NativeOrdered)
-			// passed straight to Join without an intervening ToList() —
-			// found via a real, hand-written probe:
-			// `string.Join(",", xs.OrderBy(...))` silently printed the
-			// receiver's own placeholder ToString() instead of its sorted
-			// elements before this widened to the shared helper (Fase 3.44).
-			if items, ok := NativeListItems(values[0].Obj.Native); ok {
-				values = items
-			}
-		}
-	}
-	parts := make([]string, len(values))
-	for i, v := range values {
-		parts[i] = displayString(v)
-	}
-	return runtime.String(strings.Join(parts, sep)), nil
 }
 
 // stringConcat backs every String.Concat overload, including the

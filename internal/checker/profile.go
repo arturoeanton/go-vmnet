@@ -164,6 +164,12 @@ func init() {
 		"System.Linq.Expressions.ExpressionVisitor::",
 		"System.Linq.Expressions.TryExpression::",
 		"System.Linq.Expressions.CatchBlock::",
+		// MemberBinding/MemberAssignment (Fase 3.81, Expression.Bind — see
+		// internal/bcl/system_linq_expressions.go's own doc comment) — found
+		// via CsvHelper's own ExpressionManager building each mapped
+		// member's MemberAssignment list.
+		"System.Linq.Expressions.MemberBinding::",
+		"System.Linq.Expressions.MemberAssignment::",
 		"System.Linq.Enumerable::",
 		// VmnetInternal.Ordered/VmnetInternal.Grouping are vmnet's own
 		// synthetic result types for a LINQ OrderBy/ThenBy chain

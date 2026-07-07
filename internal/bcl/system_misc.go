@@ -100,6 +100,7 @@ func init() {
 	register("System.Boolean::ToString", true, boolToString)
 	register("System.Boolean::CompareTo", true, boolCompareTo)
 	register("System.Boolean::GetHashCode", true, boolGetHashCode)
+	register("System.Boolean::TryParse", true, boolTryParse)
 	register("System.Convert::ToString", true, convertToString)
 	register("System.Convert::ToDouble", true, convertToDouble)
 	register("System.Convert::ToBoolean", true, convertToBoolean)
@@ -215,6 +216,37 @@ func boolGetHashCode(args []runtime.Value) (runtime.Value, error) {
 		return runtime.Int32(1), nil
 	}
 	return runtime.Int32(0), nil
+}
+
+// boolTryParse backs Boolean.TryParse(string, out bool) — the same
+// managed-pointer `out` mechanism as doubleTryParse/int32TryParse above
+// (Fase 3.81, found via CsvHelper's own BooleanConverter.ConvertFromString,
+// whose very first attempt is a bare `bool.TryParse(text, out result)`
+// before falling back to 0/1 and configurable true/false string lists).
+// Go's strconv.ParseBool already accepts real .NET's own "True"/"False"
+// spelling (case-insensitively, matching bool.TryParse's real behavior)
+// as well as "1"/"0" — 't'/'f'/"T"/"F" also parse in Go but not in real
+// .NET; no caller found so far relies on that extra leniency, and it's
+// harmless (strictly MORE permissive, never rejects a real .NET-valid
+// input).
+func boolTryParse(args []runtime.Value) (runtime.Value, error) {
+	if len(args) < 2 {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Boolean.TryParse expects (string, out bool)")
+	}
+	if args[0].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Boolean.TryParse expects a string argument")
+	}
+	out := args[len(args)-1]
+	if out.Kind != runtime.KindRef || out.Ref == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: System.Boolean.TryParse expects an out parameter")
+	}
+	b, err := strconv.ParseBool(strings.TrimSpace(args[0].Str))
+	if err != nil {
+		*out.Ref = runtime.Bool(false)
+		return runtime.Bool(false), nil
+	}
+	*out.Ref = runtime.Bool(b)
+	return runtime.Bool(true), nil
 }
 
 // convertToString covers Convert.ToString(object)/(int)/(double)/... by

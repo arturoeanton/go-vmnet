@@ -33,8 +33,35 @@ import (
 // defaults to "first/only" the same way typeGetMethod's own 2-arg
 // (name-only) shape already does.
 type nativeConstructorInfo struct {
-	typeFullName  string
-	overloadIndex int
+	typeFullName string
+	// closedTypeFullName (Fase 3.81) is the ORIGINAL type name Type.
+	// GetConstructor(s) was actually called on, before typeFullNameOfOpen
+	// stripped any closed generic "[[...]]" suffix for the
+	// Machine.ResolveMember/ResolveMemberParams lookup typeFullName above
+	// still needs (those only ever index by open TypeDef name). "" when
+	// the receiver was never closed to begin with (a non-generic type,
+	// or a generic type reached only by its open name) — every reader
+	// below falls back to typeFullName in that case.
+	//
+	// Needed for real construction through this ConstructorInfo
+	// (ConstructorInfo.Invoke, or the Expression.New(ctor).Compile()
+	// pattern most real object-mapping/DI/serialization libraries
+	// actually use) to correctly reach Machine.New/newObj with the
+	// CLOSED name — that's the one thing bcl.ClosedGenericArgs (parsed
+	// fresh inside Machine.New itself) can extract real ClassGenericArgs
+	// from at all. Found via a real, load-bearing case: CsvHelper's own
+	// AutoMap()-based CSV-to-object mapping builds a closed
+	// `DefaultClassMap<TRecord>` via `typeof(DefaultClassMap<>).
+	// MakeGenericType(recordType)`, then constructs it through exactly
+	// this ConstructorInfo/Expression.New path — without the closed name
+	// surviving to the actual `newobj`-equivalent call, the constructed
+	// DefaultClassMap's own runtime.Object.ClassGenericArgs came back
+	// empty, and its base ClassMap<TClass>'s own GetGenericType() (real
+	// C#: `this.GetType().BaseType.GetGenericArguments()[0]`) had no way
+	// to recover TClass, so AutoMap() could never actually map a single
+	// property.
+	closedTypeFullName string
+	overloadIndex      int
 }
 
 type nativeMethodInfo struct {
@@ -394,15 +421,15 @@ func parameterInfoGetPosition(args []runtime.Value) (runtime.Value, error) {
 // respective System.Reflection wrapper values — called from
 // internal/interpreter/reflection.go's Machine-aware
 // GetConstructor/GetMethod/GetField natives.
-func NewConstructorInfoValue(typeFullName string) runtime.Value {
-	return runtime.ObjRef(&runtime.Object{Native: &nativeConstructorInfo{typeFullName: typeFullName}})
+func NewConstructorInfoValue(typeFullName, closedTypeFullName string) runtime.Value {
+	return runtime.ObjRef(&runtime.Object{Native: &nativeConstructorInfo{typeFullName: typeFullName, closedTypeFullName: closedTypeFullName}})
 }
 
 // NewConstructorInfoValueAt builds a ConstructorInfo tagged with WHICH
 // real .ctor overload it names (Fase 3.52, Type.GetConstructors — see
 // nativeConstructorInfo.overloadIndex's own doc comment).
-func NewConstructorInfoValueAt(typeFullName string, overloadIndex int) runtime.Value {
-	return runtime.ObjRef(&runtime.Object{Native: &nativeConstructorInfo{typeFullName: typeFullName, overloadIndex: overloadIndex}})
+func NewConstructorInfoValueAt(typeFullName, closedTypeFullName string, overloadIndex int) runtime.Value {
+	return runtime.ObjRef(&runtime.Object{Native: &nativeConstructorInfo{typeFullName: typeFullName, closedTypeFullName: closedTypeFullName, overloadIndex: overloadIndex}})
 }
 
 func NewMethodInfoValue(typeFullName, methodName string) runtime.Value {
@@ -457,6 +484,29 @@ func ConstructorInfoTypeFullName(v runtime.Value) (string, bool) {
 	ci, ok := nativeOf[*nativeConstructorInfo](v)
 	if !ok {
 		return "", false
+	}
+	return ci.typeFullName, true
+}
+
+// ConstructorInfoConstructTypeFullName returns the type name to use when
+// actually CONSTRUCTING an instance through this ConstructorInfo (Fase
+// 3.81, e.g. ConstructorInfo.Invoke or the compiled Expression.New(ctor)
+// pattern) — the original, possibly-closed-generic name Type.
+// GetConstructor(s) was called on, not the open name
+// ConstructorInfoTypeFullName/ConstructorInfoParts still (correctly)
+// return for Machine.ResolveMember/ResolveMemberParams lookups. Falls
+// back to the open name when no closed name was ever captured (a
+// non-generic type, or a reflection call site that only ever had the
+// open name to begin with) — see nativeConstructorInfo.
+// closedTypeFullName's own doc comment for the real CsvHelper
+// AutoMap()/DefaultClassMap<T> bug this exists to fix.
+func ConstructorInfoConstructTypeFullName(v runtime.Value) (string, bool) {
+	ci, ok := nativeOf[*nativeConstructorInfo](v)
+	if !ok {
+		return "", false
+	}
+	if ci.closedTypeFullName != "" {
+		return ci.closedTypeFullName, true
 	}
 	return ci.typeFullName, true
 }

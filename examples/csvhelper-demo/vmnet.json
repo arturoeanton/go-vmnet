@@ -1,0 +1,8 @@
+{
+  "packages": [
+    {
+      "ID": "CsvHelper",
+      "Version": "33.1.0"
+    }
+  ]
+}

@@ -39,6 +39,7 @@ on purpose, for every package vmnet is measured against.
 | `ClosedXML@0.105.0` | 97.5% (10,444 methods, 257 flagged) | [`examples/closedxml-demo`](../../examples/closedxml-demo) |
 | `Jint@3.1.3` | 96.7% (5,414 methods, 178 flagged) | [`examples/jint-demo`](../../examples/jint-demo), [`examples/jint-nowrapper`](../../examples/jint-nowrapper), [`examples/jint-advanced-demo`](../../examples/jint-advanced-demo) |
 | `Dapper@2.1.79` | 95.5% (1,047 methods, 47 flagged) | [`examples/dapper-demo`](../../examples/dapper-demo), [`examples/sqlite-demo`](../../examples/sqlite-demo) |
+| `CsvHelper@33.1.0` | 94.5% (1,393 methods, 76 flagged) | [`examples/csvhelper-demo`](../../examples/csvhelper-demo) |
 | `Microsoft.Extensions.DependencyInjection@8.0.0` | 94.1% (437 methods, 26 flagged) | [`examples/di-demo`](../../examples/di-demo) |
 | `Newtonsoft.Json@13.0.3` | 89.2% (4,064 methods, 440 flagged) | [`examples/newtonsoft-json-demo`](../../examples/newtonsoft-json-demo) |
 
@@ -142,6 +143,22 @@ Two known, permanent, documented architectural gaps remain (a generic-method `ty
 limitation, and a Dapper regex feature Go's RE2 engine can never compile) — see
 `docs/en/ROADMAP.md` Fase 3.52/3.53.
 
+#### `CsvHelper@33.1.0`
+
+**Verified.** `csvhelper-demo` runs `CsvReader.GetRecords<T>()` with **no `ClassMap` registered at
+all**, forcing CsvHelper's own reflection-only `AutoMap()` path (`Type.GetConstructor(s)`,
+`Expression.New`/`Lambda`/`Compile`) to construct the record type and every member map purely at
+runtime — the exact gap this doc had previously flagged as "not yet a working demo," fixed for real
+in Fase 3.81 (eight distinct bugs: closed-generic identity across `Type.GetConstructor()`/
+`ConstructorInfo.Invoke()`, the same identity lost the inverse way at construction time, a
+compiler-generated iterator's class-level generic parameter not surviving a forwarded generic-method
+call, the same sentinel not surviving one level of nesting inside a closed generic type,
+`System.String.Join` given a real plugin `IEnumerable<string>`, and several missing
+`System.Linq.Expressions` factories). One known, narrower gap remains:
+`new List<T>(somePluginIEnumerable)` silently constructs an empty list rather than driving the
+source's real enumeration protocol — see `docs/en/ROADMAP.md` Fase 3.81's own account and
+`examples/csvhelper-demo/README.md`.
+
 #### `Microsoft.Extensions.DependencyInjection@8.0.0`
 
 **Verified for real constructor injection** — Microsoft's own official DI container resolves a
@@ -183,7 +200,6 @@ not confirmation that it does.
 | `Serilog@4.3.1` | 96.1% (1,115 methods, 43 flagged) |
 | `MediatR@14.2.0` | 95.5% (441 methods, 20 flagged) |
 | `NodaTime@3.3.2` | 94.8% (3,098 methods, 162 flagged) |
-| `CsvHelper@33.1.0` | 94.2% (1,393 methods, 81 flagged) |
 | `AutoMapper@16.2.0` | 94.2% (2,319 methods, 135 flagged) |
 | `SimpleBase@4.0.0` | 92.6% (258 methods, 19 flagged) |
 | `Semver@2.3.0` | 92.9% (423 methods, 30 flagged) |
@@ -220,19 +236,6 @@ fix).
 
 Good-to-high coverage estimate; unverified by a real run. `NodaTime`'s own number moved slightly in
 Fase 3.79 (`TimeSpan`/`conv.u8`).
-
-#### `CsvHelper@33.1.0`
-
-Fase 3.66 fixed the Fase 3.64 `Dictionary`-array-key gap for real (its own key encoder now handles
-an array-shaped key component). A real, unmodified `csv.GetRecords<T>()` now gets past that AND a
-second, real bug (`ClassMap.GetGenericType()`'s own `Type.BaseType.GetGenericArguments()` chain,
-fixed by a new general class-level-generic-type-parameter-tracking capability) — but its
-`AutoMap()`-based construction path still loses closed-generic identity at the
-`Type.GetConstructor()` reflection boundary, a separate, deliberate, pre-existing simplification
-(see `docs/en/ROADMAP.md` Fase 3.66's own "Found, not fixed" section). Tracked as
-[issue #2](https://github.com/arturoeanton/go-vmnet/issues/2).
-
-Not yet a working demo.
 
 #### `AutoMapper@16.2.0`
 

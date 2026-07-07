@@ -2,6 +2,7 @@ package interpreter
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/arturoeanton/go-vmnet/internal/bcl"
 	"github.com/arturoeanton/go-vmnet/internal/runtime"
@@ -34,6 +35,9 @@ var machineRegistry = map[string]machineNative{}
 // is wrapped as a real, immediately-enumerable List<T>-shaped value
 // (bcl.NewListValue).
 func init() {
+	// Machine-aware override of bcl's own System.String::Join (Fase
+	// 3.81) — see stringJoin's own doc comment below.
+	machineRegistry["System.String::Join"] = stringJoin
 	machineRegistry["System.Linq.Enumerable::Select"] = linqSelect
 	machineRegistry["System.Linq.Enumerable::Where"] = linqWhere
 	machineRegistry["System.Linq.Enumerable::Any"] = linqAny
@@ -81,6 +85,7 @@ func init() {
 	machineRegistry["System.Linq.Enumerable::Average"] = linqAverage
 	machineRegistry["System.Linq.Enumerable::Aggregate"] = linqAggregate
 	machineRegistry["System.Linq.Enumerable::Zip"] = linqZip
+	machineRegistry["System.Linq.Enumerable::SequenceEqual"] = linqSequenceEqual
 	machineRegistry["System.Linq.Enumerable::Except"] = linqExcept
 	machineRegistry["System.Linq.Enumerable::Intersect"] = linqIntersect
 	machineRegistry["System.Linq.Enumerable::SkipWhile"] = linqSkipWhile
@@ -149,6 +154,62 @@ func (m *Machine) enumerateAll(source runtime.Value, depth int, instrCount *int6
 		out = append(out, cur)
 	}
 	return out, nil
+}
+
+// stringJoin overrides bcl's own plain-native System.String::Join (Fase
+// 3.81) for exactly one shape: a single IEnumerable<string> argument that
+// isn't a real CLI array or a vmnet-native list — a genuine, plugin-
+// defined class implementing IEnumerable<string> with its own real
+// GetEnumerator() (a compiler-generated iterator, `yield return`, or
+// anything else that needs the real interpreter to drive). bcl's own
+// stringJoin has no Machine access at all, so it could only recognize
+// the fast paths (array, native list) — anything else silently fell
+// through to formatting the UN-enumerated collection object itself as
+// one opaque placeholder string, discarding its real elements entirely.
+//
+// Found via CsvHelper's own GetFieldIndex: `string.Join("_", memberMap.
+// Data.Names) + index` builds a per-member cache key from a real
+// MemberNameCollection (CsvHelper.Configuration's own class, a genuine
+// `yield return this[i]` iterator — see MemberNameCollection.cs). Every
+// member's own distinct Names ("Name", "Age", ...) collapsed to the
+// exact same placeholder text, so namedIndexCache treated every member
+// after the first as a repeat lookup of the FIRST member's own
+// already-cached field index — Age silently read column 0 (Name's own
+// column) instead of column 1, with no error at all until the wrong-typed
+// text finally failed Int32 conversion several calls later.
+//
+// Every other shape (multiple explicit arguments, a real array, a
+// vmnet-native list) is unchanged from bcl's own original — only the
+// single-plugin-IEnumerable fallback is new.
+func stringJoin(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) < 1 || args[0].Kind != runtime.KindString {
+		return runtime.Value{}, fmt.Errorf("interpreter: System.String.Join expects a separator string")
+	}
+	sep := args[0].Str
+	values := args[1:]
+	if len(values) == 1 {
+		switch {
+		case values[0].Kind == runtime.KindArray:
+			if values[0].Arr != nil {
+				values = values[0].Arr.Elems
+			}
+		case values[0].Kind == runtime.KindObject && values[0].Obj != nil:
+			if items, ok := bcl.NativeListItems(values[0].Obj.Native); ok {
+				values = items
+			} else {
+				enumerated, err := m.enumerateAll(values[0], depth, instrCount)
+				if err != nil {
+					return runtime.Value{}, err
+				}
+				values = enumerated
+			}
+		}
+	}
+	parts := make([]string, len(values))
+	for i, v := range values {
+		parts[i] = bcl.DisplayString(v)
+	}
+	return runtime.String(strings.Join(parts, sep)), nil
 }
 
 // linqInvoke calls a Func<...>/Predicate<T> argument — every LINQ method
@@ -893,6 +954,47 @@ func linqZip(m *Machine, args []runtime.Value, depth int, instrCount *int64) (ru
 // valuesDeepEqual) any of second's; Intersect keeps first's elements
 // that equal at least one of second's. Both dedupe their own result and
 // preserve first-occurrence order, same posture as Distinct/Union.
+// linqSequenceEqual backs Enumerable.SequenceEqual (Fase 3.81, found via
+// CsvHelper's own MemberMapCollection.Find(MemberInfo) — comparing two
+// mapped members' name-part arrays element-by-element in declaration
+// order, unlike Except/Intersect's own set (order-independent) semantics
+// above). Mismatched lengths short-circuit to false without allocating
+// the per-element comparer at all.
+func linqSequenceEqual(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
+	if len(args) < 2 || len(args) > 3 {
+		return runtime.Value{}, fmt.Errorf("interpreter: Enumerable.SequenceEqual expects (first, second[, comparer])")
+	}
+	a, err := m.enumerateAll(args[0], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	b, err := m.enumerateAll(args[1], depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	if len(a) != len(b) {
+		return runtime.Bool(false), nil
+	}
+	var comparerArg *runtime.Value
+	if len(args) == 3 {
+		comparerArg = &args[2]
+	}
+	eq, err := m.equalsFunc(comparerArg, depth, instrCount)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	for i := range a {
+		same, err := eq(a[i], b[i])
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		if !same {
+			return runtime.Bool(false), nil
+		}
+	}
+	return runtime.Bool(true), nil
+}
+
 func linqExcept(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
 	return linqSetOp(m, args, false, depth, instrCount)
 }

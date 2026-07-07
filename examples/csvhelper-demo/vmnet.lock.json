@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "target": "netstandard2.0",
+  "packages": [
+    {
+      "id": "CsvHelper",
+      "version": "33.1.0",
+      "selectedAsset": "lib/netstandard2.0/CsvHelper.dll",
+      "dependencies": [
+        "Microsoft.Bcl.AsyncInterfaces",
+        "Microsoft.Bcl.HashCode",
+        "Microsoft.CSharp",
+        "System.Memory"
+      ]
+    },
+    {
+      "id": "Microsoft.Bcl.AsyncInterfaces",
+      "version": "8.0.0",
+      "selectedAsset": "lib/netstandard2.0/Microsoft.Bcl.AsyncInterfaces.dll",
+      "dependencies": [
+        "System.Threading.Tasks.Extensions"
+      ]
+    },
+    {
+      "id": "Microsoft.Bcl.HashCode",
+      "version": "1.1.1",
+      "selectedAsset": "lib/netstandard2.0/Microsoft.Bcl.HashCode.dll",
+      "dependencies": []
+    },
+    {
+      "id": "Microsoft.CSharp",
+      "version": "4.7.0",
+      "selectedAsset": "lib/netstandard2.0/Microsoft.CSharp.dll",
+      "dependencies": []
+    },
+    {
+      "id": "System.Buffers",
+      "version": "4.4.0",
+      "selectedAsset": "lib/netstandard2.0/System.Buffers.dll",
+      "dependencies": []
+    },
+    {
+      "id": "System.Memory",
+      "version": "4.5.0",
+      "selectedAsset": "lib/netstandard2.0/System.Memory.dll",
+      "dependencies": [
+        "System.Buffers",
+        "System.Numerics.Vectors",
+        "System.Runtime.CompilerServices.Unsafe"
+      ]
+    },
+    {
+      "id": "System.Numerics.Vectors",
+      "version": "4.4.0",
+      "selectedAsset": "lib/netstandard2.0/System.Numerics.Vectors.dll",
+      "dependencies": []
+    },
+    {
+      "id": "System.Runtime.CompilerServices.Unsafe",
+      "version": "4.5.3",
+      "selectedAsset": "lib/netstandard2.0/System.Runtime.CompilerServices.Unsafe.dll",
+      "dependencies": []
+    },
+    {
+      "id": "System.Threading.Tasks.Extensions",
+      "version": "4.5.4",
+      "selectedAsset": "lib/netstandard2.0/System.Threading.Tasks.Extensions.dll",
+      "dependencies": [
+        "System.Runtime.CompilerServices.Unsafe"
+      ]
+    }
+  ]
+}

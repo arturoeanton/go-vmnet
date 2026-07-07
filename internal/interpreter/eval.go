@@ -231,7 +231,24 @@ func (m *Machine) New(typeFullName string, args []runtime.Value) (result runtime
 	// typeGetGenericArguments (Fase 3.66, found via CsvHelper's own
 	// AutoMap machinery constructing its internal ClassMap via
 	// reflection rather than a literal `newobj Type\`N<Args>` site).
-	return m.newObj(newObjArgs{TypeFullName: typeFullName, CtorFullName: typeFullName + "::.ctor", Args: args, ClassGenericArgs: bcl.ClosedGenericArgs(typeFullName)}, 0, instrCount)
+	//
+	// TypeFullName/CtorFullName below carry the OPEN name, not typeFullName
+	// itself (Fase 3.81) — newObj's own m.ResolveType/m.call lookups
+	// resolve a TypeDef/MethodDef by its real metadata name, which for a
+	// generic class is always the open one (ECMA-335: one TypeDef per
+	// open generic, never one per closed instantiation — see
+	// typeFullNameOfOpen's own doc comment, reflection.go). The closed
+	// instantiation itself is carried separately via ClassGenericArgs,
+	// exactly like any real compiled `newobj Type\`N<Args>::.ctor()` site
+	// already does. Passing the closed name straight through here (as
+	// this did before Fase 3.81) made m.ResolveType look up a TypeDef by
+	// a name like "DefaultClassMap\`1[[Person]]", which no TypeDef row
+	// ever has — "type ... not found" for every reflection-constructed
+	// closed generic instance, the exact shape CsvHelper's own AutoMap()
+	// needs (`(ClassMap)ObjectResolver.Current.Resolve(typeof(
+	// DefaultClassMap<>).MakeGenericType(recordType))`).
+	openName := bcl.GenericOpenName(typeFullName)
+	return m.newObj(newObjArgs{TypeFullName: openName, CtorFullName: openName + "::.ctor", Args: args, ClassGenericArgs: bcl.ClosedGenericArgs(typeFullName)}, 0, instrCount)
 }
 
 // CallInstance invokes fullName ("Namespace.Type::Method") as an
@@ -632,7 +649,7 @@ func (m *Machine) runFrame(frame *Frame, method *runtime.Method, depth int, inst
 			if in.HasThis && callArgs[0].Kind == runtime.KindFunc {
 				result, hasReturn, err = m.invokeFunc(callArgs[0].Func, callArgs[1:], depth, instrCount)
 			} else {
-				methodGenericArgs := resolveForwardedGenericArgs(in.MethodGenericArgs, frame.MethodGenericArgs)
+				methodGenericArgs := resolveForwardedGenericArgs(in.MethodGenericArgs, frame.MethodGenericArgs, frameClassGenericArgs(frame))
 				result, hasReturn, err = m.call(in.FullName, callArgs, in.Virtual, depth, instrCount, in.ParamTypeNames, methodGenericArgs)
 			}
 			if err != nil {
@@ -679,7 +696,7 @@ func (m *Machine) runFrame(frame *Frame, method *runtime.Method, depth int, inst
 			// AutoMapper's own CreateMapCore<TSource,TDestination>
 			// forwarding into `newobj MappingExpression`2<!!TSource,
 			// !!TDestination>::.ctor(...)`.
-			classGenericArgs := resolveForwardedGenericArgs(in.ClassGenericArgs, frame.MethodGenericArgs)
+			classGenericArgs := resolveForwardedGenericArgs(in.ClassGenericArgs, frame.MethodGenericArgs, frameClassGenericArgs(frame))
 			v, err := m.newObj(newObjArgs{TypeFullName: in.TypeFullName, CtorFullName: in.CtorFullName, Args: ctorArgs, ParamTypeNames: in.ParamTypeNames, ClassGenericArgs: classGenericArgs}, depth, instrCount)
 			if err != nil {
 				return runtime.Value{}, err
@@ -1157,34 +1174,52 @@ func (m *Machine) fieldSlot(receiver runtime.Value, typeFullName, fieldName stri
 	}
 }
 
-// resolveForwardedGenericArgs substitutes any "!!N" sentinel in callArgs
-// (ir.methodSpecGenericArgNames's own encoding for "this call forwards
-// the enclosing method's own Nth generic type parameter, unresolvable at
-// IR-build time" — Fase 3.60) with that parameter's real, closed name
-// from callerArgs — the CURRENTLY EXECUTING frame's own MethodGenericArgs
-// — resolved fresh at every single execution of this call site, since
-// the same static IR runs for every different calling instantiation. A
-// sentinel with no corresponding entry (index out of range, or
-// callerArgs nil — this call wasn't itself reached with any generic args
-// to forward) degrades to "" rather than panicking, matching every other
-// unresolvable-generic-argument case elsewhere in this project. Returns
-// callArgs unchanged (no allocation) when it contains no sentinel at all
-// — the overwhelming majority of calls, generic or not.
-func resolveForwardedGenericArgs(callArgs, callerArgs []string) []string {
+// resolveForwardedGenericArgs substitutes any "!!N" or "!N" sentinel
+// appearing ANYWHERE within each of callArgs (ir.methodSpecGenericArgNames/
+// ir.sigTypeFullNameGenericArg's own encoding for "this forwards the
+// enclosing context's own Nth generic type parameter, unresolvable at
+// IR-build time" — Fase 3.60, extended in Fase 3.81) with that
+// parameter's real, closed name — resolved fresh at every single
+// execution of this call site, since the same static IR runs for every
+// different calling instantiation. "!!N" (a method-level/MVAR forward)
+// resolves against methodArgs — the CURRENTLY EXECUTING frame's own
+// MethodGenericArgs. "!N" (a class-level/VAR forward) resolves against
+// classArgs — the CURRENTLY EXECUTING frame's own receiver object's
+// ClassGenericArgs (see frameClassGenericArgs) — the shape a compiler-
+// generated iterator/async state machine produces: its MoveNext() is not
+// itself generic, but is declared on a generic class that closes over
+// the original method's own type parameter as a CLASS-level one, so a
+// call from inside MoveNext() back out to another generic method using
+// that same type parameter forwards it as "!N", not "!!N".
+//
+// A SUBSTRING scan, not a whole-string match, because the sentinel can
+// appear NESTED inside a larger closed generic name — e.g. CsvHelper's
+// own CsvContext.AutoMap<T>() forwarding T into `ObjectResolver.Current.
+// Resolve<DefaultClassMap<T>>()`, a MethodSpec instantiated with
+// `DefaultClassMap`1[[!!0]]`, not a bare `!!0` on its own (see
+// ir.sigTypeFullNameGenericArg's own doc comment for why the sentinel
+// survives that nesting in the first place). A sentinel with no
+// corresponding entry (index out of range, or the args slice nil — this
+// call wasn't itself reached with any generic args to forward) degrades
+// to substituting "" for just that sentinel, rather than panicking,
+// matching every other unresolvable-generic-argument case elsewhere in
+// this project. Returns callArgs unchanged (no allocation) when none of
+// them contain a "!" at all — the overwhelming majority of calls,
+// generic or not.
+func resolveForwardedGenericArgs(callArgs, methodArgs, classArgs []string) []string {
 	var out []string
 	for i, a := range callArgs {
-		idx, ok := methodGenericParamSentinelIndex(a)
-		if !ok {
+		if !strings.Contains(a, "!") {
+			continue
+		}
+		replaced := replaceGenericParamSentinels(a, methodArgs, classArgs)
+		if replaced == a {
 			continue
 		}
 		if out == nil {
 			out = append([]string(nil), callArgs...)
 		}
-		if idx >= 0 && idx < len(callerArgs) {
-			out[i] = callerArgs[idx]
-		} else {
-			out[i] = ""
-		}
+		out[i] = replaced
 	}
 	if out == nil {
 		return callArgs
@@ -1192,20 +1227,66 @@ func resolveForwardedGenericArgs(callArgs, callerArgs []string) []string {
 	return out
 }
 
-// methodGenericParamSentinelIndex recognizes ir.methodSpecGenericArgNames's
-// "!!N" sentinel (ECMA-335's own ILAsm notation for a method generic
-// parameter, reused verbatim since it can never collide with a real type
-// name — those never begin with "!").
-func methodGenericParamSentinelIndex(s string) (int, bool) {
-	rest, ok := strings.CutPrefix(s, "!!")
-	if !ok {
-		return 0, false
+// replaceGenericParamSentinels scans s left to right, substituting every
+// "!!N" (method generic param, resolved against methodArgs) and "!N"
+// (class generic param, resolved against classArgs) occurrence with its
+// real value — see resolveForwardedGenericArgs's own doc comment for why
+// this needs to be a substring scan rather than a whole-string match.
+// "!!" is tried before "!" at each position so a method-level sentinel is
+// never misparsed as a class-level one followed by a stray "!". Any
+// other "!"-led run that isn't immediately followed by digits (never
+// produced by this project's own IR builder, but defensively handled
+// rather than panicking on malformed input) is copied through verbatim.
+func replaceGenericParamSentinels(s string, methodArgs, classArgs []string) string {
+	var b strings.Builder
+	i := 0
+	for i < len(s) {
+		if s[i] != '!' {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		if rest := s[i:]; strings.HasPrefix(rest, "!!") {
+			j := i + 2
+			for j < len(s) && s[j] >= '0' && s[j] <= '9' {
+				j++
+			}
+			if j > i+2 {
+				if idx, err := strconv.Atoi(s[i+2 : j]); err == nil && idx >= 0 && idx < len(methodArgs) {
+					b.WriteString(methodArgs[idx])
+				}
+				i = j
+				continue
+			}
+		}
+		j := i + 1
+		for j < len(s) && s[j] >= '0' && s[j] <= '9' {
+			j++
+		}
+		if j > i+1 {
+			if idx, err := strconv.Atoi(s[i+1 : j]); err == nil && idx >= 0 && idx < len(classArgs) {
+				b.WriteString(classArgs[idx])
+			}
+			i = j
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
 	}
-	n, err := strconv.Atoi(rest)
-	if err != nil {
-		return 0, false
+	return b.String()
+}
+
+// frameClassGenericArgs returns the currently executing frame's own
+// receiver object's ClassGenericArgs (nil if the receiver isn't a real
+// object — a static method, or unavailable for any other reason) — see
+// resolveForwardedGenericArgs's own doc comment for why a `!N` class-
+// level generic parameter forward needs this instead of
+// frame.MethodGenericArgs.
+func frameClassGenericArgs(frame *Frame) []string {
+	if len(frame.Args) > 0 && frame.Args[0].Kind == runtime.KindObject && frame.Args[0].Obj != nil {
+		return frame.Args[0].Obj.ClassGenericArgs
 	}
-	return n, true
+	return nil
 }
 
 // arrayIndex validates an ldelem/stelem array+index pair, returning a

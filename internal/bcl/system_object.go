@@ -58,6 +58,16 @@ func objectToString(args []runtime.Value) (runtime.Value, error) {
 	return runtime.String(displayString(args[0])), nil
 }
 
+// DisplayString exports displayString (Fase 3.81) for
+// internal/interpreter's own Machine-aware System.String::Join override
+// (System_string_join.go — needs this package's own formatting rules for
+// each already-resolved element, after driving a real plugin IEnumerable
+// <string>'s own iteration protocol, something a plain bcl.Native can't
+// do at all — see that override's own doc comment).
+func DisplayString(v runtime.Value) string {
+	return displayString(v)
+}
+
 func displayString(v runtime.Value) string {
 	// A value type's `this` (e.g. `item.ToString()` inside a generic
 	// method over T, compiled as `constrained. !!0` + `callvirt
@@ -381,6 +391,24 @@ var nativeBaseTypeNames = map[string]string{
 	"System.Linq.Expressions.ParameterExpression": "System.Linq.Expressions.Expression",
 	"System.Linq.Expressions.Expression`1":        "System.Linq.Expressions.LambdaExpression",
 	"System.IO.StringReader":                      "System.IO.TextReader",
+	// System.Reflection's own MemberInfo hierarchy (Fase 3.81) —
+	// ConstructorInfo/MethodInfo/FieldInfo/PropertyInfo are all real,
+	// synthetic (no TypeDef anywhere) vmnet-native values, exactly like
+	// MemoryStream/MemberExpression above, so the same hand-maintained
+	// chain is the only way Type.IsAssignableFrom (interpreter/
+	// reflection.go's typeIsAssignableFrom) can ever answer e.g.
+	// "does MemberInfo accept a PropertyInfo" correctly. Found via
+	// CsvHelper's own MemberMap.CreateGeneric(Type, MemberInfo) — its
+	// ObjectCreator-driven constructor matching does exactly that
+	// IsAssignableFrom(MemberInfo, member.GetType()) check, over a real
+	// PropertyInfo produced by Type.GetProperties(); without this it
+	// silently found no matching constructor and threw
+	// MissingMethodException.
+	"System.Reflection.PropertyInfo":    "System.Reflection.MemberInfo",
+	"System.Reflection.FieldInfo":       "System.Reflection.MemberInfo",
+	"System.Reflection.MethodInfo":      "System.Reflection.MethodBase",
+	"System.Reflection.ConstructorInfo": "System.Reflection.MethodBase",
+	"System.Reflection.MethodBase":      "System.Reflection.MemberInfo",
 }
 
 // NativeBaseTypeName returns typeName's immediate base type per
