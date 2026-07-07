@@ -71,6 +71,23 @@ func init() {
 	// guarantees regardless of what this returns).
 	register("System.Text.StringBuilder::get_Capacity", true, sbLength)
 	register("System.Text.StringBuilder::EnsureCapacity", true, sbLength)
+	// set_Capacity (Fase 3.79) — same "auto-growing backing already
+	// guarantees enough room" reasoning as get_Capacity/EnsureCapacity
+	// above, and the same no-op convention System.Collections.Generic.
+	// List`1::set_Capacity already takes for exactly this reason
+	// (system_collections.go). Real StringBuilder.set_Capacity's one
+	// genuine error case — a new capacity smaller than the current
+	// Length — is still checked and thrown, rather than silently
+	// accepted, since that's real, observable behavior a caller could
+	// depend on (unlike the allocation hint itself). Found running real
+	// Jint/Esprima: Esprima.Scanner.RegExpParser.ParsePattern sizes its
+	// own reusable StringBuilder via `sb.Capacity = pattern.Length` before
+	// every single regex literal it scans — with no native registered at
+	// all, this fell through to a nonsensical "real interpreted body"
+	// attempt (StringBuilder has no real TypeDef/IL body anywhere for
+	// vmnet to run — it's native-only), surfacing as a confusing "type
+	// System.Text.StringBuilder not found" instead of running successfully.
+	register("System.Text.StringBuilder::set_Capacity", false, sbSetCapacity)
 }
 
 func asStringBuilder(args []runtime.Value) (*nativeStringBuilder, error) {
@@ -167,6 +184,25 @@ func sbToString(args []runtime.Value) (runtime.Value, error) {
 	if err != nil {
 		return runtime.Value{}, err
 	}
+	current := []rune(sb.buf)
+	// The real (startIndex, length) overload (Fase 3.79) extracts a
+	// substring instead of the whole buffer — ignoring it and always
+	// returning the full buffer silently corrupted every caller relying
+	// on it. Found running real Jint/Esprima: Scanner.ScanRegExpBody's
+	// own `stringBuilder.ToString(1, stringBuilder.Length - 2)` strips a
+	// scanned regex literal's own leading/trailing `/` delimiters this
+	// way — without this, every regex literal's own pattern kept both
+	// delimiters (e.g. "a" scanned from `/a/` came out as "/a/"), so
+	// `/a/.test('abc')` compiled a literal substring search for the
+	// three characters "/a/" instead of the letter "a", silently
+	// returning false for every regex literal without exception.
+	if len(args) >= 3 && args[1].Kind == runtime.KindI4 && args[2].Kind == runtime.KindI4 {
+		start, length := int(args[1].I4), int(args[2].I4)
+		if start < 0 || length < 0 || start+length > len(current) {
+			return runtime.Value{}, &runtime.ManagedException{TypeName: "System.ArgumentOutOfRangeException", Message: "Index and length must refer to a location within the string."}
+		}
+		return runtime.String(string(current[start : start+length])), nil
+	}
 	return runtime.String(sb.buf), nil
 }
 
@@ -236,6 +272,26 @@ func sbSetLength(args []runtime.Value) (runtime.Value, error) {
 		// The zero value of `rune` is already 0 ('\0') — Go's make()
 		// zero-initializes the tail, so no explicit fill loop is needed.
 		sb.buf = string(padded)
+	}
+	return runtime.Value{}, nil
+}
+
+// sbSetCapacity backs the Capacity property setter — see its own
+// register() call site's doc comment for why this is a no-op otherwise
+// (vmnet's StringBuilder auto-grows already), keeping only the one real,
+// observable error real StringBuilder.set_Capacity has: a new capacity
+// smaller than the current Length.
+func sbSetCapacity(args []runtime.Value) (runtime.Value, error) {
+	sb, err := asStringBuilder(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	if len(args) != 2 || args[1].Kind != runtime.KindI4 {
+		return runtime.Value{}, fmt.Errorf("bcl: StringBuilder.set_Capacity expects an int32 capacity")
+	}
+	n := int(args[1].I4)
+	if n < len([]rune(sb.buf)) {
+		return runtime.Value{}, &runtime.ManagedException{TypeName: "System.ArgumentOutOfRangeException", Message: "capacity was less than the current size."}
 	}
 	return runtime.Value{}, nil
 }

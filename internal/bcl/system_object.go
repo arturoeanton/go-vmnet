@@ -237,6 +237,20 @@ func NativeTypeName(native any) (string, bool) {
 		return "System.Linq.Expressions.CatchBlock", true
 	case *nativeMemberInfo:
 		return "System.Reflection.MemberInfo", true
+	case *nativeRegex:
+		// Missing here (Fase 3.79) meant a real `object as Regex` cast —
+		// e.g. Esprima.RegExpParseResult's own `public Regex? Regex =>
+		// _regexOrConversionError as Regex;` — always evaluated false
+		// (isAssignableTo's own KindObject case falls back to
+		// nativeMatches exactly when v.Obj.Type is nil, which every
+		// native-ctor-constructed regex object's own Type always is),
+		// silently discarding a just-constructed, perfectly real Regex
+		// and handing Jint's own regex-literal caching machinery a null
+		// reference instead — surfacing many calls later as "Object
+		// reference not set to an instance of an object (calling
+		// System.Text.RegularExpressions.Regex::IsMatch/Match/Replace)"
+		// for what looked like an unrelated method.
+		return "System.Text.RegularExpressions.Regex", true
 	case *nativeHashSet:
 		// Missing here meant receiverTypeName (internal/interpreter/
 		// typecheck.go) couldn't identify a HashSet<T> receiver at all,
@@ -324,6 +338,12 @@ func NativeTypeName(native any) (string, bool) {
 		// InvalidCastException unconditionally — found via this exact
 		// hardening pass's own probe fixture, not assumed (Fase 3.53).
 		return "System.Text.RegularExpressions.Match", true
+	case *nativeGroupVal:
+		// An individual capture group, e.g. `match.Groups[1]` — same
+		// reasoning as nativeMatchVal's own case just above, for any real
+		// `is Group`/`as Capture` check on one instead of the whole match
+		// (Fase 3.79).
+		return "System.Text.RegularExpressions.Group", true
 	case *runtime.ManagedException:
 		// A bare exception object (no TypeDef — either a plain BCL
 		// exception type like ArgumentException, or ex.Object unset

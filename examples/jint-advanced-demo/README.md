@@ -2,16 +2,18 @@
 
 Pushes the real, unmodified [Jint](https://github.com/sebastienros/jint)
 3.1.3 engine (the same package `examples/jint-demo`/`jint-nowrapper` use)
-harder than a one-line `"1 + 2"`: `var`/`let`/`const` (including a single
-statement declaring three variables at once), nested object/array
-literals with property and index access, arithmetic/comparison/ternary/
-logical operators, `Math.*` built-ins, a real structured JSON document
-passed in from the Go host and evaluated against, a heavier computational
-loop, function declarations/closures/recursion/arrow functions, array
-growth (`.push`/`.sort`/`.slice`/`.reverse`/`.filter`/`.reduce`), and
-string methods (`.toUpperCase`/`.trim`/`.charAt`/`.indexOf`) — via a small
-compiled C# wrapper (`JintAdvancedWrapper.cs` in this directory) that
-drives `Engine.Evaluate`/`Engine.SetValue` directly.
+harder than a one-line `"1 + 2"`: `var`/`let`/`const`, nested object/array
+literals, arithmetic/comparison/ternary/logical operators, `Math.*`
+built-ins, a real structured JSON document from the Go host, a heavier
+computational loop, function declarations/closures/recursion/arrow
+functions, array growth and higher-order methods (`.push`/`.sort`/
+`.slice`/`.reverse`/`.filter`/`.reduce`/`.map`/`.concat`), string methods,
+**ES6 classes** (inheritance, `super`, method overriding), **regular
+expressions** (`.test`/`.exec`/`.match`/`.replace`, global and
+non-global), `JSON.stringify` on real nested data with real numbers, and
+template literals — via a small compiled C# wrapper
+(`JintAdvancedWrapper.cs` in this directory) that drives `Engine.Evaluate`/
+`Engine.SetValue` directly.
 
 Needs network access to nuget.org (to restore Jint) and a local `dotnet`
 SDK (to compile the wrapper — vmnet only runs already-compiled IL, it
@@ -29,6 +31,7 @@ RunSuite() = 28
 EvaluateWithData(order total) = 39
 Loop(2000) = 2.664667e+09
 RunFunctionsArraysAndStrings() = 55,3,42,1,3,5,8,9,3,5,9,8,5,3,1,5,8,9,26,HELLO WORLD,padded,H,6
+RunClassesRegexAndJson() = Processed 2 shapes and 3 orders | {"shapes":["Circle area=28","Square area=16"],"orderIds":["1234","5678","9999"],"masked":"order-XXXX, order-XXXX, order-XXXX"}
 ```
 
 ## What building this found: eight real bugs fixed, one real gap still open
@@ -109,21 +112,68 @@ cause and account for the large majority of what was broken:
   `PrimitiveClassShapeMismatch.cs`, `CharOverloadPick.cs`,
   `UnboxOpcodeTest.cs`).
 
-One real gap remains, narrower than it first looked: **`.concat()`/
-`.map()`, template literals, and `JSON.stringify` on anything but a
-single-digit number** still hit an unimplemented `sizeof` IL opcode
-inside `System.SpanHelpers.CopyTo` whenever the operation needs a
-multi-character `Span<T>` write (a two-digit number's own decimal
-formatting, a multi-character `.join` separator, ...) — a real, general
-gap: `sizeof` on an open generic type parameter needs a per-instantiation
-memory-layout size vmnet's type-erased `Value` model doesn't track
-anywhere today, not something fixable by adding one native.
-`.filter()`/`.reduce()`/single-character `.join(',')` all take a
-different code path that doesn't need it — `RunFunctionsArraysAndStrings`
-above sticks to those.
+That left one gap from Fase 3.77 still open — ES6 classes, and
+`.concat()`/`.map()`/`JSON.stringify()`/template literals beyond a
+single-digit number, all still failed. Fase 3.79 went back for it and,
+chasing it down, found this wasn't one bug but a chain of them:
 
-See `docs/en/ROADMAP.md`'s own entries for this demo for the complete,
-citable account of every finding (eight fixed, one open), including exact
+- **ES6 classes** used to fail on any class with at least one member
+  (constructor, method, getter, ...) — a `NullReferenceException`
+  dereferencing `Esprima.Ast.ClassProperty.<Key>k__BackingField`. Root
+  cause: `Jint.AstExtensions.GetKey<T>(this T property, Engine engine)
+  where T : IProperty` calls an interface method (`((IProperty)property).
+  Key`) on its own still-open generic parameter — real IL for this always
+  compiles a `constrained. !!T` prefix ahead of the `callvirt`, which
+  loads the parameter's ADDRESS (not its value) so the same bytecode
+  works whether `T` closes over a value type (needing a box) or a
+  reference type (needing a plain dereference). `ir/builder.go` drops
+  `constrained.` as a no-op — correct for a value-typed receiver (already
+  a managed pointer to a struct, handled directly), but not for a
+  reference-typed one: without a fix, `GetKey<T>`'s own "this" stayed a
+  raw pointer instead of the real object, crashing the moment its body
+  did a plain field read. Fixed by auto-dereferencing a call's own
+  receiver whenever it's a managed pointer to anything that isn't a
+  struct or an about-to-be-constructed value type's default.
+- **`.concat()`/`.map()`, template literals, and `JSON.stringify()`
+  beyond a single-digit number** turned out to need only a *native*
+  `Span<T>`/`ReadOnlySpan<T>.CopyTo`/`TryCopyTo` — sidestepping
+  `System.SpanHelpers.CopyTo`'s real body (real unsafe pointer-address
+  arithmetic, plus the still-unimplemented `sizeof` opcode) with a plain
+  Go slice `copy()` over the same span representation vmnet already has.
+  Getting there also surfaced a real, general correctness bug: the plain
+  `conv.u8` CIL opcode was sign-extending instead of zero-extending,
+  which silently corrupted `String.prototype.split()` with no explicit
+  limit argument (the overwhelmingly common case) into returning an
+  array of length `-1`.
+- **Regular expressions** — `.test()`/`.exec()`/`.match()`/`.replace()`,
+  global and non-global — needed a chain of half a dozen missing/broken
+  natives: a `Regex` object was silently discarded by its own `as Regex`
+  cast (an isinst-registry gap), `StringBuilder.set_Capacity`/
+  `ToString(start, length)` were either missing or ignored their own
+  arguments (the latter is why every regex literal's own delimiters
+  stayed attached — `/a/` compiled as a literal search for `"/a/"`, not
+  `a`), the count-limited `Match`/`Replace` overloads Jint always calls
+  had no native, and `Capture.Index`/`Length`, `Match.NextMatch()`, and
+  `MatchCollection`'s own indexer were never wired up at all.
+
+All of this is regression-tested against real C# fixtures reproducing
+each exact shape (`tests/fixtures/csharp/ConstrainedGenericTest.cs`,
+`ConvU8Test.cs`, `SpanCopyToTest.cs`, `StringBuilderCapacityTest.cs`,
+`RegexFeaturesTest.cs`, `TimeSpanComparisonTest.cs`) — each confirmed to
+fail without its fix and pass with it.
+
+**One real, narrower-than-it-first-looked gap remains**: regex patterns
+using a **parenthesized group** (capturing or not) or a **backslash
+shorthand class** (`\d`/`\w`/`\s`) still translate incorrectly — traced to
+Esprima's own hand-written regex-to-.NET pattern translator
+(`Scanner.RegExpParser.ParsePattern`, a `ref struct`-based state machine
+using an `Action<StringBuilder,char>?` delegate to append "processed"
+characters), not yet fully root-caused. Character classes (`[0-9]`,
+`[a-z]`, ...), literal text, quantifiers, and alternation all translate
+correctly — `RunClassesRegexAndJson` above sticks to those.
+
+See `docs/en/ROADMAP.md`'s own entries for this demo (Fase 3.77/3.78/
+3.79) for the complete, citable account of every finding, including exact
 error text and the precise script fragment each one reproduces with.
 
 ## Why the loop runs 2,000 iterations, not 100,000

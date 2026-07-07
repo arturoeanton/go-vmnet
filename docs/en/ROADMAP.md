@@ -6532,6 +6532,135 @@ cd examples/jint-advanced-demo && dotnet build -c Release && go run .
 ```
 
 ---
+## Fase 3.79 — the last of Fase 3.77's three open gaps: ES6 classes, real array/JSON growth, and regex
+
+**Goal:** finish what Fase 3.78 started — go back for the third of Fase 3.77's originally-documented
+gaps (ES6 classes; `.concat`/`.map`/`JSON.stringify`/template literals beyond a single-digit number)
+and, since regex is foundational to real JavaScript, get `RegExp` working too.
+
+**Result: both turned out to be chains of several real, narrow bugs rather than one each. Twelve
+distinct fixes across `ir.Call`'s own receiver handling, `conv.u8`, `Span<T>`, and a dozen
+StringBuilder/Regex/TimeSpan natives — twelve regression tests, each confirmed to fail without its
+fix and pass with it. One real, narrower-than-it-first-looked gap remains: regex parenthesized
+groups and backslash shorthand classes (`\d`/`\w`/`\s`) still translate incorrectly.**
+
+- **ES6 classes — fixed.** Any class with at least one member (constructor, method, getter, ...)
+  used to fail with `NullReferenceException: dereferencing a null managed pointer (Esprima.Ast.
+  ClassProperty.<Key>k__BackingField)`. Root-caused to `Jint.AstExtensions.GetKey<T>(this T
+  property, Engine engine) where T : IProperty`'s own `((IProperty)property).Key` — an interface
+  method call on a still-open generic method parameter. Real IL for this always compiles a
+  `constrained. !!T` prefix ahead of the `callvirt`: the operand on the stack is a managed pointer
+  (loaded via `ldarga`, not `ldarg`) to the parameter's own storage, letting the same bytecode work
+  whether `T` closes over a value type (needing a box) or a reference type (needing a plain
+  dereference) at any given instantiation. `internal/ir/builder.go` drops `constrained.` as a Nop
+  entirely (its own doc comment: harmless when the receiver's Kind already carries enough
+  information for dispatch) — true for a value-typed receiver (already a `KindRef` to a
+  `KindStruct`, which vmnet's struct-instance-method handling already dereferences correctly), but
+  not for a reference-typed one: the receiver arrived as a raw, never-dereferenced `KindRef`, and
+  `GetKey<T>`'s own body crashed the moment it tried a plain field read through it. Fixed by
+  auto-dereferencing `ir.Call`'s own receiver whenever it's a `KindRef` to anything that isn't a
+  `KindStruct` **or** `KindNull` — the second exclusion matters just as much as the fix itself: a
+  `KindRef` to `KindNull` is the legitimate "not-yet-initialized value-type local, about to be
+  filled in by an in-place `ldloca`+`call .ctor`" shape (e.g. `KeyValuePair<K,V>`'s own in-place
+  constructor) that a real, unresolvable generic-value-type default (the same limitation
+  ClosedXML's own font-metrics engine already documents) can produce — the first version of this
+  fix, without the `KindNull` exclusion, broke `TestCheapWins3/KeyValuePairCtorTest` immediately.
+- **`.concat()`/`.map()`, template literals, and `JSON.stringify()` beyond a single-digit number —
+  fixed**, and by a much smaller change than Fase 3.77 assumed was needed: rather than implementing
+  the general `sizeof`-on-an-open-generic-parameter opcode, `Span<T>`/`ReadOnlySpan<T>.CopyTo`/
+  `TryCopyTo` are now natively registered (`internal/bcl/system_span.go`), sidestepping
+  `System.SpanHelpers.CopyTo`'s real body entirely — real unsafe pointer-address arithmetic
+  (`Unsafe.ByteOffset`) to detect an overlapping copy, which needs the still-unimplemented `sizeof`
+  opcode just to reach at all — with a plain Go `copy()` over the same `(backing, start, length)`
+  span representation vmnet already tracks (correct-by-construction for overlap, the same guarantee
+  the real method's own elaborate byte-offset dance exists to provide). Chasing this down also
+  found a real, general correctness bug: the plain `conv.u8` opcode (`internal/interpreter/
+  arithmetic.go`) was sign-extending a narrower source through the same signed-`int64`-widening path
+  every other `conv` opcode correctly shares, instead of zero-extending its own bit pattern —
+  `String.prototype.split()`'s own internal `SplitWithStringSeparator` does `(uint)Math.Min(
+  segmentCount, (ulong)limit)`, where `limit` is `uint.MaxValue` (bit pattern `0xFFFFFFFF`, vmnet's
+  own `KindI4` representation `-1`) whenever `split()` is called with no explicit limit argument —
+  sign-extending that to `-1` instead of `4294967295` made `Math.Min` silently pick `-1` as the
+  smaller value, corrupting the resulting array's own length to `-1` for the overwhelmingly common
+  no-limit case.
+- **Regular expressions — `.test()`/`.exec()`/`.match()`/`.replace()`, global and non-global, now
+  work** for patterns using character classes, literal text, quantifiers, and alternation. This
+  needed a chain of half a dozen missing or broken natives, found one crash at a time running real
+  regex literals end to end:
+  - `internal/bcl/system_object.go`'s `NativeTypeName` had no entry for `*nativeRegex` at all —
+    every other native-backed type has one. A real `object as Regex` cast (Esprima.
+    `RegExpParseResult`'s own `public Regex? Regex => _regexOrConversionError as Regex;`) always
+    evaluated to `null` (`isAssignableTo`'s `KindObject` case falls back to `nativeMatches` exactly
+    when the object's own `Type` is `nil`, which every native-ctor-constructed object's always is),
+    silently discarding a just-constructed, perfectly real `Regex` and handing Jint's own
+    regex-literal caching machinery a null reference instead — surfacing many calls later as
+    `NullReferenceException` calling `Regex.IsMatch`/`Match`/`Replace`, nowhere near the real bug.
+  - `System.Text.StringBuilder::set_Capacity` had no native at all (only `get_Capacity`/
+    `EnsureCapacity` did) — Esprima's own `Scanner.RegExpParser.ParsePattern` sizes its own reusable
+    `StringBuilder` via `sb.Capacity = pattern.Length` before every single regex literal it scans,
+    which fell through to a nonsensical "run StringBuilder's real interpreted body" attempt
+    (StringBuilder has no real TypeDef/IL body anywhere — it's native-only) instead of running.
+  - `StringBuilder.ToString(int startIndex, int length)` — the real substring overload — always
+    returned the WHOLE buffer, silently ignoring both arguments. `Esprima.Scanner.ScanRegExpBody`'s
+    own `stringBuilder.ToString(1, stringBuilder.Length - 2)` strips a scanned regex literal's own
+    leading/trailing `/` delimiters this exact way — without the fix, every regex literal's own
+    pattern kept both delimiters (`/a/` instead of `a`), so `/a/.test('abc')` compiled a literal
+    substring search for the three characters `"/a/"` instead of the letter `a`, silently returning
+    `false` for every regex literal at all, no exception, no hint anything was wrong.
+  - `pickMethodOverload`'s own resolution for `Regex.IsMatch`/`Match`/`Replace` only ever handled
+    the bare 2-/3-argument overloads — real Jint's own `RegExpPrototype` always calls the
+    count-limited/positioned overloads instead (`Match(string, int beginning)`, `Replace(string,
+    string, int count)`, 1 for a non-global replace and `int.MaxValue` for a global one), which had
+    no native at all (`internal/bcl/system_regex.go`, `internal/interpreter/regexreplace.go`).
+  - `Capture.Index`/`Length` (inherited by `Group`/`Match`) had no native — `RegExpPrototype.Exec`'s
+    own result construction reads `Match.Index` to populate the real JS `RegExp.prototype.exec`
+    result's own `.index` property.
+  - `Match.NextMatch()` had no native — the real, idiomatic "walk every match by hand" pattern
+    behind .NET's own regex-based `String.Split(Regex)` algorithm, which Esprima's own
+    `ArrayList<T>`-based string-splitting code mirrors internally.
+  - `MatchCollection::get_Item` (the indexer, as opposed to `foreach`) had no native — real Jint's
+    own global (`g` flag) `.match()` implementation indexes the collection directly.
+  - `System.TimeSpan`'s own comparison operators (`op_Equality`/`op_Inequality`/`op_GreaterThan`/
+    `op_GreaterThanOrEqual`/`op_LessThan`/`op_LessThanOrEqual`/`CompareTo`) had no native at all —
+    `TimeSpan` has no real TypeDef anywhere (a synthetic vmnet value type), so real IL comparing two
+    `TimeSpan` values has no interpreted body to fall back to. `Regex`'s own `MatchTimeout` property
+    (a `TimeSpan`) gets compared with `==` somewhere in its own real, interpreted static
+    initialization/validation path.
+  - All twelve fixes are regression-tested against real C# fixtures reproducing each exact shape
+    (`tests/fixtures/csharp/ConstrainedGenericTest.cs`, `ConvU8Test.cs`, `SpanCopyToTest.cs`,
+    `StringBuilderCapacityTest.cs`, `RegexFeaturesTest.cs`, `TimeSpanComparisonTest.cs`) — each
+    confirmed to fail without its fix (via a temporary revert) and pass with it.
+- **One real, narrower-than-it-first-looked gap remains**: regex patterns using a **parenthesized
+  group** (capturing or non-capturing, e.g. `(abc)`/`(?:abc)`) or a **backslash shorthand class**
+  (`\d`/`\w`/`\s`) still translate incorrectly — `(abc)` becomes the invalid pattern `abc)` (the
+  opening paren is silently dropped), and `\d` disappears entirely. Traced to Esprima's own
+  hand-written regex-to-.NET pattern translator (`Scanner.RegExpParser.ParsePattern`, a `ref
+  struct`-based state machine spanning thousands of lines, using an `Action<StringBuilder,char>?
+  appender` delegate parameter to append "specially processed" characters as opposed to a direct
+  `StringBuilder.Append` for plain ones) — not yet fully root-caused; the working hypothesis is a
+  bug specific to whatever conditional/delegate-invocation logic handles that "processed" append
+  path, since plain-character copying is independently confirmed correct (character classes,
+  literal text, quantifiers, and alternation all translate correctly). Not something one more
+  native can close without first finding the exact instruction.
+- **`examples/jint-advanced-demo`** updated again: a new `RunClassesRegexAndJson` method (and
+  corresponding Go call in `main.go`) exercises ES6 class inheritance with `super`, `.map()`, global
+  regex `.match()`/`.replace()`, `JSON.stringify` on real nested data with real multi-digit numbers,
+  and template literals — all in one script — while its own comments document the one remaining
+  regex gap precisely.
+
+### How to verify Fase 3.79
+
+```bash
+dotnet build tests/fixtures/csharp/Fixtures.csproj -c Release
+go build ./...
+go vet ./...
+gofmt -l .
+go test ./...
+go test -run "TestConstrainedGenericCall|TestConvU8|TestSpanCopyTo|TestStringBuilderSetCapacity|TestStringBuilderSubstringToString|TestRegexFeatures|TestTimeSpanComparisonOperators" -v .
+cd examples/jint-advanced-demo && dotnet build -c Release && go run .
+```
+
+---
 ## Fase 4 — production-ready v1.0 ("Ready to ship")
 
 **Goal:** turn the functional engine into an adoptable product — reliable, documented, and

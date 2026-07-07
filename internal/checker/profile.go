@@ -314,6 +314,7 @@ func init() {
 		"System.TimeSpan::",
 		"System.Text.RegularExpressions.Regex::",
 		"System.Text.RegularExpressions.Match::",
+		"System.Text.RegularExpressions.MatchCollection::",
 		"System.Text.RegularExpressions.GroupCollection::",
 		"System.Text.RegularExpressions.Group::",
 		"System.Text.RegularExpressions.Capture::",

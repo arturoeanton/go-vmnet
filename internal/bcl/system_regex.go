@@ -3,6 +3,7 @@ package bcl
 import (
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/arturoeanton/go-vmnet/internal/runtime"
 )
@@ -47,6 +48,11 @@ func (nr *nativeRegex) compiled() (*regexp.Regexp, error) {
 type nativeGroupVal struct {
 	success bool
 	value   string
+	// start/length back Capture.Index/Length (Fase 3.79) — both always
+	// meaningful when success is true (0 for a non-participating group,
+	// matched via the zero value, same as every other unset field here).
+	start  int
+	length int
 }
 
 // nativeMatchVal backs Match: Groups[0] is always the whole match
@@ -54,6 +60,13 @@ type nativeGroupVal struct {
 // groups in order.
 type nativeMatchVal struct {
 	groups []nativeGroupVal
+	// re/input back NextMatch() (Fase 3.79) — nil/"" for a Match this
+	// package doesn't yet attach them to (NewMatchValueFromLoc's own
+	// MatchEvaluator-delegate caller, which never calls NextMatch on the
+	// value it hands the delegate); NextMatch reports a clear error
+	// rather than panicking on a nil re in that case.
+	re    *regexp.Regexp
+	input string
 }
 
 func init() {
@@ -86,6 +99,21 @@ func init() {
 	// comment.
 	register("System.Text.RegularExpressions.Group::get_Success", true, groupGetSuccess)
 	register("System.Text.RegularExpressions.Capture::get_Value", true, groupGetValue)
+	// Capture.Index/Length (Fase 3.79) — same inheritance shape as
+	// Value/Success above (Capture declares both, Group/Match inherit
+	// them unchanged). Found running real Jint: RegExpPrototype.Exec's
+	// own result construction reads Match.Index (inherited from Capture)
+	// to populate the real JS `RegExp.prototype.exec` result's own
+	// `.index` property.
+	register("System.Text.RegularExpressions.Capture::get_Index", true, groupGetIndex)
+	register("System.Text.RegularExpressions.Capture::get_Length", true, groupGetLength)
+	// Match.NextMatch() (Fase 3.79) — re-runs the same regex starting
+	// just past the current match's own end, the real, idiomatic
+	// "iterate every match by hand" pattern (as opposed to Matches(),
+	// which returns them all eagerly at once). Found running real .NET's
+	// own regex-based String.Split(Regex) algorithm, which Esprima's own
+	// ArrayList<T>-based string-splitting code mirrors internally.
+	register("System.Text.RegularExpressions.Match::NextMatch", true, matchNextMatch)
 
 	// MatchCollection (Regex.Matches's real return type, Fase 3.53) needs
 	// no dedicated Go struct at all: it's backed by the exact same
@@ -100,6 +128,13 @@ func init() {
 	// loop's target packages.
 	register("System.Text.RegularExpressions.MatchCollection::get_Count", true, listCount)
 	register("System.Text.RegularExpressions.MatchCollection::GetEnumerator", true, listGetEnumerator)
+	// get_Item (Fase 3.79) — same *nativeList reuse as Count/GetEnumerator
+	// just above; missing here meant `matches[i]` (as opposed to a
+	// foreach) threw unconditionally. Found running real Jint:
+	// RegExpPrototype's own [Symbol.match] (global-flag `.match()`)
+	// implementation indexes the MatchCollection directly rather than
+	// enumerating it.
+	register("System.Text.RegularExpressions.MatchCollection::get_Item", true, listGetItem)
 }
 
 func regexEscape(args []runtime.Value) (runtime.Value, error) {
@@ -132,28 +167,50 @@ func regexCtor(args []runtime.Value) (*runtime.Object, error) {
 // approach every other multi-overload native in this package uses, since
 // vmnet's call dispatch doesn't distinguish overloads by signature.
 func resolveRegexAndInput(args []runtime.Value) (*regexp.Regexp, string, error) {
+	// A trailing int32 argument (Fase 3.79) is the real Match(string
+	// input, int beginning)/IsMatch(string input, int beginning)
+	// overload — used by Jint's own RegExpPrototype.Exec for a sticky
+	// (`y` flag) or `lastIndex`-continued search. vmnet has no lazy/
+	// position-aware Match value (buildMatchVal's own doc comment), so
+	// this simplifies to searching the input from that offset onward —
+	// correct for every property this package's own nativeMatchVal
+	// currently exposes (no Match.Index/Length yet to get wrong relative
+	// to the original, unsliced string).
+	beginning := 0
+	if len(args) == 3 && args[2].Kind == runtime.KindI4 {
+		beginning = int(args[2].I4)
+		args = args[:2]
+	}
 	if len(args) != 2 {
 		return nil, "", fmt.Errorf("bcl: Regex method expects 2 arguments")
 	}
+	var re *regexp.Regexp
+	var input string
 	if args[0].Kind == runtime.KindObject && args[0].Obj != nil {
 		nr, ok := args[0].Obj.Native.(*nativeRegex)
 		if !ok || args[1].Kind != runtime.KindString {
 			return nil, "", fmt.Errorf("bcl: Regex instance method: unsupported argument shape")
 		}
-		re, err := nr.compiled()
+		var err error
+		re, err = nr.compiled()
 		if err != nil {
 			return nil, "", err
 		}
-		return re, args[1].Str, nil
-	}
-	if args[0].Kind == runtime.KindString && args[1].Kind == runtime.KindString {
-		re, err := compileRegex(args[1].Str)
+		input = args[1].Str
+	} else if args[0].Kind == runtime.KindString && args[1].Kind == runtime.KindString {
+		var err error
+		re, err = compileRegex(args[1].Str)
 		if err != nil {
 			return nil, "", err
 		}
-		return re, args[0].Str, nil
+		input = args[0].Str
+	} else {
+		return nil, "", fmt.Errorf("bcl: Regex method: unsupported argument shape")
 	}
-	return nil, "", fmt.Errorf("bcl: Regex method: unsupported argument shape")
+	if beginning < 0 || beginning > len(input) {
+		return nil, "", &runtime.ManagedException{TypeName: "System.ArgumentOutOfRangeException", Message: "beginning"}
+	}
+	return re, input[beginning:], nil
 }
 
 func regexIsMatch(args []runtime.Value) (runtime.Value, error) {
@@ -170,29 +227,70 @@ func regexIsMatch(args []runtime.Value) (runtime.Value, error) {
 // reference syntax in the replacement string overlaps Go's own, so
 // ReplaceAllString handles the common cases directly — same RE2-dialect
 // limitation already documented on nativeRegex above.
-func resolveRegexReplace(args []runtime.Value) (re *regexp.Regexp, input, replacement string, err error) {
+// resolveRegexReplace also returns count — the real Replace(input,
+// replacement, count)/Replace(input, replacement, count, beginning)
+// overloads' own replacement-count limit (Fase 3.79, found via real
+// Jint: RegExpPrototype's own [Symbol.replace] implementation always
+// calls the count-limited overload, passing 1 for a non-global (`g`
+// flag absent) replace and int.MaxValue for a global one — a bare
+// Replace(input, replacement) call, which really does mean "replace
+// every match", never appears at all in real Jint's own compiled IL for
+// this). -1 means "unlimited" (every match), matching int.MaxValue's own
+// real effect without needing to special-case that exact sentinel value.
+func resolveRegexReplace(args []runtime.Value) (re *regexp.Regexp, input, replacement string, count int, err error) {
+	count = -1
+	if len(args) == 4 && args[3].Kind == runtime.KindI4 {
+		count = int(args[3].I4)
+		args = args[:3]
+	}
 	if len(args) != 3 {
-		return nil, "", "", fmt.Errorf("bcl: Regex.Replace expects 3 arguments")
+		return nil, "", "", 0, fmt.Errorf("bcl: Regex.Replace expects 3 arguments")
 	}
 	if args[0].Kind == runtime.KindObject && args[0].Obj != nil {
 		nr, ok := args[0].Obj.Native.(*nativeRegex)
 		if !ok || args[1].Kind != runtime.KindString || args[2].Kind != runtime.KindString {
-			return nil, "", "", fmt.Errorf("bcl: Regex.Replace instance method: unsupported argument shape")
+			return nil, "", "", 0, fmt.Errorf("bcl: Regex.Replace instance method: unsupported argument shape")
 		}
 		re, err := nr.compiled()
 		if err != nil {
-			return nil, "", "", err
+			return nil, "", "", 0, err
 		}
-		return re, args[1].Str, args[2].Str, nil
+		return re, args[1].Str, args[2].Str, count, nil
 	}
 	if args[0].Kind == runtime.KindString && args[1].Kind == runtime.KindString && args[2].Kind == runtime.KindString {
 		re, err := compileRegex(args[1].Str)
 		if err != nil {
-			return nil, "", "", err
+			return nil, "", "", 0, err
 		}
-		return re, args[0].Str, args[2].Str, nil
+		return re, args[0].Str, args[2].Str, count, nil
 	}
-	return nil, "", "", fmt.Errorf("bcl: Regex.Replace: unsupported argument shape")
+	return nil, "", "", 0, fmt.Errorf("bcl: Regex.Replace: unsupported argument shape")
+}
+
+// replaceLimited applies replacement to at most count occurrences (Fase
+// 3.79) — Go's regexp has no built-in "replace at most N" operation
+// (ReplaceAllString always replaces every match); a negative count means
+// unlimited, matching resolveRegexReplace's own convention.
+func replaceLimited(re *regexp.Regexp, input, replacement string, count int) string {
+	if count < 0 {
+		return re.ReplaceAllString(input, replacement)
+	}
+	var out strings.Builder
+	last := 0
+	replaced := 0
+	for replaced < count {
+		loc := re.FindStringIndex(input[last:])
+		if loc == nil {
+			break
+		}
+		start, end := last+loc[0], last+loc[1]
+		out.WriteString(input[last:start])
+		out.WriteString(re.ReplaceAllString(input[start:end], replacement))
+		last = end
+		replaced++
+	}
+	out.WriteString(input[last:])
+	return out.String()
 }
 
 // RegexReplaceString backs the plain string-replacement Regex.Replace
@@ -202,11 +300,11 @@ func resolveRegexReplace(args []runtime.Value) (re *regexp.Regexp, input, replac
 // (invoking a real delegate needs Machine access this package doesn't
 // have, so both overloads are now dispatched from that one call site).
 func RegexReplaceString(args []runtime.Value) (runtime.Value, error) {
-	re, input, replacement, err := resolveRegexReplace(args)
+	re, input, replacement, count, err := resolveRegexReplace(args)
 	if err != nil {
 		return runtime.Value{}, err
 	}
-	return runtime.String(re.ReplaceAllString(input, replacement)), nil
+	return runtime.String(replaceLimited(re, input, replacement, count)), nil
 }
 
 // ResolveRegexReplaceEvaluatorTarget resolves the (compiled regex, input)
@@ -217,7 +315,11 @@ func RegexReplaceString(args []runtime.Value) (runtime.Value, error) {
 // Replace shapes, just with a 3rd (evaluator) argument along for the ride
 // this function itself never inspects.
 func ResolveRegexReplaceEvaluatorTarget(args []runtime.Value) (re *regexp.Regexp, input string, ok bool) {
-	if len(args) != 3 {
+	// A 4th argument, if present, is the real count/beginning overload's
+	// own limit (Fase 3.79) — the caller (regexReplaceMachine) already
+	// extracted it; only the first 3 (receiver/input, evaluator) matter
+	// here.
+	if len(args) != 3 && len(args) != 4 {
 		return nil, "", false
 	}
 	if args[0].Kind == runtime.KindObject && args[0].Obj != nil {
@@ -267,9 +369,11 @@ func regexMatch(args []runtime.Value) (runtime.Value, error) {
 func buildMatchVal(re *regexp.Regexp, input string) *nativeMatchVal {
 	loc := re.FindStringSubmatchIndex(input)
 	if loc == nil {
-		return &nativeMatchVal{groups: []nativeGroupVal{{success: false}}}
+		return &nativeMatchVal{groups: []nativeGroupVal{{success: false}}, re: re, input: input}
 	}
-	return matchValFromLoc(loc, input)
+	m := matchValFromLoc(loc, input)
+	m.re, m.input = re, input
+	return m
 }
 
 // matchValFromLoc turns one FindStringSubmatchIndex-shaped index-pair
@@ -285,7 +389,7 @@ func matchValFromLoc(loc []int, input string) *nativeMatchVal {
 			groups[i] = nativeGroupVal{success: false}
 			continue
 		}
-		groups[i] = nativeGroupVal{success: true, value: input[start:end]}
+		groups[i] = nativeGroupVal{success: true, value: input[start:end], start: start, length: end - start}
 	}
 	return &nativeMatchVal{groups: groups}
 }
@@ -373,16 +477,27 @@ func groupCollectionGetCount(args []runtime.Value) (runtime.Value, error) {
 // registered those under Match:: directly and they were simply never
 // called.
 func asSuccessValue(args []runtime.Value) (success bool, value string, err error) {
+	g, err := asGroupVal(args)
+	if err != nil {
+		return false, "", err
+	}
+	return g.success, g.value, nil
+}
+
+// asGroupVal is asSuccessValue's own superset (Fase 3.79) — also needed
+// by Capture.Index/Length, which asSuccessValue's own (success, value)
+// pair has no room for.
+func asGroupVal(args []runtime.Value) (nativeGroupVal, error) {
 	if len(args) == 0 || args[0].Kind != runtime.KindObject || args[0].Obj == nil {
-		return false, "", fmt.Errorf("bcl: Group/Capture method called without a receiver")
+		return nativeGroupVal{}, fmt.Errorf("bcl: Group/Capture method called without a receiver")
 	}
 	switch n := args[0].Obj.Native.(type) {
 	case *nativeGroupVal:
-		return n.success, n.value, nil
+		return *n, nil
 	case *nativeMatchVal:
-		return n.groups[0].success, n.groups[0].value, nil
+		return n.groups[0], nil
 	default:
-		return false, "", fmt.Errorf("bcl: receiver is not a Group/Capture/Match (got %T)", args[0].Obj.Native)
+		return nativeGroupVal{}, fmt.Errorf("bcl: receiver is not a Group/Capture/Match (got %T)", args[0].Obj.Native)
 	}
 }
 
@@ -392,6 +507,63 @@ func groupGetSuccess(args []runtime.Value) (runtime.Value, error) {
 		return runtime.Value{}, err
 	}
 	return runtime.Bool(success), nil
+}
+
+func groupGetIndex(args []runtime.Value) (runtime.Value, error) {
+	g, err := asGroupVal(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	return runtime.Int32(int32(g.start)), nil
+}
+
+func groupGetLength(args []runtime.Value) (runtime.Value, error) {
+	g, err := asGroupVal(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	return runtime.Int32(int32(g.length)), nil
+}
+
+// matchNextMatch backs Match.NextMatch() — see this native's own
+// register() call site doc comment. A failed/empty current match has
+// nowhere meaningful to resume from (real .NET's own NextMatch on an
+// unsuccessful Match just returns another unsuccessful Match), matching
+// that directly rather than erroring.
+func matchNextMatch(args []runtime.Value) (runtime.Value, error) {
+	if len(args) == 0 || args[0].Kind != runtime.KindObject || args[0].Obj == nil {
+		return runtime.Value{}, fmt.Errorf("bcl: Match.NextMatch called without a receiver")
+	}
+	m, ok := args[0].Obj.Native.(*nativeMatchVal)
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: receiver is not a Match")
+	}
+	if m.re == nil || !m.groups[0].success {
+		return runtime.ObjRef(&runtime.Object{Native: &nativeMatchVal{groups: []nativeGroupVal{{success: false}}, re: m.re, input: m.input}}), nil
+	}
+	from := m.groups[0].start + m.groups[0].length
+	// A zero-length match must still advance by at least one position,
+	// or NextMatch() would return the exact same match forever (real
+	// .NET's own Match.NextMatch has this same one-position bump for a
+	// zero-length match).
+	if m.groups[0].length == 0 {
+		from++
+	}
+	if from > len(m.input) {
+		return runtime.ObjRef(&runtime.Object{Native: &nativeMatchVal{groups: []nativeGroupVal{{success: false}}, re: m.re, input: m.input}}), nil
+	}
+	loc := m.re.FindStringSubmatchIndex(m.input[from:])
+	if loc == nil {
+		return runtime.ObjRef(&runtime.Object{Native: &nativeMatchVal{groups: []nativeGroupVal{{success: false}}, re: m.re, input: m.input}}), nil
+	}
+	for i := range loc {
+		if loc[i] >= 0 {
+			loc[i] += from
+		}
+	}
+	next := matchValFromLoc(loc, m.input)
+	next.re, next.input = m.re, m.input
+	return runtime.ObjRef(&runtime.Object{Native: next}), nil
 }
 
 func groupGetValue(args []runtime.Value) (runtime.Value, error) {

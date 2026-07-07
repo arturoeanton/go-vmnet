@@ -264,6 +264,37 @@ func evalConv(kind ir.ConvKind, v runtime.Value) (runtime.Value, error) {
 		return v, nil
 	}
 
+	// conv.u8 (spec §III.3.27) is the one real widening conversion here
+	// that needs its own path rather than the shared sign-extending i64
+	// below: converting a 32-bit-or-narrower value to a 64-bit UNSIGNED
+	// one must zero-extend the source's own bit pattern, not sign-extend
+	// its signed numeric value. Every other case here is either a
+	// truncation (conv.i1/u1/i2/u2/i4/u4 — bit-pattern-correct regardless
+	// of the source's signedness, since only the low bits survive) or a
+	// same-width reinterpretation (conv.i8 on an already-64-bit source),
+	// where sign vs. zero extension makes no difference. Found running
+	// real Jint (Fase 3.79): String.prototype.split's own internal
+	// SplitWithStringSeparator does `(ulong)Math.Min(segmentCount,
+	// (ulong)limit)`, where `limit` is `uint.MaxValue` (bit pattern
+	// 0xFFFFFFFF, vmnet's own KindI4 representation -1) whenever no
+	// explicit limit argument is given — sign-extending that to int64
+	// produced -1 instead of the correct 4294967295, so Math.Min silently
+	// picked "-1" as the smaller value, corrupting the resulting array's
+	// own length to -1 for every split() call with no limit (the
+	// overwhelmingly common case).
+	if kind == ir.ConvU8 {
+		switch v.Kind {
+		case runtime.KindI4:
+			return runtime.Int64(int64(uint32(v.I4))), nil
+		case runtime.KindI8:
+			// Already 64 bits wide — no extension happens either way,
+			// this conversion is a pure bit-pattern reinterpretation
+			// (signed vs. unsigned int64 share the same representation
+			// here, runtime.Value has no separate unsigned-64 Kind).
+			return runtime.Int64(v.I8), nil
+		}
+	}
+
 	i64, err := toInt64(v)
 	if err != nil {
 		return runtime.Value{}, err

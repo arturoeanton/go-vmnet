@@ -24,7 +24,17 @@ func init() {
 }
 
 func regexReplaceMachine(m *Machine, args []runtime.Value, depth int, instrCount *int64) (runtime.Value, error) {
-	if len(args) != 3 {
+	// A trailing int32 4th argument (Fase 3.79) is the real Replace(...,
+	// count)/Replace(..., count, beginning) overload's own replacement-
+	// count limit — real Jint's own RegExpPrototype [Symbol.replace]
+	// always calls this exact overload (1 for a non-global replace,
+	// int.MaxValue for a global one), never the bare 3-arg "replace
+	// everything" overload. -1 (unlimited) matches bcl.RegexReplaceString/
+	// resolveRegexReplace's own convention for a bare 3-arg call.
+	count := -1
+	if len(args) == 4 && args[3].Kind == runtime.KindI4 {
+		count = int(args[3].I4)
+	} else if len(args) != 3 {
 		return runtime.Value{}, fmt.Errorf("interpreter: Regex.Replace expects 3 arguments")
 	}
 	if args[2].Kind != runtime.KindFunc {
@@ -36,6 +46,9 @@ func regexReplaceMachine(m *Machine, args []runtime.Value, depth int, instrCount
 	}
 	evaluator := args[2].Func
 	locs := re.FindAllStringSubmatchIndex(input, -1)
+	if count >= 0 && len(locs) > count {
+		locs = locs[:count]
+	}
 	if len(locs) == 0 {
 		return runtime.String(input), nil
 	}

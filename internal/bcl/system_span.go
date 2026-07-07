@@ -139,6 +139,32 @@ func init() {
 		// can't be trusted for these two specifically.
 		register(prefix+"::GetPinnableReference", true, spanGetPinnableReference)
 		register(prefix+"::DangerousGetPinnableReference", true, spanGetPinnableReference)
+		// CopyTo/TryCopyTo (Fase 3.79) — the real interpreted bodies (still
+		// used for every other member not natively registered here) both
+		// bottom out in System.SpanHelpers.CopyTo<T>(ref T, int, ref T,
+		// int), which computes real byte-address differences via
+		// Unsafe.ByteOffset to detect an overlapping copy before falling
+		// back to Unsafe.CopyBlock/element-by-element Unsafe.Add — none of
+		// which vmnet's array-backed (not linearly-addressed) Value model
+		// can answer at all, and which also needs the plain `sizeof`
+		// opcode on a still-open generic type parameter (never
+		// implemented — see ir.SizeOf's own doc comment) just to reach
+		// that logic in the first place. Found running real Jint's own
+		// internally vendored System.Text.ValueStringBuilder (used by
+		// Array.prototype.join, .concat(), .map(), and JSON.stringify's
+		// own number formatting): every one of those failed with
+		// `ir: unsupported opcode "sizeof"` the moment a ValueStringBuilder
+		// needed to grow past its initial inline buffer, i.e. almost
+		// immediately. Reimplementing CopyTo/TryCopyTo natively — a plain
+		// Go `copy()` (or, for a ReadOnlySpan<char> sliced out of a real
+		// vmnet string, a rune-by-rune write) over the two spans' own
+		// (backing, start, length) triples — sidesteps the whole unsafe
+		// pointer-arithmetic path entirely: vmnet's own array/string
+		// backing already makes an overlapping copy correct by
+		// construction (Go's copy() handles overlap correctly for a
+		// single shared backing array, same as memmove).
+		register(prefix+"::CopyTo", false, spanCopyTo)
+		register(prefix+"::TryCopyTo", true, spanTryCopyTo)
 	}
 	// Span<T>.Clear() (Fase 3.41) — ReadOnlySpan<T> has no such member at
 	// all (real API, read-only) — real callers only ever reach this as
@@ -215,11 +241,32 @@ func spanCtorAs(target *runtime.Type, name string, args []runtime.Value) (*runti
 		return spanFromPointerCtor(target, name, args)
 	case 3:
 		// (T[] array, int start, int length).
-		if args[0].Kind != runtime.KindArray {
-			return nil, fmt.Errorf("bcl: %s(array, start, length) expects a real array argument", name)
-		}
 		if args[1].Kind != runtime.KindI4 || args[2].Kind != runtime.KindI4 {
 			return nil, fmt.Errorf("bcl: %s(array, start, length) expects int32 start/length", name)
+		}
+		if args[0].Kind != runtime.KindArray {
+			// Real Span<T>/ReadOnlySpan<T>'s own (array, start, length)
+			// constructor explicitly allows a null array — but only when
+			// start and length are both zero, producing an empty span
+			// (real .NET source: "If array is null, then start and
+			// length must both be zero"; any other start/length with a
+			// null array throws ArgumentOutOfRangeException/
+			// ArgumentNullException instead). Found running real Jint/
+			// Esprima: Esprima.ArrayList`1.AsReadOnlySpan() does `new
+			// ReadOnlySpan<T>(_items, 0, _count)` unconditionally, and
+			// _items is genuinely null for any ArrayList<T> that was
+			// never given an initial capacity (ArrayList(int
+			// initialCapacity)'s own real ctor: `_items = initialCapacity
+			// > 0 ? new T[initialCapacity] : null`) — blocking, among
+			// other real callers, Esprima's own regex-literal scanner
+			// (RegExpParser.ParsePattern) on its very first character.
+			if args[1].I4 == 0 && args[2].I4 == 0 {
+				s := runtime.NewStruct(target)
+				s.Fields[1] = runtime.Int32(0)
+				s.Fields[2] = runtime.Int32(0)
+				return s, nil
+			}
+			return nil, fmt.Errorf("bcl: %s(array, start, length) expects a real array argument", name)
 		}
 		s := runtime.NewStruct(target)
 		s.Fields[0] = args[0]
@@ -545,6 +592,98 @@ func spanClear(args []runtime.Value) (runtime.Value, error) {
 		backing.Arr.Elems[i] = runtime.Int32(0)
 	}
 	return runtime.Value{}, nil
+}
+
+// spanCopyElements backs both spanCopyTo/spanTryCopyTo below — copies
+// src's own logical content into dst's, reporting false (never touching
+// dst) instead of copying a partial, truncated result when dst is too
+// short, matching real Span<T>.TryCopyTo's own all-or-nothing contract
+// (Span<T>.CopyTo, the throwing sibling, treats false as "throw" instead
+// — see spanCopyTo's own doc comment).
+func spanCopyElements(dst, src *runtime.Struct) bool {
+	srcStart, srcLength := int(src.Fields[1].I4), int(src.Fields[2].I4)
+	if srcLength == 0 {
+		return true
+	}
+	dstLength := int(dst.Fields[2].I4)
+	if srcLength > dstLength {
+		return false
+	}
+	dstStart := int(dst.Fields[1].I4)
+	dstBacking := dst.Fields[0]
+	if dstBacking.Kind != runtime.KindArray || dstBacking.Arr == nil {
+		return false
+	}
+	switch srcBacking := src.Fields[0]; srcBacking.Kind {
+	case runtime.KindArray:
+		if srcBacking.Arr == nil {
+			return false
+		}
+		// Go's own copy() is memmove-correct for two slices sharing the
+		// same backing array (a real, common CopyTo/TryCopyTo case — e.g.
+		// `span.Slice(1).CopyTo(span)` while shifting elements left) —
+		// exactly the overlap-safety SpanHelpers.CopyTo's own elaborate
+		// Unsafe.ByteOffset dance exists to guarantee, gotten here for
+		// free from Go's runtime instead.
+		copy(dstBacking.Arr.Elems[dstStart:dstStart+srcLength], srcBacking.Arr.Elems[srcStart:srcStart+srcLength])
+	case runtime.KindString:
+		// A ReadOnlySpan<char> sliced out of a real vmnet string (e.g.
+		// `"hello".AsSpan(1, 3)`) as the SOURCE of a CopyTo into a
+		// writable Span<char> — always array-backed on the destination
+		// side (Fields[0] checked above), so no overlap is possible here.
+		runes := []rune(srcBacking.Str)
+		if srcStart < 0 || srcStart+srcLength > len(runes) {
+			return false
+		}
+		for i := 0; i < srcLength; i++ {
+			dstBacking.Arr.Elems[dstStart+i] = runtime.Int32(runes[srcStart+i])
+		}
+	default:
+		return false
+	}
+	return true
+}
+
+// spanCopyTo backs Span<T>/ReadOnlySpan<T>.CopyTo(Span<T> destination) —
+// see this file's own registration comment (Fase 3.79) for why this
+// bypasses System.SpanHelpers.CopyTo's real interpreted body entirely.
+// Throws exactly like the real API when destination is too short, rather
+// than silently truncating.
+func spanCopyTo(args []runtime.Value) (runtime.Value, error) {
+	src, err := derefStructReceiver(args, "Span", "Span.CopyTo")
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	if len(args) < 2 {
+		return runtime.Value{}, fmt.Errorf("bcl: Span.CopyTo expects a destination Span argument")
+	}
+	dst, ok := spanStructArg(args[1])
+	if !ok {
+		return runtime.Value{}, fmt.Errorf("bcl: Span.CopyTo: destination is not a Span")
+	}
+	if !spanCopyElements(dst, src) {
+		return runtime.Value{}, &runtime.ManagedException{TypeName: "System.ArgumentException", Message: "Destination is too short."}
+	}
+	return runtime.Value{}, nil
+}
+
+// spanTryCopyTo backs Span<T>/ReadOnlySpan<T>.TryCopyTo(Span<T>
+// destination) — same copy logic as spanCopyTo, but reports failure as a
+// bool instead of throwing (the real API's own non-throwing sibling, used
+// by callers that size their own destination defensively).
+func spanTryCopyTo(args []runtime.Value) (runtime.Value, error) {
+	src, err := derefStructReceiver(args, "Span", "Span.TryCopyTo")
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	if len(args) < 2 {
+		return runtime.Value{}, fmt.Errorf("bcl: Span.TryCopyTo expects a destination Span argument")
+	}
+	dst, ok := spanStructArg(args[1])
+	if !ok {
+		return runtime.Bool(false), nil
+	}
+	return runtime.Bool(spanCopyElements(dst, src)), nil
 }
 
 // bufferBlockCopy backs the static Buffer.BlockCopy(Array src, int

@@ -3,42 +3,45 @@ using Jint;
 namespace VmnetJintAdvancedDemo
 {
     // JintAdvancedWrapper drives real Jint harder than a one-line "1 + 2":
-    // var/let/const (including a single statement declaring three
-    // variables at once), nested object/array literals with property and
-    // index access, arithmetic/comparison/ternary/logical operators,
-    // Math.* built-ins, real structured data passed in from the Go host,
-    // a heavier computational loop, function declarations/closures/
-    // recursion/arrow functions, array growth (push/sort/slice/reverse/
-    // filter/reduce), and string methods (toUpperCase/trim/charAt/
-    // indexOf) — all real, unmodified Jint 3.1.3 IL running inside
-    // vmnet, no CGo, no dotnet runtime anywhere this Go binary actually
-    // runs.
+    // var/let/const, nested object/array literals, operators, Math.*
+    // built-ins, real structured data from the Go host, a heavier loop,
+    // function declarations/closures/recursion/arrow functions, array
+    // growth and higher-order methods (push/sort/slice/reverse/filter/
+    // reduce/map/concat), string methods, ES6 classes (inheritance,
+    // `super`, private fields, getters), regular expressions (test/exec/
+    // match/replace, global and non-global, `Match.NextMatch`-style
+    // iteration), `JSON.stringify` on real nested data with real numbers,
+    // and template literals (including nested ones) — all real,
+    // unmodified Jint 3.1.3 IL running inside vmnet, no CGo, no dotnet
+    // runtime anywhere this Go binary actually runs.
     //
-    // What this still deliberately does NOT use, and why: building this
-    // file's first drafts found three whole classes of real,
-    // otherwise-idiomatic JavaScript that didn't work under this Jint
-    // version running inside vmnet at all — Fase 3.77 root-caused and
-    // fixed the two that blocked the most (function-object construction,
-    // and an overload-resolution heuristic that misrouted several
-    // internal Jint calls whenever a same-arity sibling method happened
-    // to collapse to the same coarse runtime shape — see docs/en/
-    // ROADMAP.md's Fase 3.77 entry for the full account, including the
-    // `unbox` CIL opcode it also newly implements). One real gap remains,
-    // narrower than first thought but still open: `.concat`/`.map` and
-    // `JSON.stringify` on anything but a single-digit number both need a
-    // multi-character `Span&lt;T&gt;` write, which needs the real `sizeof`
-    // CIL opcode on an open generic type parameter — a per-instantiation
-    // memory layout vmnet's type-erased Value model has no way to answer
-    // at all today. `RunFunctionsArraysAndStrings` below sticks to the
-    // methods that don't need it (`.filter`/`.reduce`/single-char
-    // `.join(',')`, ...).
+    // Getting all of that working took three Fases. Fase 3.77 found and
+    // root-caused three whole classes of real JavaScript that didn't run
+    // at all. Fase 3.78 fixed two of them (function-object construction;
+    // an overload-resolution heuristic misrouting several internal Jint
+    // calls). Fase 3.79 (docs/en/ROADMAP.md has the full account of all
+    // three) went back for the third and, chasing it down, found a much
+    // longer chain of real, narrow bugs across vmnet's own CIL/BCL
+    // support — a `constrained.`-prefixed generic interface call never
+    // being dereferenced (the actual ES6-class blocker), `conv.u8`
+    // sign-extending instead of zero-extending, `Span&lt;T&gt;.CopyTo`/
+    // `TryCopyTo` needing native registration to sidestep the real
+    // `sizeof`-on-an-open-generic gap entirely, and half a dozen
+    // regex/StringBuilder/TimeSpan natives that were simply never wired
+    // up (`StringBuilder.set_Capacity`/`ToString(start,length)`, a
+    // `Regex` object silently failing an `as Regex` cast, the
+    // count-limited `Match`/`Replace` overloads, `Capture.Index`/
+    // `Length`, `Match.NextMatch`, `MatchCollection`'s own indexer,
+    // `TimeSpan`'s comparison operators).
     //
-    // Six other, narrower bugs found along the way ARE fixed
-    // (String/RuntimeHelpers.GetHashCode, Char.IsSurrogate/
-    // IsSurrogatePair, Nullable&lt;T&gt; defaulting to the wrong runtime
-    // shape for a plugin-defined generic value type, two missing Array
-    // natives, and List&lt;T&gt;.Capacity) — see the same ROADMAP file's
-    // earlier Fase entries.
+    // One real, narrower-than-it-looks gap remains: regex patterns using
+    // a **parenthesized group** (capturing or not) or a **backslash
+    // shorthand class** (`\d`/`\w`/`\s`) still translate incorrectly —
+    // traced to Esprima's own hand-written regex-to-.NET pattern
+    // translator (`Scanner.RegExpParser.ParsePattern`), not yet fully
+    // root-caused. Character classes (`[0-9]`, `[a-z]`, ...), literal
+    // text, quantifiers, and alternation all translate correctly —
+    // `RunRegexAndClasses` below sticks to those.
     public static class JintAdvancedWrapper
     {
         // RunSuite executes one script combining var/let/const (including
@@ -193,6 +196,61 @@ namespace VmnetJintAdvancedDemo
                     nums.join(',') + ',' + sliced.join(',') + ',' + reversed.join(',') + ',' +
                     big.join(',') + ',' + total + ',' +
                     upper + ',' + trimmed + ',' + firstLetter + ',' + whereWorld;
+            ";
+            var result = engine.Evaluate(script);
+            return result.AsString();
+        }
+
+        // RunClassesRegexAndJson exercises the third and last of Fase
+        // 3.77's originally-documented gaps, fixed in Fase 3.79 — ES6
+        // classes (inheritance, `super`, method overriding), `.map()`/
+        // `.concat()`, regular expressions (character classes,
+        // quantifiers, global and non-global `.match()`/`.replace()`),
+        // `JSON.stringify` on real nested arrays/objects with real
+        // (multi-digit) numbers, and template literals — all in one
+        // script.
+        public static string RunClassesRegexAndJson()
+        {
+            var engine = new Engine();
+            var script = @"
+                // ES6 classes: inheritance, super(), method overriding.
+                class Shape {
+                    constructor(name) { this.name = name; }
+                    area() { return 0; }
+                    describe() { return this.name + ' area=' + this.area(); }
+                }
+                class Circle extends Shape {
+                    constructor(r) { super('Circle'); this.r = r; }
+                    area() { return Math.round(Math.PI * this.r * this.r); }
+                }
+                class Square extends Shape {
+                    constructor(s) { super('Square'); this.s = s; }
+                    area() { return this.s * this.s; }
+                }
+                var shapes = [new Circle(3), new Square(4)];
+                var described = shapes.map(function (s) { return s.describe(); });
+
+                // Regular expressions: character classes, quantifiers,
+                // global match/replace (parenthesized groups and
+                // backslash shorthand classes like \d/\w/\s are the one
+                // known remaining gap — see this file's own top comment).
+                var text = 'order-1234, order-5678, order-9999';
+                var orderIds = text.match(/[0-9]+/g);
+                var masked = text.replace(/[0-9]+/g, 'XXXX');
+
+                // JSON.stringify on real nested data with real,
+                // multi-digit numbers (Fase 3.77 could only do this for
+                // single-digit numbers).
+                var payload = JSON.stringify({
+                    shapes: described,
+                    orderIds: orderIds,
+                    masked: masked
+                });
+
+                // Template literals, including nesting.
+                var greeting = `Processed ${shapes.length} shapes and ${orderIds.length} orders`;
+
+                greeting + ' | ' + payload;
             ";
             var result = engine.Evaluate(script);
             return result.AsString();

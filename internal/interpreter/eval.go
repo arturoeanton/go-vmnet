@@ -553,6 +553,66 @@ func (m *Machine) runFrame(frame *Frame, method *runtime.Method, depth int, inst
 			callArgs := append([]runtime.Value(nil), frame.Stack[len(frame.Stack)-total:]...)
 			frame.Stack = frame.Stack[:len(frame.Stack)-total]
 
+			// A `constrained. !!T` prefix (spec §III.2.1) ahead of a
+			// callvirt on an open generic method's own `T`-typed
+			// parameter always loads that parameter's ADDRESS (ldarga),
+			// not its value — the one shape that works uniformly whether
+			// T turns out to be a value type (needing a box) or a
+			// reference type (needing a plain dereference) at any given
+			// closed instantiation. vmnet drops the `constrained.`
+			// prefix entirely at IR-build time (ir/builder.go's own
+			// comment: harmless when the receiver's real Kind already
+			// carries enough information for dispatch) — true for a
+			// value-typed receiver (already a KindRef to a KindStruct,
+			// which the interface/virtual dispatch below already
+			// handles directly), but not for THIS case: when T closes
+			// over a REFERENCE type, the receiver arrives here as a
+			// KindRef to a KindObject/KindArray/KindString/... slot,
+			// never dereferenced, and every method this call resolves to
+			// expects a plain receiver value, not a pointer to one.
+			// Found running real Jint/Esprima's own ES6 class support:
+			// Jint.AstExtensions.GetKey<T>(this T property, Engine
+			// engine) where T : IProperty does `((IProperty)property).
+			// Key` — a constrained interface callvirt on a still-open
+			// generic parameter — corrupting every class body with at
+			// least one member into a `NullReferenceException:
+			// dereferencing a null managed pointer
+			// (Esprima.Ast.ClassProperty.<Key>k__BackingField)` the
+			// moment get_Key's own body tried to read its "this" as a
+			// plain object instead of the address the (discarded)
+			// constrained. prefix should have already resolved.
+			// Auto-dereferencing HasThis's own receiver here — not just
+			// for a `constrained.`-prefixed call, which vmnet's IR
+			// doesn't track at all post-Nop, but for ANY call whose
+			// receiver happens to be a KindRef to a non-struct — is safe
+			// generally: a real reference-typed receiver is NEVER
+			// legitimately passed as a raw KindRef by any other call
+			// shape (a struct instance method's own byref `this` is the
+			// only real producer of a KindRef receiver, and that case is
+			// excluded below since its target IS a KindStruct).
+			//
+			// KindNull must ALSO stay excluded, alongside KindStruct: a
+			// `ldloca`/`ldarga` + `call instance .ctor` in-place
+			// construction (e.g. `new KeyValuePair<T,U>(k, v)` assigned
+			// straight to a local, internal/bcl's own registerValueTypeCtor
+			// convention) targets a local/arg slot whose CURRENT value is
+			// its type's zero default — which is Null(), not yet a real
+			// KindStruct, whenever that default couldn't be resolved at
+			// all (an unresolvable still-open generic value-type default,
+			// assembly.go's fieldOrLocalDefault — the same limitation
+			// ClosedXML's own font-metrics engine already hits). Treating
+			// that slot's ref as "obviously a reference type, dereference
+			// it" would silently replace the pointer the in-place
+			// constructor needs with the very Null() it's about to
+			// overwrite, breaking every such constructor call outright
+			// (found immediately via this project's own regression suite,
+			// TestCheapWins3/KeyValuePairCtorTest, the moment this fix was
+			// first tried without this exclusion).
+			if in.HasThis && len(callArgs) > 0 && callArgs[0].Kind == runtime.KindRef && callArgs[0].Ref != nil &&
+				callArgs[0].Ref.Kind != runtime.KindStruct && callArgs[0].Ref.Kind != runtime.KindNull {
+				callArgs[0] = *callArgs[0].Ref
+			}
+
 			if in.Virtual && callArgs[0].Kind == runtime.KindNull {
 				return runtime.Value{}, &runtime.ManagedException{
 					TypeName: "System.NullReferenceException",

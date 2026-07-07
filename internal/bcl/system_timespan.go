@@ -65,6 +65,23 @@ func init() {
 	register("System.TimeSpan::get_TotalMinutes", true, timeSpanTotalField(ticksPerMinute))
 	register("System.TimeSpan::get_TotalSeconds", true, timeSpanTotalField(ticksPerSecond))
 	register("System.TimeSpan::get_TotalMilliseconds", true, timeSpanTotalField(ticksPerMillisecond))
+
+	// Comparison operators (Fase 3.79) — TimeSpan has no real TypeDef
+	// anywhere (a synthetic vmnet value type, this file's own doc
+	// comment), so real IL comparing two TimeSpan values with `==`/`!=`/
+	// `<`/`>`/... has no interpreted body to fall back to at all; every
+	// one needs an explicit native like this, the same way every other
+	// member here already does. Found running real Jint/Esprima:
+	// System.Text.RegularExpressions.Regex's own MatchTimeout property
+	// (a TimeSpan) gets compared with `==` somewhere in its own real,
+	// interpreted static initialization/validation path.
+	register("System.TimeSpan::op_Equality", true, timeSpanCompareOp(func(a, b int64) bool { return a == b }))
+	register("System.TimeSpan::op_Inequality", true, timeSpanCompareOp(func(a, b int64) bool { return a != b }))
+	register("System.TimeSpan::op_GreaterThan", true, timeSpanCompareOp(func(a, b int64) bool { return a > b }))
+	register("System.TimeSpan::op_GreaterThanOrEqual", true, timeSpanCompareOp(func(a, b int64) bool { return a >= b }))
+	register("System.TimeSpan::op_LessThan", true, timeSpanCompareOp(func(a, b int64) bool { return a < b }))
+	register("System.TimeSpan::op_LessThanOrEqual", true, timeSpanCompareOp(func(a, b int64) bool { return a <= b }))
+	register("System.TimeSpan::CompareTo", true, timeSpanCompareTo)
 }
 
 // timeSpanCtor covers (ticks), (hours,minutes,seconds), (days,hours,
@@ -173,5 +190,57 @@ func timeSpanTotalField(ticksPerUnit int64) Native {
 			return runtime.Value{}, err
 		}
 		return runtime.Float64(float64(ticks) / float64(ticksPerUnit)), nil
+	}
+}
+
+// asTwoTimeSpanTicks extracts both operands' own ticks — works uniformly
+// for a static operator's own two positional (t1, t2) arguments and an
+// instance method's (this, other) shape alike, since both are just "the
+// first two arguments" here (Fase 3.79).
+func asTwoTimeSpanTicks(args []runtime.Value) (a, b int64, err error) {
+	sa, err := derefStructReceiver(args, "TimeSpan", "TimeSpan comparison")
+	if err != nil {
+		return 0, 0, err
+	}
+	if len(args) < 2 {
+		return 0, 0, fmt.Errorf("bcl: TimeSpan comparison expects two operands")
+	}
+	sb, err := derefStructReceiver(args[1:], "TimeSpan", "TimeSpan comparison")
+	if err != nil {
+		return 0, 0, err
+	}
+	return sa.Fields[0].I8, sb.Fields[0].I8, nil
+}
+
+// timeSpanCompareOp backs every TimeSpan comparison operator (op_Equality/
+// op_Inequality/op_GreaterThan/.../Equals) — see this native's own
+// register() call site doc comment for why none of them has a real
+// interpreted body to fall back to at all.
+func timeSpanCompareOp(cmp func(a, b int64) bool) Native {
+	return func(args []runtime.Value) (runtime.Value, error) {
+		a, b, err := asTwoTimeSpanTicks(args)
+		if err != nil {
+			return runtime.Value{}, err
+		}
+		return runtime.Bool(cmp(a, b)), nil
+	}
+}
+
+// timeSpanCompareTo backs TimeSpan.CompareTo(TimeSpan) — real .NET
+// returns -1/0/1 (via Comparer<long>.Default.Compare's own ticks
+// comparison), not a raw difference (which would silently overflow
+// int32 for a large enough tick delta).
+func timeSpanCompareTo(args []runtime.Value) (runtime.Value, error) {
+	a, b, err := asTwoTimeSpanTicks(args)
+	if err != nil {
+		return runtime.Value{}, err
+	}
+	switch {
+	case a < b:
+		return runtime.Int32(-1), nil
+	case a > b:
+		return runtime.Int32(1), nil
+	default:
+		return runtime.Int32(0), nil
 	}
 }

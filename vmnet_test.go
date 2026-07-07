@@ -2533,6 +2533,205 @@ func TestUnboxOpcode_FieldOffBoxedStruct(t *testing.T) {
 	}
 }
 
+// TestSpanCopyTo_ArrayBacked regresses Fase 3.79: Span<T>/ReadOnlySpan<T>
+// .CopyTo/TryCopyTo (internal/bcl/system_span.go) must be natively
+// registered rather than falling through to System.SpanHelpers.CopyTo's
+// real interpreted body, which needs a `sizeof` opcode on a still-open
+// generic type parameter vmnet never implemented — see tests/fixtures/
+// csharp/SpanCopyToTest.cs's own doc comment for the real Jint
+// ValueStringBuilder bug this mirrors (blocking .concat()/.map()/
+// JSON.stringify/template literals).
+func TestSpanCopyTo_ArrayBacked(t *testing.T) {
+	asm := loadFixture(t)
+
+	out, err := asm.Call("Vmnet.Fixtures.SpanCopyToTest", "Run")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got := out.Native().(string); got != "hi!" {
+		t.Errorf("Run() = %q, want %q", got, "hi!")
+	}
+
+	// bool results come back as int32 (0/1) — vmnet's Value.Native()
+	// doesn't distinguish a real bool from a plain int32 result, the
+	// same documented box/unbox identity-erasure limitation
+	// docs/en/supported-il.md already covers; every other bool-returning
+	// fixture call in this file follows the same convention.
+	tooShort, err := asm.Call("Vmnet.Fixtures.SpanCopyToTest", "TryRunTooShort")
+	if err != nil {
+		t.Fatalf("TryRunTooShort() error = %v", err)
+	}
+	if got := tooShort.Native().(int32); got != 0 {
+		t.Errorf("TryRunTooShort() = %d, want 0 (false)", got)
+	}
+
+	fits, err := asm.Call("Vmnet.Fixtures.SpanCopyToTest", "TryRunFits")
+	if err != nil {
+		t.Fatalf("TryRunFits() error = %v", err)
+	}
+	if got := fits.Native().(int32); got != 1 {
+		t.Errorf("TryRunFits() = %d, want 1 (true)", got)
+	}
+}
+
+// TestConvU8_ZeroExtendsRatherThanSignExtends regresses Fase 3.79:
+// evalConv's plain `conv.u8` (internal/interpreter/arithmetic.go) must
+// zero-extend a narrower value's own bit pattern rather than
+// sign-extending its signed numeric value — see tests/fixtures/csharp/
+// ConvU8Test.cs's own doc comment for the real Jint String.prototype.
+// split bug this mirrors (every split() call with no explicit limit
+// argument returned an array of length -1).
+func TestConvU8_ZeroExtendsRatherThanSignExtends(t *testing.T) {
+	asm := loadFixture(t)
+
+	out, err := asm.Call("Vmnet.Fixtures.ConvU8Test", "MinOfCountAndMaxUintWidened", Int64(3))
+	if err != nil {
+		t.Fatalf("MinOfCountAndMaxUintWidened(3) error = %v", err)
+	}
+	if got := out.Native().(int64); got != 3 {
+		t.Errorf("MinOfCountAndMaxUintWidened(3) = %d, want 3 (uint.MaxValue widened to ulong must not sign-extend to -1)", got)
+	}
+}
+
+// TestConstrainedGenericCall_DereferencesReferenceTypedReceiver regresses
+// Fase 3.79: ir.Call must dereference a KindRef receiver produced by a
+// `constrained. !!T` + `callvirt` sequence (dropped as a Nop at IR-build
+// time) when T closes over a reference type — see tests/fixtures/csharp/
+// ConstrainedGenericTest.cs's own doc comment for the real Jint/Esprima
+// ES6-class bug this mirrors (Jint.AstExtensions.GetKey<T>).
+func TestConstrainedGenericCall_DereferencesReferenceTypedReceiver(t *testing.T) {
+	asm := loadFixture(t)
+
+	out, err := asm.Call("Vmnet.Fixtures.ConstrainedGenericTest", "Run")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got := out.Native().(string); got != "Rex" {
+		t.Errorf("Run() = %q, want %q", got, "Rex")
+	}
+}
+
+// TestStringBuilderSetCapacity regresses Fase 3.79: StringBuilder.
+// set_Capacity must be natively registered (internal/bcl/
+// system_stringbuilder.go) — see tests/fixtures/csharp/
+// StringBuilderCapacityTest.cs's own doc comment for the real Jint/
+// Esprima regex-scanner bug this mirrors.
+func TestStringBuilderSetCapacity(t *testing.T) {
+	asm := loadFixture(t)
+
+	out, err := asm.Call("Vmnet.Fixtures.StringBuilderCapacityTest", "Run")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got := out.Native().(string); got != "hi!" {
+		t.Errorf("Run() = %q, want %q", got, "hi!")
+	}
+}
+
+// TestStringBuilderSubstringToString regresses Fase 3.79: StringBuilder.
+// ToString(int startIndex, int length) must return the real substring,
+// not the whole buffer — see tests/fixtures/csharp/
+// StringBuilderCapacityTest.cs's own doc comment for the real Jint/
+// Esprima regex-literal-delimiter-stripping bug this mirrors.
+func TestStringBuilderSubstringToString(t *testing.T) {
+	asm := loadFixture(t)
+
+	out, err := asm.Call("Vmnet.Fixtures.StringBuilderSubstringTest", "Run")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got := out.Native().(string); got != "pattern" {
+		t.Errorf("Run() = %q, want %q", got, "pattern")
+	}
+}
+
+// TestRegexFeatures covers Fase 3.79's chain of real regex-support
+// fixes: the nativeRegex isinst/NativeTypeName registration (an "as
+// Regex" cast used to silently discard a real, just-constructed Regex),
+// the count-limited Match/Replace overloads, Capture.Index/Length, and
+// Match.NextMatch() — see tests/fixtures/csharp/RegexFeaturesTest.cs's
+// own doc comment for the real Jint/Esprima bugs each one mirrors.
+func TestRegexFeatures(t *testing.T) {
+	asm := loadFixture(t)
+
+	t.Run("cast back from object", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.RegexFeaturesTest", "CastBackFromObject")
+		if err != nil {
+			t.Fatalf("CastBackFromObject() error = %v", err)
+		}
+		if got := out.Native().(int32); got != 1 {
+			t.Errorf("CastBackFromObject() = %d, want 1 (true)", got)
+		}
+	})
+
+	t.Run("match with beginning", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.RegexFeaturesTest", "MatchWithBeginning")
+		if err != nil {
+			t.Fatalf("MatchWithBeginning() error = %v", err)
+		}
+		if got := out.Native().(string); got != "22" {
+			t.Errorf("MatchWithBeginning() = %q, want %q", got, "22")
+		}
+	})
+
+	t.Run("match index and length", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.RegexFeaturesTest", "MatchIndexAndLength")
+		if err != nil {
+			t.Fatalf("MatchIndexAndLength() error = %v", err)
+		}
+		if got := out.Native().(string); got != "2,3" {
+			t.Errorf("MatchIndexAndLength() = %q, want %q", got, "2,3")
+		}
+	})
+
+	t.Run("replace first only", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.RegexFeaturesTest", "ReplaceFirstOnly")
+		if err != nil {
+			t.Fatalf("ReplaceFirstOnly() error = %v", err)
+		}
+		if got := out.Native().(string); got != "aXb2c3" {
+			t.Errorf("ReplaceFirstOnly() = %q, want %q", got, "aXb2c3")
+		}
+	})
+
+	t.Run("walk all matches", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.RegexFeaturesTest", "WalkAllMatches")
+		if err != nil {
+			t.Fatalf("WalkAllMatches() error = %v", err)
+		}
+		if got := out.Native().(string); got != "1,22,333" {
+			t.Errorf("WalkAllMatches() = %q, want %q", got, "1,22,333")
+		}
+	})
+
+	t.Run("index into match collection", func(t *testing.T) {
+		out, err := asm.Call("Vmnet.Fixtures.RegexFeaturesTest", "IndexIntoMatchCollection")
+		if err != nil {
+			t.Fatalf("IndexIntoMatchCollection() error = %v", err)
+		}
+		if got := out.Native().(string); got != "1,22,333" {
+			t.Errorf("IndexIntoMatchCollection() = %q, want %q", got, "1,22,333")
+		}
+	})
+}
+
+// TestTimeSpanComparisonOperators regresses Fase 3.79: TimeSpan's own
+// comparison operators (op_Equality/op_Inequality/op_GreaterThan/.../
+// CompareTo) must be natively registered — see tests/fixtures/csharp/
+// TimeSpanComparisonTest.cs's own doc comment for the real Jint/Esprima
+// Regex.MatchTimeout bug this mirrors.
+func TestTimeSpanComparisonOperators(t *testing.T) {
+	asm := loadFixture(t)
+
+	out, err := asm.Call("Vmnet.Fixtures.TimeSpanComparisonTest", "Run")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got := out.Native().(string); got != "True,True,True,True,True,True,-1" {
+		t.Errorf("Run() = %q, want %q", got, "True,True,True,True,True,True,-1")
+	}
+}
+
 // TestCustomAttributes covers Fase 3.63's new real System.Reflection.
 // CustomAttributeData/CustomAttributeExtensions.GetCustomAttribute<T>
 // subsystem — see tests/fixtures/csharp/CustomAttributeTest.cs's own doc

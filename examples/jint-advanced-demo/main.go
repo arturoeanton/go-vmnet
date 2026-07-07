@@ -1,22 +1,21 @@
 // Command jint-advanced-demo pushes the real, unmodified Jint 3.1.3
 // engine (the same package examples/jint-demo/jint-nowrapper use) harder
-// than a one-line "1 + 2": var/let/const (including a single statement
-// declaring three variables at once), nested object/array literals with
-// property and index access, arithmetic/comparison/ternary/logical
-// operators, Math.* built-ins, real structured data passed in from the
-// Go host, a heavier computational loop, function declarations/closures/
-// recursion/arrow functions, array growth (push/sort/slice/reverse/
-// filter/reduce), and string methods (toUpperCase/trim/charAt/indexOf)
-// — all running as real, unmodified Jint IL inside vmnet, with no CGo
-// and no dotnet runtime installed anywhere this Go binary actually runs.
+// than a one-line "1 + 2": var/let/const, nested object/array literals,
+// operators, Math.* built-ins, real structured data from the Go host, a
+// heavier loop, function declarations/closures/recursion/arrow functions,
+// array growth and higher-order methods (push/sort/slice/reverse/filter/
+// reduce/map/concat), string methods, ES6 classes (inheritance, super),
+// regular expressions, JSON.stringify on real nested data with real
+// numbers, and template literals — all running as real, unmodified Jint
+// IL inside vmnet, with no CGo and no dotnet runtime installed anywhere
+// this Go binary actually runs.
 //
-// One real gap remains open: `.concat`/`.map` and `JSON.stringify` on
-// anything but a single-digit number still need a multi-character
-// `Span[T]` write, which needs the real `sizeof` CIL opcode on an open
-// generic type parameter — a genuinely deep gap, not a narrow miss. See
-// docs/en/ROADMAP.md's Fase 3.77 entry for the full account of what got
-// fixed to make everything else above work, and this directory's own
-// README for what's still open.
+// One real, narrower-than-it-first-looked gap remains open: regex
+// patterns using a parenthesized group or a backslash shorthand class
+// (\d/\w/\s) still translate incorrectly; character classes, literal
+// text, quantifiers, and alternation all work. See docs/en/ROADMAP.md's
+// Fase 3.79 entry for the full account of everything fixed to get here,
+// and this directory's own README for what's still open.
 package main
 
 import (
@@ -99,4 +98,14 @@ func main() {
 		log.Fatalf("RunFunctionsArraysAndStrings: %v", err)
 	}
 	fmt.Println("RunFunctionsArraysAndStrings() =", features.Native())
+
+	// ES6 classes, .map()/.concat(), regular expressions, JSON.stringify
+	// on real nested data with real numbers, and template literals — the
+	// third of Fase 3.77's originally-documented gaps, fixed in Fase
+	// 3.79 (see docs/en/ROADMAP.md).
+	classesRegexJSON, err := wrapperAsm.Call("VmnetJintAdvancedDemo.JintAdvancedWrapper", "RunClassesRegexAndJson")
+	if err != nil {
+		log.Fatalf("RunClassesRegexAndJson: %v", err)
+	}
+	fmt.Println("RunClassesRegexAndJson() =", classesRegexJSON.Native())
 }
